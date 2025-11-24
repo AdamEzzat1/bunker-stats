@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "bunker-stats"
+version = "0.1.0"
+description = "Rust-powered statistical and styling toolkit for pandas DataFrames"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.22",
+    "pandas>=1.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourname/bunker-stats"
+Repository = "https://github.com/yourname/bunker-stats"
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "bunker_stats_rs"
+python-packages = ["bunker_stats"]
