@@ -1,5 +1,5 @@
 [package]
-name = "bunker_stats_rs"
+name = "bunker-stats-rs"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,5 +8,20 @@ name = "bunker_stats_rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.21", features = ["extension-module"] }
-numpy = "0.21"
+pyo3 = { version = "0.22", features = ["extension-module"] }
+numpy = { version = "0.22" }
+
+# Rayon available for later parallel speedups, but off by default
+rayon = { version = "1.10", optional = true }
+
+[features]
+default = []
+parallel = ["rayon"]   # enable this if you later add Rayon-based parallel loops
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
