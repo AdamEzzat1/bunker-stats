@@ -1,5 +1,0 @@
-C:\Users\adame\bunker-stats\target\debug\deps\bunker_stats_rs.d: src\lib.rs
-
-C:\Users\adame\bunker-stats\target\debug\deps\bunker_stats_rs.dll: src\lib.rs
-
-src\lib.rs:

@@ -1,0 +1,1 @@
+{"rustc":2490638836439573635,"features":"[]","declared_features":"[]","target":15796751668680979503,"profile":11856702683587007857,"path":475607592975126565,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"release\\.fingerprint\\unindent-bb30175671a1b0e1\\dep-lib-unindent","checksum":false}}],"rustflags":["-C","target-cpu=native"],"config":2069994364910194474,"compile_kind":0}
