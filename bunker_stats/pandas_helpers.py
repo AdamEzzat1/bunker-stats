@@ -103,15 +103,13 @@ def iqr_outlier_style(
     col = df[column].to_numpy(dtype="float64")
     mask = np.asarray(bunker_stats_rs.iqr_outliers_np(col, float(k)))
 
-    out = df.copy()
-
     def _style(series: pd.Series, mask_: np.ndarray):
         styles = []
         for is_out in mask_:
             styles.append(f"background-color: {outlier_color}" if is_out else normal_color)
         return styles
 
-    styler = out.style.apply(_style, axis=0, subset=[column], mask_=mask)
+    styler = df.style.apply(_style, axis=0, subset=[column], mask_=mask)
     return styler
 
 
