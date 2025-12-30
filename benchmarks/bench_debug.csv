@@ -1,0 +1,424 @@
+fn,status,median_s,mean_s,cv,error,stderr_tail,stdout_tail,code_head,code_path
+mean_np,ok,0.0008038000087253749,0.0007750999939162284,0.12351025745494604,,,,,
+std_np,ok,0.0017867999849840999,0.0018594666714003931,0.12316225386232847,,,,,
+var_np,ok,0.0017027999856509268,0.0017064999944219987,0.014508183632475425,,,,,
+zscore_np,ok,0.0035041999944951385,0.0036630333246042333,0.10649801666622737,,,,,
+percentile_np,ok,0.024900699994759634,0.027522066666278988,0.3620229971507567,,,,,
+iqr_np,ok,0.012538100010715425,0.015155099992019435,0.40963040635694353,,,,,
+iqr_width_np,ok,0.027324600028805435,0.028228733339346945,0.05636450642150271,,,,,
+mad_np,ok,0.03241019998677075,0.032579000001229964,0.010634207769357458,,,,,
+skew_np,ok,0.003238299977965653,0.0029588666511699557,0.2725424104435458,,,,,
+kurtosis_np,ok,0.0035271999950055033,0.004740699999577676,0.4628789632662923,,,,,
+trimmed_mean_np,ok,0.027223900018725544,0.02829960001205715,0.0902884799105857,,,,,
+mean_nan_np,ok,0.0008532999781891704,0.0011307333285609882,0.450949752131301,,,,,
+std_nan_np,ok,0.0038681000005453825,0.003725133341504261,0.19126569775937896,,,,,
+var_nan_np,ok,0.0038785000215284526,0.004066633351612836,0.09333248681255354,,,,,
+mean_axis_np,ok,0.5872095999948215,0.5896305666634968,0.02488241293129126,,,,,
+mean_over_last_axis_dyn_np,ok,0.0022712000063620508,0.0022420000071482113,0.05164807875456006,,,,,
+rolling_mean_np,ok,0.005875200004084036,0.0060274333324438585,0.10700545888811323,,,,,
+rolling_std_np,ok,0.00696060000336729,0.007037500006845221,0.13351518315258484,,,,,
+rolling_var_np,ok,0.008091300027444959,0.007700500000889103,0.13024217399016283,,,,,
+rolling_mean_std_np,ok,0.00655610000831075,0.006465433340054005,0.08591497803392335,,,,,
+rolling_zscore_np,ok,0.006052300013834611,0.0057428333384450525,0.10417945333059013,,,,,
+ewma_np,ok,0.0028437000000849366,0.0028680666679671654,0.02704793346923841,,,,,
+rolling_mean_axis0_np,ok,8.28032489999896,8.693480333332749,0.14400674819608406,,,,,
+rolling_std_axis0_np,ok,9.467792399984319,9.303387366671814,0.046372155006923474,,,,,
+rolling_mean_std_axis0_np,ok,9.11541890000808,9.372016433335375,0.07748984404530601,,,,,
+rolling_mean_nan_np,ok,0.0012470000074245036,0.0012450333354839434,0.07442824489502439,,,,,
+rolling_std_nan_np,ok,0.0013442999916151166,0.0013931999953153233,0.08920993249919436,,,,,
+rolling_zscore_nan_np,ok,0.002168500010157004,0.002137533340525503,0.056908126500915125,,,,,
+welford_np,ok,0.0023181000142358243,0.002051666670013219,0.22611034857553686,,,,,
+sign_mask_np,ok,5.080000846646726e-05,7.050000325155754e-05,0.5503820176939911,,,,,
+demean_with_signs_np,ok,0.001418200001353398,0.0013342666594932477,0.18142632097251407,,,,,
+iqr_outliers_np,ok,0.007304699975065887,0.00726183332153596,0.12556829111612916,,,,,
+zscore_outliers_np,ok,0.0009108000085689127,0.0009607333340682089,0.09173995997279873,,,,,
+minmax_scale_np,ok,0.0006355000077746809,0.0006121666713928183,0.08207363848879438,,,,,
+robust_scale_np,ok,0.01573610000195913,0.016104200001185138,0.05689767296944265,,,,,
+winsorize_np,ok,0.014535099995555356,0.014360466671253866,0.08317717920410721,,,,,
+quantile_bins_np,ok,0.012268699996639043,0.012333300003471473,0.014126510912721777,,,,,
+diff_np,ok,0.0005634000117424875,0.0005600333388429135,0.028601152500365542,,,,,
+pct_change_np,ok,0.00067559999297373,0.0006670666625723243,0.17080739374673146,,,,,
+cumsum_np,ok,0.0006678999925497919,0.0006376333379497131,0.14655959653140715,,,,,
+cummean_np,ok,0.0004941999795846641,0.0004996999923605472,0.03082826141831254,,,,,
+ecdf_np,ok,0.010902600013650954,0.010525866663859537,0.2014419774826413,,,,,
+cov_np,ok,0.0006637999904341996,0.0006723999880099049,0.08696642753209946,,,,,
+corr_np,ok,0.0012131000112276524,0.0012468666730759044,0.07266144344617462,,,,,
+cov_matrix_np,ok,0.697325599991018,0.8261698999946626,0.30587874187012976,,,,,
+corr_matrix_np,ok,0.7359953999985009,0.7566080333296364,0.11029269044838785,,,,,
+rolling_cov_np,ok,0.0009894999966491014,0.0009720666663876424,0.18782178555100568,,,,,
+rolling_corr_np,ok,0.0019582000095397234,0.0019700333359651268,0.03367772537293423,,,,,
+cov_nan_np,ok,0.0006799999973736703,0.0006718000028437624,0.037113279389750765,,,,,
+corr_nan_np,ok,0.0007405999931506813,0.0007548999953238914,0.12474219183648576,,,,,
+rolling_cov_nan_np,ok,0.034553400008007884,0.03214256667221586,0.1525757299113939,,,,,
+rolling_corr_nan_np,ok,0.03455219999887049,0.03359916666522622,0.05063938592991122,,,,,
+kde_gaussian_np,ok,0.7188998000056017,0.7381965666718315,0.09098338362365435,,,,,
+t_test_1samp_np,ok,0.00043590000132098794,0.00043833333378036815,0.01986801573201998,,,,,
+t_test_2samp_np,ok,0.0013017000164836645,0.001326466677710414,0.0538615270990997,,,,,
+chi2_gof_np,ok,2.800021320581436e-06,4.233355866745114e-06,0.6277990239445252,,,,,
+chi2_independence_np,ok,2.9999937396496534e-06,3.833333418394129e-06,0.518034228994722,,,,,
+cohens_d_2samp_np,ok,0.0008661000174470246,0.0008731333364266902,0.016806017785100043,,,,,
+hedges_g_2samp_np,ok,0.0015622999926563352,0.001698266666304941,0.3458666195788541,,,,,
+mean_diff_ci_np,ok,0.00044999999227002263,0.00044486665865406394,0.020572981512240865,,,,,
+mann_whitney_u_np,bs_error,,,,NotImplementedError('mann_whitney_u_np not implemented yet (Pillar C step 3)'),,"{""status"": ""bs_error"", ""error"": ""NotImplementedError('mann_whitney_u_np not implemented yet (Pillar C step 3)')""}
+","
+import json, time
+import numpy as np
+
+import faulthandler
+faulthandler.enable()
+
+import bunker_stats as bs
+
+CASE = json.loads('{""fn_name"": ""mann_whitney_u_np"", ""n"": 200000, ""p"": 32, ""seed"": 0, ""kind"": ""pair_vec_f64"", ""alternative"": ""two-sided"", ""repeats"": 3, ""warmup"": 1}')
+
+def _make_inputs(case):
+    n = int(case.get(""n"", 200000))
+    p = int(case.get(""p"", 32))
+    seed = int(case.get(""seed"", 0))
+    rng = np.random.default_rng(seed)
+    kind = case.get(""kind"", ""vec_f64"")
+
+    def vec_f64():
+        return rng.normal(size=n).astype(np.float64)
+
+    def vec_nan_f64():
+        x = rng.normal(size=n).astype(np.float64)
+        x[rng.random(size=n) < 0.05] = np.nan
+        return x
+
+    def mat_f64():
+        return rng.normal(size=(n, p)).astype(np.float64)
+
+    def pair_vec_f64():
+        x = rng.normal(size=n).astype(np.float64)
+        y = rng.normal(loc=0.2, size=n).astype(np.float64)
+        return x, y
+
+    def pair_vec_nan_f64():
+        x, y = pair_vec_f64()
+        x[rng.random(size=n) < 0.05] = np.nan
+        y[rng.random(size=n) < 0.05] = np.nan
+        return x, y
+
+    if kind == ""vec_f64"":
+        return {""x"": vec_f64()}
+    if kind == ""vec_nan_f64"":
+        return {""x"": vec_nan_f64()}
+    if kind == ""mat_f64"":
+        return {""X"": mat_f64()}
+    if kind == ""pair_vec_f64"":
+        x, y = pair_vec_f64()
+        return {""x"": x, ""y"": y}
+    if kind == ""pair_vec_nan_f64"":
+        x, y = pair_vec_nan_f64()
+        return {""x"": x, ""y"": y}
+    if kind == ""chi2_gof"":
+        obs = np.array([10, 12, 9, 11, 8], dtype=np.float64)
+        exp = np.array([10, 10, 10, 10, 10], dtype=np.float64)
+        return {""obs"": obs, ""exp"": exp}
+    if kind == ""chi2_ind"":
+        tab = np.array([[10, 20, 30], [6, 9, 17]], dtype=np.float64)
+        return {""tab"": tab}
+    return {""x"": vec_f64()}
+
+def _call_bs(case, inputs):
+    fn = getattr(bs, case[""fn_name""], None)
+    if fn is None:
+        return {""status"":""skip_missing""}
+
+    name = case[""fn_name""]
+    k = case.get(""kind"", ""vec_f64"")
+
+    if name == ""ks_1samp_np"":
+        # Requires a callable CDF contract; skip for now.
+        return {""status"":""skip_needs_callable""}
+
+    # Positional-arg calling to match your PyO3 signatures.
+    if k in (""vec_f64"",""vec_nan_f64""):
+        x = inputs[""x""]
+        if name == ""percentile_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""q"",95.0)))}
+        if name == ""trimmed_mean_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""proportion_to_cut"", 0.1)))}
+        if name in (""diff_np"",""pct_change_np""):
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""periods"", 1)))}
+        if name in (""rolling_mean_np"",""rolling_std_np"",""rolling_var_np"",""rolling_mean_std_np"",""rolling_zscore_np"",
+                    ""rolling_mean_nan_np"",""rolling_std_nan_np"",""rolling_zscore_nan_np""):
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""window"", 64)))}
+        if name == ""ewma_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""alpha"", 0.2)))}
+        if name == ""iqr_outliers_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""k"", 1.5)))}
+        if name == ""zscore_outliers_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""threshold"", 3.0)))}
+        if name == ""robust_scale_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""scale_factor"", 1.0)))}
+        if name == ""winsorize_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""lower_q"", 0.05)), float(case.get(""upper_q"", 0.95)))}
+        if name == ""quantile_bins_np"":
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""n_bins"", 10)))}
+        if name == ""kde_gaussian_np"":
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""n_points"", 256)))}
+        if name == ""pad_nan_np"":
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""n_pad"", 8)))}
+        if name == ""t_test_1samp_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""mu"",0.0)), str(case.get(""alternative"",""two-sided"")))}
+        return {""status"":""ok"",""value"": fn(x)}
+
+    if k == ""mat_f64"":
+        X = inputs[""X""]
+        if name == ""mean_axis_np"":
+            return {""status"":""ok"",""value"": fn(X, int(case.get(""axis"", 0)))}
+        if name in (""rolling_mean_axis0_np"",""rolling_std_axis0_np"",""rolling_mean_std_axis0_np""):
+            return {""status"":""ok"",""value"": fn(X, int(case.get(""window"", 64)))}
+        return {""status"":""ok"",""value"": fn(X)}
+
+    if k in (""pair_vec_f64"",""pair_vec_nan_f64""):
+        x = inputs[""x""]; y = inputs[""y""]
+        if name in (""rolling_cov_np"",""rolling_corr_np"",""rolling_cov_nan_np"",""rolling_corr_nan_np""):
+            return {""status"":""ok"",""value"": fn(x, y, int(case.get(""window"", 64)))}
+        if name == ""t_test_2samp_np"":
+            return {""status"":""ok"",""value"": fn(x, y, bool(case.get(""equal_var"", False)), str(case.get(""alternative"",""two-sided"")))}
+        if name == ""cohens_d_2samp_np"":",_subproc_debug\subproc_mann_whitney_u_np.py
+ks_1samp_np,skip_needs_callable,,,,,,"{""status"": ""skip_needs_callable""}
+","
+import json, time
+import numpy as np
+
+import faulthandler
+faulthandler.enable()
+
+import bunker_stats as bs
+
+CASE = json.loads('{""fn_name"": ""ks_1samp_np"", ""n"": 200000, ""p"": 32, ""seed"": 0, ""kind"": ""vec_f64"", ""repeats"": 3, ""warmup"": 1}')
+
+def _make_inputs(case):
+    n = int(case.get(""n"", 200000))
+    p = int(case.get(""p"", 32))
+    seed = int(case.get(""seed"", 0))
+    rng = np.random.default_rng(seed)
+    kind = case.get(""kind"", ""vec_f64"")
+
+    def vec_f64():
+        return rng.normal(size=n).astype(np.float64)
+
+    def vec_nan_f64():
+        x = rng.normal(size=n).astype(np.float64)
+        x[rng.random(size=n) < 0.05] = np.nan
+        return x
+
+    def mat_f64():
+        return rng.normal(size=(n, p)).astype(np.float64)
+
+    def pair_vec_f64():
+        x = rng.normal(size=n).astype(np.float64)
+        y = rng.normal(loc=0.2, size=n).astype(np.float64)
+        return x, y
+
+    def pair_vec_nan_f64():
+        x, y = pair_vec_f64()
+        x[rng.random(size=n) < 0.05] = np.nan
+        y[rng.random(size=n) < 0.05] = np.nan
+        return x, y
+
+    if kind == ""vec_f64"":
+        return {""x"": vec_f64()}
+    if kind == ""vec_nan_f64"":
+        return {""x"": vec_nan_f64()}
+    if kind == ""mat_f64"":
+        return {""X"": mat_f64()}
+    if kind == ""pair_vec_f64"":
+        x, y = pair_vec_f64()
+        return {""x"": x, ""y"": y}
+    if kind == ""pair_vec_nan_f64"":
+        x, y = pair_vec_nan_f64()
+        return {""x"": x, ""y"": y}
+    if kind == ""chi2_gof"":
+        obs = np.array([10, 12, 9, 11, 8], dtype=np.float64)
+        exp = np.array([10, 10, 10, 10, 10], dtype=np.float64)
+        return {""obs"": obs, ""exp"": exp}
+    if kind == ""chi2_ind"":
+        tab = np.array([[10, 20, 30], [6, 9, 17]], dtype=np.float64)
+        return {""tab"": tab}
+    return {""x"": vec_f64()}
+
+def _call_bs(case, inputs):
+    fn = getattr(bs, case[""fn_name""], None)
+    if fn is None:
+        return {""status"":""skip_missing""}
+
+    name = case[""fn_name""]
+    k = case.get(""kind"", ""vec_f64"")
+
+    if name == ""ks_1samp_np"":
+        # Requires a callable CDF contract; skip for now.
+        return {""status"":""skip_needs_callable""}
+
+    # Positional-arg calling to match your PyO3 signatures.
+    if k in (""vec_f64"",""vec_nan_f64""):
+        x = inputs[""x""]
+        if name == ""percentile_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""q"",95.0)))}
+        if name == ""trimmed_mean_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""proportion_to_cut"", 0.1)))}
+        if name in (""diff_np"",""pct_change_np""):
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""periods"", 1)))}
+        if name in (""rolling_mean_np"",""rolling_std_np"",""rolling_var_np"",""rolling_mean_std_np"",""rolling_zscore_np"",
+                    ""rolling_mean_nan_np"",""rolling_std_nan_np"",""rolling_zscore_nan_np""):
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""window"", 64)))}
+        if name == ""ewma_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""alpha"", 0.2)))}
+        if name == ""iqr_outliers_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""k"", 1.5)))}
+        if name == ""zscore_outliers_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""threshold"", 3.0)))}
+        if name == ""robust_scale_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""scale_factor"", 1.0)))}
+        if name == ""winsorize_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""lower_q"", 0.05)), float(case.get(""upper_q"", 0.95)))}
+        if name == ""quantile_bins_np"":
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""n_bins"", 10)))}
+        if name == ""kde_gaussian_np"":
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""n_points"", 256)))}
+        if name == ""pad_nan_np"":
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""n_pad"", 8)))}
+        if name == ""t_test_1samp_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""mu"",0.0)), str(case.get(""alternative"",""two-sided"")))}
+        return {""status"":""ok"",""value"": fn(x)}
+
+    if k == ""mat_f64"":
+        X = inputs[""X""]
+        if name == ""mean_axis_np"":
+            return {""status"":""ok"",""value"": fn(X, int(case.get(""axis"", 0)))}
+        if name in (""rolling_mean_axis0_np"",""rolling_std_axis0_np"",""rolling_mean_std_axis0_np""):
+            return {""status"":""ok"",""value"": fn(X, int(case.get(""window"", 64)))}
+        return {""status"":""ok"",""value"": fn(X)}
+
+    if k in (""pair_vec_f64"",""pair_vec_nan_f64""):
+        x = inputs[""x""]; y = inputs[""y""]
+        if name in (""rolling_cov_np"",""rolling_corr_np"",""rolling_cov_nan_np"",""rolling_corr_nan_np""):
+            return {""status"":""ok"",""value"": fn(x, y, int(case.get(""window"", 64)))}
+        if name == ""t_test_2samp_np"":
+            return {""status"":""ok"",""value"": fn(x, y, bool(case.get(""equal_var"", False)), str(case.get(""alternative"",""two-sided"")))}
+        if name == ""cohens_d_2samp_np"":",_subproc_debug\subproc_ks_1samp_np.py
+pad_nan_np,bs_error,,,,TypeError('pad_nan_np() takes 1 positional arguments but 2 were given'),,"{""status"": ""bs_error"", ""error"": ""TypeError('pad_nan_np() takes 1 positional arguments but 2 were given')""}
+","
+import json, time
+import numpy as np
+
+import faulthandler
+faulthandler.enable()
+
+import bunker_stats as bs
+
+CASE = json.loads('{""fn_name"": ""pad_nan_np"", ""n"": 200000, ""p"": 32, ""seed"": 0, ""kind"": ""vec_nan_f64"", ""n_pad"": 8, ""repeats"": 3, ""warmup"": 1}')
+
+def _make_inputs(case):
+    n = int(case.get(""n"", 200000))
+    p = int(case.get(""p"", 32))
+    seed = int(case.get(""seed"", 0))
+    rng = np.random.default_rng(seed)
+    kind = case.get(""kind"", ""vec_f64"")
+
+    def vec_f64():
+        return rng.normal(size=n).astype(np.float64)
+
+    def vec_nan_f64():
+        x = rng.normal(size=n).astype(np.float64)
+        x[rng.random(size=n) < 0.05] = np.nan
+        return x
+
+    def mat_f64():
+        return rng.normal(size=(n, p)).astype(np.float64)
+
+    def pair_vec_f64():
+        x = rng.normal(size=n).astype(np.float64)
+        y = rng.normal(loc=0.2, size=n).astype(np.float64)
+        return x, y
+
+    def pair_vec_nan_f64():
+        x, y = pair_vec_f64()
+        x[rng.random(size=n) < 0.05] = np.nan
+        y[rng.random(size=n) < 0.05] = np.nan
+        return x, y
+
+    if kind == ""vec_f64"":
+        return {""x"": vec_f64()}
+    if kind == ""vec_nan_f64"":
+        return {""x"": vec_nan_f64()}
+    if kind == ""mat_f64"":
+        return {""X"": mat_f64()}
+    if kind == ""pair_vec_f64"":
+        x, y = pair_vec_f64()
+        return {""x"": x, ""y"": y}
+    if kind == ""pair_vec_nan_f64"":
+        x, y = pair_vec_nan_f64()
+        return {""x"": x, ""y"": y}
+    if kind == ""chi2_gof"":
+        obs = np.array([10, 12, 9, 11, 8], dtype=np.float64)
+        exp = np.array([10, 10, 10, 10, 10], dtype=np.float64)
+        return {""obs"": obs, ""exp"": exp}
+    if kind == ""chi2_ind"":
+        tab = np.array([[10, 20, 30], [6, 9, 17]], dtype=np.float64)
+        return {""tab"": tab}
+    return {""x"": vec_f64()}
+
+def _call_bs(case, inputs):
+    fn = getattr(bs, case[""fn_name""], None)
+    if fn is None:
+        return {""status"":""skip_missing""}
+
+    name = case[""fn_name""]
+    k = case.get(""kind"", ""vec_f64"")
+
+    if name == ""ks_1samp_np"":
+        # Requires a callable CDF contract; skip for now.
+        return {""status"":""skip_needs_callable""}
+
+    # Positional-arg calling to match your PyO3 signatures.
+    if k in (""vec_f64"",""vec_nan_f64""):
+        x = inputs[""x""]
+        if name == ""percentile_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""q"",95.0)))}
+        if name == ""trimmed_mean_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""proportion_to_cut"", 0.1)))}
+        if name in (""diff_np"",""pct_change_np""):
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""periods"", 1)))}
+        if name in (""rolling_mean_np"",""rolling_std_np"",""rolling_var_np"",""rolling_mean_std_np"",""rolling_zscore_np"",
+                    ""rolling_mean_nan_np"",""rolling_std_nan_np"",""rolling_zscore_nan_np""):
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""window"", 64)))}
+        if name == ""ewma_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""alpha"", 0.2)))}
+        if name == ""iqr_outliers_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""k"", 1.5)))}
+        if name == ""zscore_outliers_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""threshold"", 3.0)))}
+        if name == ""robust_scale_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""scale_factor"", 1.0)))}
+        if name == ""winsorize_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""lower_q"", 0.05)), float(case.get(""upper_q"", 0.95)))}
+        if name == ""quantile_bins_np"":
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""n_bins"", 10)))}
+        if name == ""kde_gaussian_np"":
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""n_points"", 256)))}
+        if name == ""pad_nan_np"":
+            return {""status"":""ok"",""value"": fn(x, int(case.get(""n_pad"", 8)))}
+        if name == ""t_test_1samp_np"":
+            return {""status"":""ok"",""value"": fn(x, float(case.get(""mu"",0.0)), str(case.get(""alternative"",""two-sided"")))}
+        return {""status"":""ok"",""value"": fn(x)}
+
+    if k == ""mat_f64"":
+        X = inputs[""X""]
+        if name == ""mean_axis_np"":
+            return {""status"":""ok"",""value"": fn(X, int(case.get(""axis"", 0)))}
+        if name in (""rolling_mean_axis0_np"",""rolling_std_axis0_np"",""rolling_mean_std_axis0_np""):
+            return {""status"":""ok"",""value"": fn(X, int(case.get(""window"", 64)))}
+        return {""status"":""ok"",""value"": fn(X)}
+
+    if k in (""pair_vec_f64"",""pair_vec_nan_f64""):
+        x = inputs[""x""]; y = inputs[""y""]
+        if name in (""rolling_cov_np"",""rolling_corr_np"",""rolling_cov_nan_np"",""rolling_corr_nan_np""):
+            return {""status"":""ok"",""value"": fn(x, y, int(case.get(""window"", 64)))}
+        if name == ""t_test_2samp_np"":
+            return {""status"":""ok"",""value"": fn(x, y, bool(case.get(""equal_var"", False)), str(case.get(""alternative"",""two-sided"")))}
+        if name == ""cohens_d_2samp_np"":",_subproc_debug\subproc_pad_nan_np.py
