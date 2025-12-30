@@ -1,0 +1,54 @@
+error,name,notes,shape,status
+"NameError(""name 'x' is not defined"")",mean_np,,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",var_np,,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",std_np,,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",zscore_np,,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",percentile_np,q=0.95,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",iqr_np,,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",mad_np,,"(n,)",bs_error
+"NameError(""name 'x_nan' is not defined"")",mean_nan_np,,"(n,)",bs_error
+"NameError(""name 'x_nan' is not defined"")",var_nan_np,,"(n,)",bs_error
+"NameError(""name 'x_nan' is not defined"")",std_nan_np,,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",rolling_mean_np,window=50,"(n-w+1,)",bs_error
+"NameError(""name 'x' is not defined"")",rolling_std_np,window=50,"(n-w+1,)",bs_error
+"NameError(""name 'x' is not defined"")",rolling_mean_std_np,window=50,"(2, n-w+1)",bs_error
+"NameError(""name 'x' is not defined"")",rolling_zscore_np,window=50,"(n-w+1,)",bs_error
+"NameError(""name 'x' is not defined"")",ewma_np,alpha=0.1,"(n,)",bs_error
+"NameError(""name 'x_nan' is not defined"")",rolling_mean_nan_np,window=50,"(n-w+1,)",bs_error
+"NameError(""name 'x_nan' is not defined"")",rolling_std_nan_np,window=50,"(n-w+1,)",bs_error
+"NameError(""name 'x_nan' is not defined"")",rolling_zscore_nan_np,window=50,"(n-w+1,)",bs_error
+"NameError(""name 'x' is not defined"")",diff_np,,"(n-1,)",bs_error
+"NameError(""name 'x' is not defined"")",pct_change_np,,"(n-1,)",bs_error
+"NameError(""name 'x' is not defined"")",cumsum_np,,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",cummean_np,,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",ecdf_np,,"(2, n)",bs_error
+"NameError(""name 'x' is not defined"")",minmax_scale_np,,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",robust_scale_np,,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",winsorize_np,"lo=0.05,hi=0.95","(n,)",bs_error
+"NameError(""name 'x' is not defined"")",quantile_bins_np,q=10,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",sign_mask_np,,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",demean_with_signs_np,,"(n,)",bs_error
+"NameError(""name 'x_nan' is not defined"")",welford_np,,"(3,)",bs_error
+"NameError(""name 'x' is not defined"")",iqr_outliers_np,k=1.5,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",zscore_outliers_np,z=3.0,"(n,)",bs_error
+"NameError(""name 'x' is not defined"")",cov_np,,scalar,bs_error
+"NameError(""name 'x' is not defined"")",corr_np,,scalar,bs_error
+"NameError(""name 'x_nan' is not defined"")",cov_nan_np,,scalar,bs_error
+"NameError(""name 'x_nan' is not defined"")",corr_nan_np,,scalar,bs_error
+"NameError(""name 'x' is not defined"")",rolling_cov_np,window=50,"(n-w+1,)",bs_error
+"NameError(""name 'x' is not defined"")",rolling_corr_np,window=50,"(n-w+1,)",bs_error
+"NameError(""name 'x_nan' is not defined"")",rolling_cov_nan_np,window=50,"(n-w+1,)",bs_error
+"NameError(""name 'x_nan' is not defined"")",rolling_corr_nan_np,window=50,"(n-w+1,)",bs_error
+"NameError(""name 'X' is not defined"")",cov_matrix_np,,"(p,p)",bs_error
+"NameError(""name 'X' is not defined"")",corr_matrix_np,,"(p,p)",bs_error
+"NameError(""name 'X' is not defined"")",rolling_mean_axis0_np,window=50,"(n-w+1,p)",bs_error
+"NameError(""name 'X' is not defined"")",rolling_std_axis0_np,window=50,"(n-w+1,p)",bs_error
+"NameError(""name 'X' is not defined"")",rolling_mean_std_axis0_np,window=50,"(2,n-w+1,p)",bs_error
+"NameError(""name 'x' is not defined"")",t_test_1samp_np,,dict,bs_error
+"NameError(""name 'x' is not defined"")",t_test_2samp_np_pooled,equal_var=True,dict,bs_error
+"NameError(""name 'x' is not defined"")",t_test_2samp_np_welch,equal_var=False,dict,bs_error
+"NameError(""name 'obs' is not defined"")",chi2_gof_np,,dict,bs_error
+"NameError(""name 'tab' is not defined"")",chi2_independence_np,,dict,bs_error
+"NameError(""name 'x' is not defined"")",mean_diff_ci_np_1samp,,"(2,)",bs_error
+"NameError(""name 'x' is not defined"")",mann_whitney_u_np,(small sample),dict,bs_error
+"NameError(""name 'x' is not defined"")",ks_1samp_np,(small sample),dict,bs_error

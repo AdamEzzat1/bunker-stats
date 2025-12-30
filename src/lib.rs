@@ -1,9 +1,28 @@
+mod kernels;
+mod infer;
+
+
 use numpy::{
-    ndarray::{ArrayView2, ArrayViewD, Axis},
-    PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArrayDyn,
+    ndarray::{Array2, ArrayViewD, Axis},
+    IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArrayDyn,
 };
+
+
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+
+use kernels::rolling::engine::rolling_mean_std_vec;
+use kernels::rolling::zscore::zscore_from_mean_std;
+use kernels::rolling::axis0::{rolling_mean_axis0_vec, rolling_std_axis0_vec, rolling_mean_std_axis0_vec};
+use kernels::rolling::covcorr::rolling_cov_vec;
+
+use kernels::rolling::var::vars_from_stds;
+use kernels::quantile::percentile::percentile_slice as percentile_slice_k;
+use kernels::quantile::iqr::iqr_slice as iqr_slice_k;
+use kernels::quantile::winsor::winsorize_vec as winsorize_vec_k;
+use kernels::matrix::cov::cov_matrix_out as cov_matrix_out_k;
+use kernels::matrix::corr::corr_matrix_out as corr_matrix_out_k;
+
 
 // ======================
 // Core slice helpers
@@ -20,6 +39,7 @@ fn mean_slice(xs: &[f64]) -> f64 {
     sum / (xs.len() as f64)
 }
 
+// Sample variance (ddof=1)
 fn var_slice(xs: &[f64]) -> f64 {
     let n = xs.len();
     if n <= 1 {
@@ -38,7 +58,7 @@ fn std_slice(xs: &[f64]) -> f64 {
     var_slice(xs).sqrt()
 }
 
-// NaN-aware helpers
+// NaN-aware helpers (skip NaNs, ddof=1 for var/std when >=2 valid values)
 
 fn mean_slice_skipna(xs: &[f64]) -> f64 {
     let mut sum = 0.0f64;
@@ -64,16 +84,14 @@ fn var_slice_skipna(xs: &[f64]) -> f64 {
             values.push(x);
         }
     }
-
     let n = values.len();
     if n <= 1 {
         return f64::NAN;
     }
-
-    let m = mean_slice_skipna(&values);
+    let m = mean_slice(&values);
     let mut acc = 0.0;
-    for v in &values {
-        let d = *v - m;
+    for &v in &values {
+        let d = v - m;
         acc += d * d;
     }
     acc / ((n - 1) as f64)
@@ -83,81 +101,32 @@ fn std_slice_skipna(xs: &[f64]) -> f64 {
     var_slice_skipna(xs).sqrt()
 }
 
-fn percentile_slice(xs: &[f64], q: f64) -> f64 {
-    if xs.is_empty() {
-        return f64::NAN;
-    }
-    let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = v.len();
-    if n == 1 {
-        return v[0];
-    }
-    let pos = q * ((n - 1) as f64);
-    let lo = pos.floor() as usize;
-    let hi = pos.ceil() as usize;
-    if lo == hi {
-        v[lo]
-    } else {
-        let w = pos - (lo as f64);
-        (1.0 - w) * v[lo] + w * v[hi]
-    }
-}
-
-fn iqr_from_sorted(sorted: &[f64]) -> (f64, f64, f64) {
-    if sorted.is_empty() {
-        return (f64::NAN, f64::NAN, f64::NAN);
-    }
-    let n = sorted.len();
-    let q1_pos = 0.25 * ((n - 1) as f64);
-    let q3_pos = 0.75 * ((n - 1) as f64);
-
-    let interp = |pos: f64| -> f64 {
-        let lo = pos.floor() as usize;
-        let hi = pos.ceil() as usize;
-        if lo == hi {
-            sorted[lo]
-        } else {
-            let w = pos - (lo as f64);
-            (1.0 - w) * sorted[lo] + w * sorted[hi]
-        }
-    };
-
-    let q1 = interp(q1_pos);
-    let q3 = interp(q3_pos);
-    (q1, q3, q3 - q1)
-}
-
-fn iqr_slice(xs: &[f64]) -> (f64, f64, f64) {
-    if xs.is_empty() {
-        return (f64::NAN, f64::NAN, f64::NAN);
-    }
-    let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    iqr_from_sorted(&v)
-}
 
 fn mad_slice(xs: &[f64]) -> f64 {
     if xs.is_empty() {
         return f64::NAN;
     }
+    // Copy once, sort once for the median, then reuse the same buffer for deviations.
     let mut v = xs.to_vec();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
     let n = v.len();
     let med = if n % 2 == 1 {
         v[n / 2]
     } else {
-        0.5 * (v[n / 2 - 1] + v[n / 2])
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
     };
-    let mut devs: Vec<f64> = xs.iter().map(|x| (x - med).abs()).collect();
-    devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let m = devs.len();
-    if m == 0 {
-        f64::NAN
-    } else if m % 2 == 1 {
-        devs[m / 2]
+
+    // Reuse `v` to hold absolute deviations, then sort to get the MAD median.
+    for val in &mut v {
+        *val = (*val - med).abs();
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    if n % 2 == 1 {
+        v[n / 2]
     } else {
-        0.5 * (devs[m / 2 - 1] + devs[m / 2])
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
     }
 }
 
@@ -166,48 +135,167 @@ fn mad_slice(xs: &[f64]) -> f64 {
 // ======================
 
 #[pyfunction]
-fn mean_np(a: PyReadonlyArray1<f64>) -> f64 {
-    mean_slice(a.as_slice().unwrap())
+fn mean_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(mean_slice(a.as_slice()?))
 }
 
 #[pyfunction]
-fn mean_skipna_np(a: PyReadonlyArray1<f64>) -> f64 {
-    mean_slice_skipna(a.as_slice().unwrap())
+fn mean_skipna_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(mean_slice_skipna(a.as_slice()?))
 }
 
 #[pyfunction]
-fn var_np(a: PyReadonlyArray1<f64>) -> f64 {
-    var_slice(a.as_slice().unwrap())
+fn var_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(var_slice(a.as_slice()?))
 }
 
 #[pyfunction]
-fn var_skipna_np(a: PyReadonlyArray1<f64>) -> f64 {
-    var_slice_skipna(a.as_slice().unwrap())
+fn var_skipna_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(var_slice_skipna(a.as_slice()?))
 }
 
 #[pyfunction]
-fn std_np(a: PyReadonlyArray1<f64>) -> f64 {
-    std_slice(a.as_slice().unwrap())
+fn std_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(std_slice(a.as_slice()?))
 }
 
 #[pyfunction]
-fn std_skipna_np(a: PyReadonlyArray1<f64>) -> f64 {
-    std_slice_skipna(a.as_slice().unwrap())
+fn std_skipna_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(std_slice_skipna(a.as_slice()?))
+}
+
+// --- NaN-aware aliases (Python API compatibility) ---
+// Python facade expects *_nan_np names in some versions.
+#[pyfunction]
+fn mean_nan_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    mean_skipna_np(a)
+}
+#[pyfunction]
+fn var_nan_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    var_skipna_np(a)
+}
+#[pyfunction]
+fn std_nan_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    std_skipna_np(a)
 }
 
 #[pyfunction]
-fn percentile_np(a: PyReadonlyArray1<f64>, q: f64) -> f64 {
-    percentile_slice(a.as_slice().unwrap(), q)
+fn percentile_np(a: PyReadonlyArray1<f64>, q: f64) -> PyResult<f64> {
+    Ok(percentile_slice_k(a.as_slice()?, q))
 }
 
 #[pyfunction]
-fn iqr_np(a: PyReadonlyArray1<f64>) -> (f64, f64, f64) {
-    iqr_slice(a.as_slice().unwrap())
+fn iqr_np(a: PyReadonlyArray1<f64>) -> PyResult<(f64, f64, f64)> {
+    Ok(iqr_slice_k(a.as_slice()?))
+}
+
+// Scalar IQR width (kept for convenience; avoids conflicting with tuple iqr_np)
+#[pyfunction]
+fn iqr_width_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let (q1, q3, iqr) = iqr_slice_k(a.as_slice()?);
+    if q1.is_nan() || q3.is_nan() || iqr.is_nan() {
+        Ok(f64::NAN)
+    } else {
+        Ok(iqr)
+    }
 }
 
 #[pyfunction]
-fn mad_np(a: PyReadonlyArray1<f64>) -> f64 {
-    mad_slice(a.as_slice().unwrap())
+fn mad_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(mad_slice(a.as_slice()?))
+}
+
+#[pyfunction]
+fn trimmed_mean_np(a: PyReadonlyArray1<f64>, proportion_to_cut: f64) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    if xs.is_empty() {
+        return Ok(f64::NAN);
+    }
+    let mut v = xs.to_vec();
+    v.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let n = v.len();
+    let cut = ((n as f64) * proportion_to_cut).floor() as usize;
+    if cut * 2 >= n {
+        return Ok(f64::NAN);
+    }
+    Ok(mean_slice(&v[cut..(n - cut)]))
+}
+
+#[pyfunction]
+fn zscore_np<'py>(py: Python<'py>, a: PyReadonlyArray1<f64>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
+    let n = xs.len();
+    if n == 0 {
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
+    }
+    let m = mean_slice(xs);
+    let s = std_slice(xs); // sample std (ddof=1)
+    if !s.is_finite() || s == 0.0 {
+        return Ok(PyArray1::from_vec_bound(py, vec![f64::NAN; n]));
+    }
+    let out: Vec<f64> = xs.iter().map(|&x| (x - m) / s).collect();
+    Ok(PyArray1::from_vec_bound(py, out))
+}
+
+#[pyfunction]
+fn zscore_skipna_np<'py>(
+    py: Python<'py>,
+    a: PyReadonlyArray1<f64>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
+    let m = mean_slice_skipna(xs);
+    let s = std_slice_skipna(xs);
+    let out: Vec<f64> = xs
+        .iter()
+        .map(|&v| {
+            if v.is_nan() {
+                f64::NAN
+            } else if s == 0.0 || s.is_nan() {
+                f64::NAN
+            } else {
+                (v - m) / s
+            }
+        })
+        .collect();
+    Ok(PyArray1::from_vec_bound(py, out))
+}
+
+#[pyfunction]
+fn skew_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    if xs.len() < 3 {
+        return Ok(f64::NAN);
+    }
+    let m = mean_slice(xs);
+    let s = std_slice(xs);
+    if s == 0.0 || s.is_nan() {
+        return Ok(f64::NAN);
+    }
+    let mut m3 = 0.0f64;
+    for &v in xs {
+        let z = (v - m) / s;
+        m3 += z.powi(3);
+    }
+    Ok(m3 / (xs.len() as f64))
+}
+
+#[pyfunction]
+fn kurtosis_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    if xs.len() < 4 {
+        return Ok(f64::NAN);
+    }
+    let m = mean_slice(xs);
+    let s = std_slice(xs);
+    if s == 0.0 || s.is_nan() {
+        return Ok(f64::NAN);
+    }
+    let mut m4 = 0.0f64;
+    for &v in xs {
+        let z = (v - m) / s;
+        m4 += z.powi(4);
+    }
+    Ok(m4 / (xs.len() as f64) - 3.0)
 }
 
 // ======================
@@ -226,7 +314,6 @@ fn mean_axis_np<'py>(
     let ndim = a.ndim();
 
     match ndim {
-        // 1D: only axis=0 is supported → return length-1 array
         1 => {
             if axis != 0 {
                 return Err(PyValueError::new_err(
@@ -235,9 +322,7 @@ fn mean_axis_np<'py>(
             }
             let slice = a
                 .as_slice()
-                .ok_or_else(|| {
-                    PyValueError::new_err("mean_axis_np: 1D input must be contiguous")
-                })?;
+                .ok_or_else(|| PyValueError::new_err("mean_axis_np: 1D input must be contiguous"))?;
             let m = if use_skipna {
                 mean_slice_skipna(slice)
             } else {
@@ -245,8 +330,6 @@ fn mean_axis_np<'py>(
             };
             Ok(PyArray1::from_vec_bound(py, vec![m]))
         }
-
-        // 2D: axis=0 → per-column mean; axis=1 → per-row mean
         2 => {
             let axis_u = match axis {
                 0 => 0usize,
@@ -261,36 +344,23 @@ fn mean_axis_np<'py>(
             let mut out: Vec<f64> = Vec::new();
 
             if axis_u == 0 {
-                // axis=0 → mean over rows → one mean per column
                 let n_cols = a.len_of(Axis(1));
                 for j in 0..n_cols {
                     let col = a.index_axis(Axis(1), j);
                     let v: Vec<f64> = col.iter().copied().collect();
-                    let m = if use_skipna {
-                        mean_slice_skipna(&v)
-                    } else {
-                        mean_slice(&v)
-                    };
-                    out.push(m);
+                    out.push(if use_skipna { mean_slice_skipna(&v) } else { mean_slice(&v) });
                 }
             } else {
-                // axis=1 → mean over columns → one mean per row
                 let n_rows = a.len_of(Axis(0));
                 for i in 0..n_rows {
                     let row = a.index_axis(Axis(0), i);
                     let v: Vec<f64> = row.iter().copied().collect();
-                    let m = if use_skipna {
-                        mean_slice_skipna(&v)
-                    } else {
-                        mean_slice(&v)
-                    };
-                    out.push(m);
+                    out.push(if use_skipna { mean_slice_skipna(&v) } else { mean_slice(&v) });
                 }
             }
 
             Ok(PyArray1::from_vec_bound(py, out))
         }
-
         _ => Err(PyValueError::new_err(
             "mean_axis_np currently supports only 1D or 2D arrays",
         )),
@@ -309,7 +379,6 @@ fn mean_over_last_axis_dyn_np<'py>(
     let view = arr.as_array();
     let ndim = view.ndim();
 
-    // Scalar case → return as length-1 array
     if ndim == 0 {
         let v = *view.iter().next().unwrap_or(&f64::NAN);
         return PyArray1::from_vec_bound(py, vec![v]);
@@ -317,54 +386,48 @@ fn mean_over_last_axis_dyn_np<'py>(
 
     let shape = view.shape();
     let last_dim = shape[ndim - 1];
-
-    // Flatten all but last axis into a batch dimension
     let batch_size: usize = shape[..ndim - 1].iter().product();
 
-    // Clone to owned array and reshape to (batch_size, last_dim)
     let reshaped = view
         .to_owned()
         .into_shape((batch_size, last_dim))
         .expect("reshape failed in mean_over_last_axis_dyn_np");
 
     let mut out = Vec::with_capacity(batch_size);
-
     for row in reshaped.axis_iter(Axis(0)) {
         let sum: f64 = row.iter().copied().sum();
         let len = row.len() as f64;
-        let mean = if len > 0.0 { sum / len } else { f64::NAN };
-        out.push(mean);
+        out.push(if len > 0.0 { sum / len } else { f64::NAN });
     }
 
     PyArray1::from_vec_bound(py, out)
 }
 
 // ======================
-// Rolling stats (1-D)
+// Rolling stats (1-D) — truncated length (n-window+1) fast path
 // ======================
+
+
+#[pyfunction]
+fn rolling_mean_std_np<'py>(
+    py: Python<'py>,
+    a: PyReadonlyArray1<f64>,
+    window: usize,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+    let xs = a.as_slice()?;
+    let (means, stds) = rolling_mean_std_vec(xs, window);
+    Ok((PyArray1::from_vec_bound(py, means), PyArray1::from_vec_bound(py, stds)))
+}
 
 #[pyfunction]
 fn rolling_mean_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
     window: usize,
-) -> Bound<'py, PyArray1<f64>> {
-    let xs = a.as_slice().unwrap();
-    let n = xs.len();
-    if window == 0 || window > n {
-        return PyArray1::from_vec_bound(py, Vec::new());
-    }
-    let mut out = Vec::with_capacity(n - window + 1);
-    let mut sum = 0.0;
-    for i in 0..window {
-        sum += xs[i];
-    }
-    out.push(sum / (window as f64));
-    for i in window..n {
-        sum += xs[i] - xs[i - window];
-        out.push(sum / (window as f64));
-    }
-    PyArray1::from_vec_bound(py, out)
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
+    let (means, _stds) = rolling_mean_std_vec(xs, window);
+    Ok(PyArray1::from_vec_bound(py, means))
 }
 
 #[pyfunction]
@@ -372,46 +435,28 @@ fn rolling_std_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
     window: usize,
-) -> Bound<'py, PyArray1<f64>> {
-    let xs = a.as_slice().unwrap();
-    let n = xs.len();
-    if window == 0 || window > n {
-        return PyArray1::from_vec_bound(py, Vec::new());
-    }
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
+    let (_means, stds) = rolling_mean_std_vec(xs, window);
+    Ok(PyArray1::from_vec_bound(py, stds))
+}
 
-    let mut out = Vec::with_capacity(n - window + 1);
-    let mut sum = 0.0;
-    let mut sumsq = 0.0;
+#[pyfunction]
+fn rolling_var_np<'py>(
+    py: Python<'py>,
+    a: PyReadonlyArray1<f64>,
+    window: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
 
-    for i in 0..window {
-        let x = xs[i];
-        sum += x;
-        sumsq += x * x;
-    }
+// single rolling pass (engine)
+let (_means, stds) = rolling_mean_std_vec(xs, window);
 
-    let denom = (window - 1) as f64;
-    let var0 = if window > 1 {
-        (sumsq - (sum * sum) / (window as f64)) / denom
-    } else {
-        0.0
-    };
-    out.push(var0.max(0.0).sqrt());
+// final linear pass (std -> var)
+let vars = vars_from_stds(&stds);
 
-    for i in window..n {
-        let x_new = xs[i];
-        let x_old = xs[i - window];
-        sum += x_new - x_old;
-        sumsq += x_new * x_new - x_old * x_old;
+Ok(PyArray1::from_vec_bound(py, vars))
 
-        let var = if window > 1 {
-            (sumsq - (sum * sum) / (window as f64)) / denom
-        } else {
-            0.0
-        };
-        out.push(var.max(0.0).sqrt());
-    }
-
-    PyArray1::from_vec_bound(py, out)
 }
 
 #[pyfunction]
@@ -419,60 +464,172 @@ fn rolling_zscore_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
     window: usize,
-) -> Bound<'py, PyArray1<f64>> {
-    let xs = a.as_slice().unwrap();
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
+
+    // single rolling pass
+    let (means, stds) = rolling_mean_std_vec(xs, window);
+
+    // final linear pass
+    let out = zscore_from_mean_std(xs, &means, &stds);
+
+    Ok(PyArray1::from_vec_bound(py, out))
+}
+
+#[pyfunction]
+fn rolling_mean_nan_np<'py>(
+    py: Python<'py>,
+    a: PyReadonlyArray1<f64>,
+    window: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
     let n = xs.len();
-    if window == 0 || window > n {
-        return PyArray1::from_vec_bound(py, Vec::new());
+    if window == 0 || n == 0 {
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let mut out = Vec::with_capacity(n - window + 1);
-    let mut sum = 0.0;
-    let mut sumsq = 0.0;
+    let mut out = vec![f64::NAN; n];
+    let mut sum = 0.0f64;
+    let mut cnt = 0usize;
 
-    for i in 0..window {
-        let x = xs[i];
-        sum += x;
-        sumsq += x * x;
-    }
-
-    let denom = (window - 1) as f64;
-    for i in (window - 1)..n {
-        if i > window - 1 {
-            let x_new = xs[i];
-            let x_old = xs[i - window];
-            sum += x_new - x_old;
-            sumsq += x_new * x_new - x_old * x_old;
+    for i in 0..n {
+        let x_new = xs[i];
+        if !x_new.is_nan() {
+            sum += x_new;
+            cnt += 1;
         }
 
-        let var = if window > 1 {
-            (sumsq - (sum * sum) / (window as f64)) / denom
-        } else {
-            0.0
-        };
-        let std = var.max(0.0).sqrt();
-        let last = xs[i];
-        let z = if std > 0.0 {
-            (last - sum / (window as f64)) / std
-        } else {
-            0.0
-        };
-        out.push(z);
+        if i >= window {
+            let x_old = xs[i - window];
+            if !x_old.is_nan() {
+                sum -= x_old;
+                cnt -= 1;
+            }
+        }
+
+        if cnt > 0 {
+            out[i] = sum / (cnt as f64);
+        }
     }
 
-    PyArray1::from_vec_bound(py, out)
+    Ok(PyArray1::from_vec_bound(py, out))
 }
+
+
+#[pyfunction]
+fn rolling_std_nan_np<'py>(
+    py: Python<'py>,
+    a: PyReadonlyArray1<f64>,
+    window: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
+    let n = xs.len();
+    if window == 0 || n == 0 {
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
+    }
+
+    let mut out = vec![f64::NAN; n];
+    let mut sum = 0.0f64;
+    let mut sumsq = 0.0f64;
+    let mut cnt = 0usize;
+
+    for i in 0..n {
+        let x_new = xs[i];
+        if !x_new.is_nan() {
+            sum += x_new;
+            sumsq += x_new * x_new;
+            cnt += 1;
+        }
+
+        if i >= window {
+            let x_old = xs[i - window];
+            if !x_old.is_nan() {
+                sum -= x_old;
+                sumsq -= x_old * x_old;
+                cnt -= 1;
+            }
+        }
+
+        if cnt >= 2 {
+            let c = cnt as f64;
+            let var = (sumsq - (sum * sum) / c) / (c - 1.0);
+            out[i] = var.max(0.0).sqrt();
+        }
+    }
+
+    Ok(PyArray1::from_vec_bound(py, out))
+}
+
+
+#[pyfunction]
+fn rolling_zscore_nan_np<'py>(
+    py: Python<'py>,
+    a: PyReadonlyArray1<f64>,
+    window: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
+    let n = xs.len();
+    if window == 0 || n == 0 {
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
+    }
+
+    let mut out = vec![f64::NAN; n];
+    let mut sum = 0.0f64;
+    let mut sumsq = 0.0f64;
+    let mut cnt = 0usize;
+
+    for i in 0..n {
+        let x_new = xs[i];
+        if !x_new.is_nan() {
+            sum += x_new;
+            sumsq += x_new * x_new;
+            cnt += 1;
+        }
+
+        if i >= window {
+            let x_old = xs[i - window];
+            if !x_old.is_nan() {
+                sum -= x_old;
+                sumsq -= x_old * x_old;
+                cnt -= 1;
+            }
+        }
+
+        let x = xs[i];
+        if x.is_nan() {
+            out[i] = f64::NAN;
+            continue;
+        }
+
+        if cnt >= 2 {
+            let c = cnt as f64;
+            let mean = sum / c;
+            let var = (sumsq - (sum * sum) / c) / (c - 1.0);
+            let std = var.max(0.0).sqrt();
+            out[i] = if std > 0.0 && std.is_finite() {
+                (x - mean) / std
+            } else {
+                f64::NAN
+            };
+        } else {
+            out[i] = f64::NAN;
+        }
+    }
+
+    Ok(PyArray1::from_vec_bound(py, out))
+}
+
 
 #[pyfunction]
 fn ewma_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
     alpha: f64,
-) -> Bound<'py, PyArray1<f64>> {
-    let xs = a.as_slice().unwrap();
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
     let n = xs.len();
     if n == 0 {
-        return PyArray1::from_vec_bound(py, Vec::new());
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
     let mut out = Vec::with_capacity(n);
     let mut prev = xs[0];
@@ -483,7 +640,74 @@ fn ewma_np<'py>(
         out.push(val);
         prev = val;
     }
-    PyArray1::from_vec_bound(py, out)
+    Ok(PyArray1::from_vec_bound(py, out))
+}
+
+// ======================
+// Rolling axis=0 (2D) — truncated (n-window+1, p) fast path
+// ======================
+
+
+// Cache-friendly axis-0 rolling mean+std (flat buffers; direct indexing; optional Rayon over columns).
+
+
+#[pyfunction]
+fn rolling_mean_std_axis0_np<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<f64>,
+    window: usize,
+) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
+    let a = x.as_array();
+    let (n_rows, n_cols) = a.dim();
+    if window == 0 || window > n_rows {
+        let empty = PyArray2::zeros_bound(py, (0, n_cols), false);
+        return Ok((empty.clone(), empty));
+    }
+    let flat = a.as_slice().ok_or_else(|| PyValueError::new_err("array must be contiguous"))?;
+    let out_rows = n_rows - window + 1;
+
+    let (means, stds) = rolling_mean_std_axis0_vec(flat, n_rows, n_cols, window);
+    let means2 = Array2::from_shape_vec((out_rows, n_cols), means).unwrap();
+    let stds2 = Array2::from_shape_vec((out_rows, n_cols), stds).unwrap();
+    Ok((means2.into_pyarray_bound(py), stds2.into_pyarray_bound(py)))
+}
+
+#[pyfunction]
+fn rolling_mean_axis0_np<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<f64>,
+    window: usize,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let a = x.as_array();
+    let (n_rows, n_cols) = a.dim();
+    if window == 0 || window > n_rows {
+        return Ok(PyArray2::zeros_bound(py, (0, n_cols), false));
+    }
+    let flat = a.as_slice().ok_or_else(|| PyValueError::new_err("array must be contiguous"))?;
+    let out_rows = n_rows - window + 1;
+
+    let means = rolling_mean_axis0_vec(flat, n_rows, n_cols, window);
+    let out2 = Array2::from_shape_vec((out_rows, n_cols), means).unwrap();
+    Ok(out2.into_pyarray_bound(py))
+}
+
+#[pyfunction]
+fn rolling_std_axis0_np<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<f64>,
+    window: usize,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let a = x.as_array();
+    let (n_rows, n_cols) = a.dim();
+    if window == 0 || window > n_rows {
+        return Ok(PyArray2::zeros_bound(py, (0, n_cols), false));
+    }
+    let flat = a.as_slice().ok_or_else(|| PyValueError::new_err("array must be contiguous"))?;
+    let out_rows = n_rows - window + 1;
+
+    let stds = rolling_std_axis0_vec(flat, n_rows, n_cols, window);
+    let out2 = Array2::from_shape_vec((out_rows, n_cols), stds).unwrap();
+    Ok(out2.into_pyarray_bound(py))
 }
 
 // ======================
@@ -495,16 +719,16 @@ fn iqr_outliers_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
     k: f64,
-) -> Bound<'py, PyArray1<bool>> {
-    let xs = a.as_slice().unwrap();
-    let (q1, q3, iqr) = iqr_slice(xs);
+) -> PyResult<Bound<'py, PyArray1<bool>>> {
+    let xs = a.as_slice()?;
+    let (q1, q3, iqr) = iqr_slice_k(xs);
     if iqr.is_nan() {
-        return PyArray1::from_vec_bound(py, vec![false; xs.len()]);
+        return Ok(PyArray1::from_vec_bound(py, vec![false; xs.len()]));
     }
     let low = q1 - k * iqr;
     let high = q3 + k * iqr;
     let mask: Vec<bool> = xs.iter().map(|&x| x < low || x > high).collect();
-    PyArray1::from_vec_bound(py, mask)
+    Ok(PyArray1::from_vec_bound(py, mask))
 }
 
 #[pyfunction]
@@ -512,35 +736,28 @@ fn zscore_outliers_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
     threshold: f64,
-) -> Bound<'py, PyArray1<bool>> {
-    let xs = a.as_slice().unwrap();
+) -> PyResult<Bound<'py, PyArray1<bool>>> {
+    let xs = a.as_slice()?;
     if xs.is_empty() {
-        return PyArray1::from_vec_bound(py, Vec::new());
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
     let m = mean_slice(xs);
     let s = std_slice(xs);
     if s == 0.0 || s.is_nan() {
-        return PyArray1::from_vec_bound(py, vec![false; xs.len()]);
+        return Ok(PyArray1::from_vec_bound(py, vec![false; xs.len()]));
     }
-    let mask: Vec<bool> = xs
-        .iter()
-        .map(|&x| ((x - m) / s).abs() > threshold)
-        .collect();
-    PyArray1::from_vec_bound(py, mask)
+    let mask: Vec<bool> = xs.iter().map(|&x| ((x - m) / s).abs() > threshold).collect();
+    Ok(PyArray1::from_vec_bound(py, mask))
 }
 
 #[pyfunction]
 fn minmax_scale_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
-) -> (Bound<'py, PyArray1<f64>>, f64, f64) {
-    let xs = a.as_slice().unwrap();
+) -> PyResult<(Bound<'py, PyArray1<f64>>, f64, f64)> {
+    let xs = a.as_slice()?;
     if xs.is_empty() {
-        return (
-            PyArray1::from_vec_bound(py, Vec::new()),
-            f64::NAN,
-            f64::NAN,
-        );
+        return Ok((PyArray1::from_vec_bound(py, vec![]), f64::NAN, f64::NAN));
     }
     let mut mn = xs[0];
     let mut mx = xs[0];
@@ -553,12 +770,11 @@ fn minmax_scale_np<'py>(
         }
     }
     if mx == mn {
-        let scaled = vec![0.0; xs.len()];
-        return (PyArray1::from_vec_bound(py, scaled), mn, mx);
+        return Ok((PyArray1::from_vec_bound(py, vec![0.0; xs.len()]), mn, mx));
     }
     let scale = mx - mn;
     let scaled: Vec<f64> = xs.iter().map(|&x| (x - mn) / scale).collect();
-    (PyArray1::from_vec_bound(py, scaled), mn, mx)
+    Ok((PyArray1::from_vec_bound(py, scaled), mn, mx))
 }
 
 #[pyfunction]
@@ -566,85 +782,84 @@ fn robust_scale_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
     scale_factor: f64,
-) -> (Bound<'py, PyArray1<f64>>, f64, f64) {
-    let xs = a.as_slice().unwrap();
+) -> PyResult<(Bound<'py, PyArray1<f64>>, f64, f64)> {
+    let xs = a.as_slice()?;
     if xs.is_empty() {
-        return (
-            PyArray1::from_vec_bound(py, Vec::new()),
-            f64::NAN,
-            f64::NAN,
-        );
+        return Ok((PyArray1::from_vec_bound(py, vec![]), f64::NAN, f64::NAN));
     }
     let mad = mad_slice(xs);
     let mut v = xs.to_vec();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = v.len();
-    let med = if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        0.5 * (v[n / 2 - 1] + v[n / 2])
-    };
-    let denom = if mad == 0.0 {
-        1e-12
-    } else {
-        mad * scale_factor
-    };
+    let med = if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) };
+
+    let denom = if mad == 0.0 { 1e-12 } else { mad * scale_factor };
     let scaled: Vec<f64> = xs.iter().map(|&x| (x - med) / denom).collect();
-    (PyArray1::from_vec_bound(py, scaled), med, mad)
+    Ok((PyArray1::from_vec_bound(py, scaled), med, mad))
 }
 
+// Quantile-based winsorize (kept)
+// NOTE: API accepts quantiles in [0,1] (pytest uses 0.05, 0.95)
+// We convert to percentile in [0,100] for percentile_slice_k.
+// Quantile-based winsorize (API accepts quantiles in [0,1] like 0.05, 0.95;
+// also accepts percent in [0,100] like 5, 95)
 #[pyfunction]
 fn winsorize_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
     lower_q: f64,
     upper_q: f64,
-) -> Bound<'py, PyArray1<f64>> {
-    let xs = a.as_slice().unwrap();
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
     if xs.is_empty() {
-        return PyArray1::from_vec_bound(py, Vec::new());
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
-    let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let low = percentile_slice(&v, lower_q);
-    let high = percentile_slice(&v, upper_q);
+    // Delegate to the kernel (single source of truth)
+    let out = winsorize_vec_k(xs, lower_q, upper_q);
+    Ok(PyArray1::from_vec_bound(py, out))
+}
+// Clip-based winsorize (explicit bounds)
+#[pyfunction]
+fn winsorize_clip_np<'py>(
+    py: Python<'py>,
+    a: PyReadonlyArray1<f64>,
+    lower: f64,
+    upper: f64,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
+    if xs.is_empty() {
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
+    }
+
+    // If caller swapped them, fix it deterministically
+    let (lo, hi) = if lower <= upper { (lower, upper) } else { (upper, lower) };
 
     let out: Vec<f64> = xs
         .iter()
-        .map(|&x| {
-            if x < low {
-                low
-            } else if x > high {
-                high
-            } else {
-                x
-            }
-        })
+        .map(|&v| if v < lo { lo } else if v > hi { hi } else { v })
         .collect();
 
-    PyArray1::from_vec_bound(py, out)
+    Ok(PyArray1::from_vec_bound(py, out))
 }
+
+
 
 // ======================
 // diff / cum / ecdf / bins / sign helpers
 // ======================
 
 #[pyfunction]
-fn diff_np<'py>(
-    py: Python<'py>,
-    a: PyReadonlyArray1<f64>,
-    periods: isize,
-) -> Bound<'py, PyArray1<f64>> {
-    let xs = a.as_slice().unwrap();
+#[pyo3(signature = (a, periods=1))]
+fn diff_np<'py>(py: Python<'py>, a: PyReadonlyArray1<f64>, periods: isize) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
     let n = xs.len();
     if n == 0 || periods == 0 {
-        return PyArray1::from_vec_bound(py, vec![0.0; n]);
+        return Ok(PyArray1::from_vec_bound(py, vec![0.0; n]));
     }
-
     let p = periods.abs() as usize;
     if p >= n {
-        return PyArray1::from_vec_bound(py, vec![f64::NAN; n]);
+        return Ok(PyArray1::from_vec_bound(py, vec![f64::NAN; n]));
     }
 
     let mut out = vec![f64::NAN; n];
@@ -657,7 +872,7 @@ fn diff_np<'py>(
             out[i] = xs[i] - xs[i + p];
         }
     }
-    PyArray1::from_vec_bound(py, out)
+    Ok(PyArray1::from_vec_bound(py, out))
 }
 
 #[pyfunction]
@@ -665,94 +880,71 @@ fn pct_change_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
     periods: isize,
-) -> Bound<'py, PyArray1<f64>> {
-    let xs = a.as_slice().unwrap();
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
     let n = xs.len();
     if n == 0 || periods == 0 {
-        return PyArray1::from_vec_bound(py, vec![f64::NAN; n]);
+        return Ok(PyArray1::from_vec_bound(py, vec![f64::NAN; n]));
     }
 
     let p = periods.abs() as usize;
     if p >= n {
-        return PyArray1::from_vec_bound(py, vec![f64::NAN; n]);
+        return Ok(PyArray1::from_vec_bound(py, vec![f64::NAN; n]));
     }
 
     let mut out = vec![f64::NAN; n];
     if periods > 0 {
         for i in p..n {
             let base = xs[i - p];
-            if base == 0.0 {
-                out[i] = f64::NAN;
-            } else {
-                out[i] = (xs[i] - base) / base;
-            }
+            out[i] = if base == 0.0 { f64::NAN } else { (xs[i] - base) / base };
         }
     } else {
         for i in 0..(n - p) {
             let base = xs[i + p];
-            if base == 0.0 {
-                out[i] = f64::NAN;
-            } else {
-                out[i] = (xs[i] - base) / base;
-            }
+            out[i] = if base == 0.0 { f64::NAN } else { (xs[i] - base) / base };
         }
     }
-    PyArray1::from_vec_bound(py, out)
+    Ok(PyArray1::from_vec_bound(py, out))
 }
 
 #[pyfunction]
-fn cumsum_np<'py>(
-    py: Python<'py>,
-    a: PyReadonlyArray1<f64>,
-) -> Bound<'py, PyArray1<f64>> {
-    let xs = a.as_slice().unwrap();
+fn cumsum_np<'py>(py: Python<'py>, a: PyReadonlyArray1<f64>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
     let mut out = Vec::with_capacity(xs.len());
     let mut s = 0.0;
     for &x in xs {
         s += x;
         out.push(s);
     }
-    PyArray1::from_vec_bound(py, out)
+    Ok(PyArray1::from_vec_bound(py, out))
 }
 
 #[pyfunction]
-fn cummean_np<'py>(
-    py: Python<'py>,
-    a: PyReadonlyArray1<f64>,
-) -> Bound<'py, PyArray1<f64>> {
-    let xs = a.as_slice().unwrap();
+fn cummean_np<'py>(py: Python<'py>, a: PyReadonlyArray1<f64>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = a.as_slice()?;
     let mut out = Vec::with_capacity(xs.len());
     let mut s = 0.0;
     for (i, &x) in xs.iter().enumerate() {
         s += x;
         out.push(s / ((i + 1) as f64));
     }
-    PyArray1::from_vec_bound(py, out)
+    Ok(PyArray1::from_vec_bound(py, out))
 }
 
 #[pyfunction]
 fn ecdf_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
-) -> (Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>) {
-    let xs = a.as_slice().unwrap();
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+    let xs = a.as_slice()?;
     if xs.is_empty() {
-        return (
-            PyArray1::from_vec_bound(py, Vec::new()),
-            PyArray1::from_vec_bound(py, Vec::new()),
-        );
+        return Ok((PyArray1::from_vec_bound(py, vec![]), PyArray1::from_vec_bound(py, vec![])));
     }
     let mut vals = xs.to_vec();
     vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = vals.len();
-    let mut cdf = Vec::with_capacity(n);
-    for i in 0..n {
-        cdf.push((i + 1) as f64 / (n as f64));
-    }
-    (
-        PyArray1::from_vec_bound(py, vals),
-        PyArray1::from_vec_bound(py, cdf),
-    )
+    let cdf: Vec<f64> = (0..n).map(|i| (i + 1) as f64 / (n as f64)).collect();
+    Ok((PyArray1::from_vec_bound(py, vals), PyArray1::from_vec_bound(py, cdf)))
 }
 
 #[pyfunction]
@@ -760,24 +952,20 @@ fn quantile_bins_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
     n_bins: usize,
-) -> Bound<'py, PyArray1<i64>> {
-    let xs = a.as_slice().unwrap();
+) -> PyResult<Bound<'py, PyArray1<i64>>> {
+    let xs = a.as_slice()?;
     let n = xs.len();
     if n == 0 || n_bins == 0 {
-        return PyArray1::from_vec_bound(py, Vec::new());
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let mut pairs: Vec<(f64, usize)> = xs.iter().cloned().zip(0..n).collect();
+    let mut pairs: Vec<(f64, usize)> = xs.iter().copied().zip(0..n).collect();
     pairs.sort_by(|(v1, _), (v2, _)| v1.partial_cmp(v2).unwrap());
 
     let mut bins = vec![-1_i64; n];
     let mut start = 0usize;
     for b in 0..n_bins {
-        let end = if b == n_bins - 1 {
-            n
-        } else {
-            ((b + 1) * n) / n_bins
-        };
+        let end = if b == n_bins - 1 { n } else { ((b + 1) * n) / n_bins };
         for i in start..end {
             let (_, idx) = pairs[i];
             bins[idx] = b as i64;
@@ -785,59 +973,38 @@ fn quantile_bins_np<'py>(
         start = end;
     }
 
-    PyArray1::from_vec_bound(py, bins)
+    Ok(PyArray1::from_vec_bound(py, bins))
 }
 
 #[pyfunction]
-fn sign_mask_np<'py>(
-    py: Python<'py>,
-    a: PyReadonlyArray1<f64>,
-) -> Bound<'py, PyArray1<i8>> {
-    let xs = a.as_slice().unwrap();
+fn sign_mask_np<'py>(py: Python<'py>, a: PyReadonlyArray1<f64>) -> PyResult<Bound<'py, PyArray1<i8>>> {
+    let xs = a.as_slice()?;
     let out: Vec<i8> = xs
         .iter()
-        .map(|&x| {
-            if x > 0.0 {
-                1
-            } else if x < 0.0 {
-                -1
-            } else {
-                0
-            }
-        })
+        .map(|&x| if x > 0.0 { 1 } else if x < 0.0 { -1 } else { 0 })
         .collect();
-    PyArray1::from_vec_bound(py, out)
+    Ok(PyArray1::from_vec_bound(py, out))
 }
 
 #[pyfunction]
 fn demean_with_signs_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
-) -> (Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<i8>>) {
-    let xs = a.as_slice().unwrap();
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<i8>>)> {
+    let xs = a.as_slice()?;
     let m = mean_slice(xs);
     let mut demeaned = Vec::with_capacity(xs.len());
     let mut signs = Vec::with_capacity(xs.len());
     for &x in xs {
         let d = x - m;
         demeaned.push(d);
-        let s = if d > 0.0 {
-            1
-        } else if d < 0.0 {
-            -1
-        } else {
-            0
-        };
-        signs.push(s);
+        signs.push(if d > 0.0 { 1 } else if d < 0.0 { -1 } else { 0 });
     }
-    (
-        PyArray1::from_vec_bound(py, demeaned),
-        PyArray1::from_vec_bound(py, signs),
-    )
+    Ok((PyArray1::from_vec_bound(py, demeaned), PyArray1::from_vec_bound(py, signs)))
 }
 
 // ======================
-// Covariance / correlation
+// Covariance / correlation (non-NaN)
 // ======================
 
 fn cov_impl(xs: &[f64], ys: &[f64]) -> f64 {
@@ -857,23 +1024,21 @@ fn cov_impl(xs: &[f64], ys: &[f64]) -> f64 {
 }
 
 #[pyfunction]
-fn cov_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> f64 {
-    let xs = x.as_slice().unwrap();
-    let ys = y.as_slice().unwrap();
-    cov_impl(xs, ys)
+fn cov_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(cov_impl(x.as_slice()?, y.as_slice()?))
 }
 
 #[pyfunction]
-fn corr_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> f64 {
-    let xs = x.as_slice().unwrap();
-    let ys = y.as_slice().unwrap();
+fn corr_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = x.as_slice()?;
+    let ys = y.as_slice()?;
     let c = cov_impl(xs, ys);
     let sx = std_slice(xs);
     let sy = std_slice(ys);
     if sx == 0.0 || sy == 0.0 || sx.is_nan() || sy.is_nan() {
-        f64::NAN
+        Ok(f64::NAN)
     } else {
-        c / (sx * sy)
+        Ok(c / (sx * sy))
     }
 }
 
@@ -882,97 +1047,82 @@ fn cov_matrix_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray2<f64>,
 ) -> Bound<'py, PyArray2<f64>> {
-    let arr: ArrayView2<'_, f64> = a.as_array();
-    let n_rows = arr.nrows();
-    let n_cols = arr.ncols();
-    let mut out = vec![0.0f64; n_cols * n_cols];
+    let arr = a.as_array();
+    let n_rows = arr.shape()[0];
+    let n_cols = arr.shape()[1];
+    let x = arr.as_slice().expect("input must be C-contiguous (row-major)");
 
-    for i in 0..n_cols {
-        let col_i = arr.column(i);
-        let mean_i = col_i.iter().copied().sum::<f64>() / (n_rows as f64);
-
-        for j in i..n_cols {
-            let col_j = arr.column(j);
-            let mean_j = col_j.iter().copied().sum::<f64>() / (n_rows as f64);
-
-            let mut acc = 0.0;
-            for k in 0..n_rows {
-                let di = col_i[k] - mean_i;
-                let dj = col_j[k] - mean_j;
-                acc += di * dj;
-            }
-
-            let cov = if n_rows > 1 {
-                acc / ((n_rows - 1) as f64)
-            } else {
-                f64::NAN
-            };
-
-            out[i * n_cols + j] = cov;
-            out[j * n_cols + i] = cov;
-        }
+    if n_rows < 2 || n_cols == 0 {
+        let out2 = Array2::<f64>::zeros((n_cols, n_cols));
+        return out2.into_pyarray_bound(py);
     }
 
-    PyArray2::from_vec2_bound(
-        py,
-        &(0..n_cols)
-            .map(|i| out[i * n_cols..(i + 1) * n_cols].to_vec())
-            .collect::<Vec<_>>(),
-    )
-    .unwrap()
+    // column means
+    let mut means = vec![0.0f64; n_cols];
+    for r in 0..n_rows {
+        let base = r * n_cols;
+        for j in 0..n_cols {
+            means[j] += x[base + j];
+        }
+    }
+    for j in 0..n_cols {
+        means[j] /= n_rows as f64;
+    }
+
+    let denom = (n_rows as f64 - 1.0).max(1.0);
+    let out = cov_matrix_out_k(x, n_rows, n_cols, &means, denom);
+
+    let out2 = Array2::from_shape_vec((n_cols, n_cols), out).unwrap();
+    out2.into_pyarray_bound(py)
 }
+
 
 #[pyfunction]
 fn corr_matrix_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray2<f64>,
 ) -> Bound<'py, PyArray2<f64>> {
-    let arr: ArrayView2<'_, f64> = a.as_array();
-    let n_rows = arr.nrows();
-    let n_cols = arr.ncols();
-    let mut out = vec![0.0f64; n_cols * n_cols];
+    let arr = a.as_array();
+    let n_rows = arr.shape()[0];
+    let n_cols = arr.shape()[1];
+    let x = arr.as_slice().expect("input must be C-contiguous (row-major)");
 
-    let mut means = Vec::with_capacity(n_cols);
-    let mut stds = Vec::with_capacity(n_cols);
-    for j in 0..n_cols {
-        let col = arr.column(j);
-        let v: Vec<f64> = col.iter().copied().collect();
-        means.push(mean_slice(&v));
-        stds.push(std_slice(&v));
+    if n_rows < 2 || n_cols == 0 {
+        let out2 = Array2::<f64>::zeros((n_cols, n_cols));
+        return out2.into_pyarray_bound(py);
     }
 
-    for i in 0..n_cols {
-        for j in i..n_cols {
-            let mut acc = 0.0;
-            for k in 0..n_rows {
-                let xi = arr[[k, i]];
-                let xj = arr[[k, j]];
-                acc += (xi - means[i]) * (xj - means[j]);
-            }
-            let cov = if n_rows > 1 {
-                acc / ((n_rows - 1) as f64)
-            } else {
-                f64::NAN
-            };
-            let denom = stds[i] * stds[j];
-            let c = if denom == 0.0 || denom.is_nan() {
-                f64::NAN
-            } else {
-                cov / denom
-            };
-            out[i * n_cols + j] = c;
-            out[j * n_cols + i] = c;
+    // column means
+    let mut means = vec![0.0f64; n_cols];
+    for r in 0..n_rows {
+        let base = r * n_cols;
+        for j in 0..n_cols {
+            means[j] += x[base + j];
         }
     }
+    for j in 0..n_cols {
+        means[j] /= n_rows as f64;
+    }
 
-    PyArray2::from_vec2_bound(
-        py,
-        &(0..n_cols)
-            .map(|i| out[i * n_cols..(i + 1) * n_cols].to_vec())
-            .collect::<Vec<_>>(),
-    )
-    .unwrap()
+    // column stds (ddof=1)
+    let denom = (n_rows as f64 - 1.0).max(1.0);
+    let mut stds = vec![0.0f64; n_cols];
+    for j in 0..n_cols {
+        let mj = means[j];
+        let mut acc = 0.0f64;
+        for r in 0..n_rows {
+            let base = r * n_cols;
+            let d = x[base + j] - mj;
+            acc += d * d;
+        }
+        stds[j] = (acc / denom).sqrt();
+    }
+    let out = corr_matrix_out_k(x, n_rows, n_cols, &means, &stds, denom);
+
+    let out2 = Array2::from_shape_vec((n_cols, n_cols), out).unwrap();
+    out2.into_pyarray_bound(py)
 }
+
 
 #[pyfunction]
 fn rolling_cov_np<'py>(
@@ -980,50 +1130,24 @@ fn rolling_cov_np<'py>(
     x: PyReadonlyArray1<f64>,
     y: PyReadonlyArray1<f64>,
     window: usize,
-) -> Bound<'py, PyArray1<f64>> {
-    let xs = x.as_slice().unwrap();
-    let ys = y.as_slice().unwrap();
-    let n = xs.len().min(ys.len());
-    if window == 0 || window > n {
-        return PyArray1::from_vec_bound(py, Vec::new());
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = x.as_slice()?;
+    let ys = y.as_slice()?;
+
+    if xs.len() != ys.len() {
+        return Err(PyValueError::new_err("x and y must have the same length"));
+    }
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > xs.len() {
+        return Err(PyValueError::new_err("window must be <= len(x)"));
     }
 
-    let xs = &xs[..n];
-    let ys = &ys[..n];
-    let mut out = Vec::with_capacity(n - window + 1);
-
-    let mut sum_x = 0.0;
-    let mut sum_y = 0.0;
-    let mut sum_xy = 0.0;
-
-    for i in 0..window {
-        let xi = xs[i];
-        let yi = ys[i];
-        sum_x += xi;
-        sum_y += yi;
-        sum_xy += xi * yi;
-    }
-
-    for i in (window - 1)..n {
-        if i > window - 1 {
-            let xi_new = xs[i];
-            let yi_new = ys[i];
-            let xi_old = xs[i - window];
-            let yi_old = ys[i - window];
-            sum_x += xi_new - xi_old;
-            sum_y += yi_new - yi_old;
-            sum_xy += xi_new * yi_new - xi_old * yi_old;
-        }
-
-        let w = window as f64;
-        let mx = sum_x / w;
-        let my = sum_y / w;
-        let cov = (sum_xy - w * mx * my) / ((window - 1) as f64);
-        out.push(cov);
-    }
-
-    PyArray1::from_vec_bound(py, out)
+    let out = rolling_cov_vec(xs, ys, window);
+    Ok(PyArray1::from_vec_bound(py, out))
 }
+
 
 #[pyfunction]
 fn rolling_corr_np<'py>(
@@ -1031,16 +1155,20 @@ fn rolling_corr_np<'py>(
     x: PyReadonlyArray1<f64>,
     y: PyReadonlyArray1<f64>,
     window: usize,
-) -> Bound<'py, PyArray1<f64>> {
-    let xs = x.as_slice().unwrap();
-    let ys = y.as_slice().unwrap();
-    let n = xs.len().min(ys.len());
-    if window == 0 || window > n {
-        return PyArray1::from_vec_bound(py, Vec::new());
-    }
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = x.as_slice()?;
+    let ys = y.as_slice()?;
 
-    let xs = &xs[..n];
-    let ys = &ys[..n];
+    if xs.len() != ys.len() {
+        return Err(PyValueError::new_err("x and y must have the same length"));
+    }
+    let n = xs.len();
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        return Err(PyValueError::new_err("window must be <= len(x)"));
+    }
     let mut out = Vec::with_capacity(n - window + 1);
 
     let mut sum_x = 0.0;
@@ -1081,16 +1209,281 @@ fn rolling_corr_np<'py>(
         let cov = (sum_xy - w * mx * my) / ((window - 1) as f64);
 
         let denom = (var_x.max(0.0).sqrt()) * (var_y.max(0.0).sqrt());
-        let c = if denom == 0.0 || denom.is_nan() {
-            f64::NAN
-        } else {
-            cov / denom
-        };
-        out.push(c);
+        out.push(if denom == 0.0 || denom.is_nan() { f64::NAN } else { cov / denom });
     }
 
-    PyArray1::from_vec_bound(py, out)
+    Ok(PyArray1::from_vec_bound(py, out))
 }
+
+
+// ======================
+// Welford (single-pass, NaN-skipping)
+// ======================
+
+#[pyfunction]
+pub fn welford_np(a: PyReadonlyArray1<f64>) -> PyResult<(f64, f64, usize)> {
+    let xs = a.as_slice()?;
+    let mut mean = 0.0;
+    let mut m2 = 0.0;
+    let mut n = 0usize;
+
+    for &x in xs {
+        if x.is_nan() {
+            continue;
+        }
+        n += 1;
+        let delta = x - mean;
+        mean += delta / n as f64;
+        let delta2 = x - mean;
+        m2 += delta * delta2;
+    }
+
+    if n < 2 {
+        return Ok((mean, f64::NAN, n));
+    }
+
+    let var = m2 / (n as f64 - 1.0);
+    Ok((mean, var, n))
+}
+
+// ======================
+// NaN-aware covariance/correlation (pairwise deletion, ddof=1)
+// ======================
+
+#[pyfunction]
+pub fn cov_nan_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = x.as_slice()?;
+    let ys = y.as_slice()?;
+    if xs.len() != ys.len() {
+        return Err(PyValueError::new_err("length mismatch"));
+    }
+
+    let mut mx = 0.0;
+    let mut my = 0.0;
+    let mut n = 0usize;
+
+    for i in 0..xs.len() {
+        let xi = xs[i];
+        let yi = ys[i];
+        if xi.is_nan() || yi.is_nan() {
+            continue;
+        }
+        n += 1;
+        mx += xi;
+        my += yi;
+    }
+
+    if n < 2 {
+        return Ok(f64::NAN);
+    }
+
+    mx /= n as f64;
+    my /= n as f64;
+
+    let mut cov = 0.0;
+    for i in 0..xs.len() {
+        let xi = xs[i];
+        let yi = ys[i];
+        if xi.is_nan() || yi.is_nan() {
+            continue;
+        }
+        cov += (xi - mx) * (yi - my);
+    }
+
+    Ok(cov / (n as f64 - 1.0))
+}
+
+#[pyfunction]
+pub fn corr_nan_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = x.as_slice()?;
+    let ys = y.as_slice()?;
+    if xs.len() != ys.len() {
+        return Err(PyValueError::new_err("length mismatch"));
+    }
+
+    // Means over valid pairs
+    let mut mx = 0.0;
+    let mut my = 0.0;
+    let mut n = 0usize;
+    for i in 0..xs.len() {
+        let xi = xs[i];
+        let yi = ys[i];
+        if xi.is_nan() || yi.is_nan() {
+            continue;
+        }
+        n += 1;
+        mx += xi;
+        my += yi;
+    }
+    if n < 2 {
+        return Ok(f64::NAN);
+    }
+    mx /= n as f64;
+    my /= n as f64;
+
+    // Cov/vars
+    let mut sxx = 0.0;
+    let mut syy = 0.0;
+    let mut sxy = 0.0;
+    for i in 0..xs.len() {
+        let xi = xs[i];
+        let yi = ys[i];
+        if xi.is_nan() || yi.is_nan() {
+            continue;
+        }
+        let dx = xi - mx;
+        let dy = yi - my;
+        sxx += dx * dx;
+        syy += dy * dy;
+        sxy += dx * dy;
+    }
+
+    let denom = (n as f64) - 1.0;
+    let varx = sxx / denom;
+    let vary = syy / denom;
+    let cov = sxy / denom;
+
+    if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
+        return Ok(f64::NAN);
+    }
+    Ok(cov / (varx * vary).sqrt())
+}
+
+#[pyfunction]
+pub fn rolling_cov_nan_np<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<f64>,
+    y: PyReadonlyArray1<f64>,
+    window: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = x.as_slice()?;
+    let ys = y.as_slice()?;
+    let n = xs.len();
+
+    if ys.len() != n {
+        return Err(PyValueError::new_err("length mismatch"));
+    }
+    if window == 0 || window > n {
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
+    }
+
+    let mut out = Vec::with_capacity(n - window + 1);
+
+    for i in 0..=(n - window) {
+        let mut mx = 0.0;
+        let mut my = 0.0;
+        let mut k = 0usize;
+
+        for j in i..(i + window) {
+            let xi = xs[j];
+            let yi = ys[j];
+            if xi.is_nan() || yi.is_nan() {
+                continue;
+            }
+            k += 1;
+            mx += xi;
+            my += yi;
+        }
+
+        if k < window {
+            out.push(f64::NAN);
+            continue;
+        }
+
+        mx /= k as f64;
+        my /= k as f64;
+
+        let mut cov = 0.0;
+        for j in i..(i + window) {
+            let xi = xs[j];
+            let yi = ys[j];
+            if xi.is_nan() || yi.is_nan() {
+                continue;
+            }
+            cov += (xi - mx) * (yi - my);
+        }
+
+        out.push(cov / (k as f64 - 1.0));
+    }
+
+    Ok(PyArray1::from_vec_bound(py, out))
+}
+
+
+#[pyfunction]
+pub fn rolling_corr_nan_np<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<f64>,
+    y: PyReadonlyArray1<f64>,
+    window: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = x.as_slice()?;
+    let ys = y.as_slice()?;
+    let n = xs.len();
+
+    if ys.len() != n {
+        return Err(PyValueError::new_err("length mismatch"));
+    }
+    if window == 0 || window > n {
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
+    }
+
+    let mut out = Vec::with_capacity(n - window + 1);
+
+    for i in 0..=(n - window) {
+        // Means over valid pairs in window
+        let mut mx = 0.0;
+        let mut my = 0.0;
+        let mut k = 0usize;
+        for j in i..(i + window) {
+            let xi = xs[j];
+            let yi = ys[j];
+            if xi.is_nan() || yi.is_nan() {
+                continue;
+            }
+            k += 1;
+            mx += xi;
+            my += yi;
+        }
+        if k < window {
+            out.push(f64::NAN);
+            continue;
+        }
+        mx /= k as f64;
+        my /= k as f64;
+
+        // Cov/vars
+        let mut sxx = 0.0;
+        let mut syy = 0.0;
+        let mut sxy = 0.0;
+        for j in i..(i + window) {
+            let xi = xs[j];
+            let yi = ys[j];
+            if xi.is_nan() || yi.is_nan() {
+                continue;
+            }
+            let dx = xi - mx;
+            let dy = yi - my;
+            sxx += dx * dx;
+            syy += dy * dy;
+            sxy += dx * dy;
+        }
+
+        let denom = (k as f64) - 1.0;
+        let varx = sxx / denom;
+        let vary = syy / denom;
+        let cov = sxy / denom;
+
+        if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
+            out.push(f64::NAN);
+        } else {
+            out.push(cov / (varx * vary).sqrt());
+        }
+    }
+
+    Ok(PyArray1::from_vec_bound(py, out))
+}
+
 
 // ======================
 // KDE
@@ -1102,24 +1495,17 @@ fn kde_gaussian_np<'py>(
     a: PyReadonlyArray1<f64>,
     n_points: usize,
     bandwidth: Option<f64>,
-) -> (Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>) {
-    let xs = a.as_slice().unwrap();
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+    let xs = a.as_slice()?;
     let n = xs.len();
     if n == 0 || n_points == 0 {
-        return (
-            PyArray1::from_vec_bound(py, Vec::new()),
-            PyArray1::from_vec_bound(py, Vec::new()),
-        );
+        return Ok((PyArray1::from_vec_bound(py, vec![]), PyArray1::from_vec_bound(py, vec![])));
     }
 
     let mut values = xs.to_vec();
     values.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let mut s = 0.0;
-    for &v in &values {
-        s += v;
-    }
-    let mean = s / (values.len() as f64);
+    let mean = values.iter().copied().sum::<f64>() / (values.len() as f64);
     let mut acc = 0.0;
     for &v in &values {
         let d = v - mean;
@@ -1142,19 +1528,14 @@ fn kde_gaussian_np<'py>(
     let mx = *values.last().unwrap();
 
     if mx == mn {
-        let grid = vec![mn; n_points];
-        let dens = vec![0.0; n_points];
-        return (
-            PyArray1::from_vec_bound(py, grid),
-            PyArray1::from_vec_bound(py, dens),
-        );
+        return Ok((
+            PyArray1::from_vec_bound(py, vec![mn; n_points]),
+            PyArray1::from_vec_bound(py, vec![0.0; n_points]),
+        ));
     }
 
     let step = (mx - mn) / ((n_points - 1) as f64);
-    let mut grid = Vec::with_capacity(n_points);
-    for i in 0..n_points {
-        grid.push(mn + step * (i as f64));
-    }
+    let grid: Vec<f64> = (0..n_points).map(|i| mn + step * (i as f64)).collect();
 
     let norm_factor = 1.0 / (bw * (2.0 * std::f64::consts::PI).sqrt());
     let mut dens = Vec::with_capacity(n_points);
@@ -1168,12 +1549,42 @@ fn kde_gaussian_np<'py>(
         dens.push(norm_factor * sum / (n as f64));
     }
 
-    (
-        PyArray1::from_vec_bound(py, grid),
-        PyArray1::from_vec_bound(py, dens),
-    )
+    Ok((PyArray1::from_vec_bound(py, grid), PyArray1::from_vec_bound(py, dens)))
 }
 
+// ======================
+// Padding util
+// ======================
+
+#[pyfunction]
+fn pad_nan_np<'py>(py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    Ok(PyArray1::from_vec_bound(py, vec![f64::NAN; n]))
+}
+
+// ======================
+// Effect-size naming compatibility
+// ======================
+
+#[pyfunction(signature = (x, y, pooled=None))]
+fn hedges_g_2samp_np(
+    x: PyReadonlyArray1<f64>,
+    y: PyReadonlyArray1<f64>,
+    pooled: Option<bool>,
+) -> PyResult<f64> {
+    // Public API: defaults to pooled variance
+    let pooled = pooled.unwrap_or(true);
+    infer::effect::hedges_g_2samp_np2(x, y, pooled)
+}
+
+#[pyfunction]
+fn hedges_g_2samp_raw_np(
+    x: PyReadonlyArray1<f64>,
+    y: PyReadonlyArray1<f64>,
+    pooled: bool,
+) -> PyResult<f64> {
+    // Raw API: explicit pooled flag, no defaults
+    infer::effect::hedges_g_2samp_np2(x, y, pooled)
+}
 // ======================
 // Module definition
 // ======================
@@ -1183,22 +1594,45 @@ fn bunker_stats_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // basic stats
     m.add_function(wrap_pyfunction!(mean_np, m)?)?;
     m.add_function(wrap_pyfunction!(mean_skipna_np, m)?)?;
+    m.add_function(wrap_pyfunction!(mean_nan_np, m)?)?;
     m.add_function(wrap_pyfunction!(var_np, m)?)?;
     m.add_function(wrap_pyfunction!(var_skipna_np, m)?)?;
+    m.add_function(wrap_pyfunction!(var_nan_np, m)?)?;
     m.add_function(wrap_pyfunction!(std_np, m)?)?;
     m.add_function(wrap_pyfunction!(std_skipna_np, m)?)?;
+    m.add_function(wrap_pyfunction!(std_nan_np, m)?)?;
+
+    m.add_function(wrap_pyfunction!(zscore_np, m)?)?;
+    m.add_function(wrap_pyfunction!(zscore_skipna_np, m)?)?;
+    m.add_function(wrap_pyfunction!(skew_np, m)?)?;
+    m.add_function(wrap_pyfunction!(kurtosis_np, m)?)?;
+
     m.add_function(wrap_pyfunction!(percentile_np, m)?)?;
     m.add_function(wrap_pyfunction!(iqr_np, m)?)?;
+    m.add_function(wrap_pyfunction!(iqr_width_np, m)?)?;
     m.add_function(wrap_pyfunction!(mad_np, m)?)?;
+    m.add_function(wrap_pyfunction!(trimmed_mean_np, m)?)?;
 
     // multi-D
     m.add_function(wrap_pyfunction!(mean_axis_np, m)?)?;
     m.add_function(wrap_pyfunction!(mean_over_last_axis_dyn_np, m)?)?;
 
-    // rolling
+    // rolling (truncated)
     m.add_function(wrap_pyfunction!(rolling_mean_np, m)?)?;
+    m.add_function(wrap_pyfunction!(rolling_var_np, m)?)?;
     m.add_function(wrap_pyfunction!(rolling_std_np, m)?)?;
+    m.add_function(wrap_pyfunction!(rolling_mean_std_np, m)?)?;
     m.add_function(wrap_pyfunction!(rolling_zscore_np, m)?)?;
+
+    // rolling axis0 (truncated)
+    m.add_function(wrap_pyfunction!(rolling_mean_std_axis0_np, m)?)?;
+    m.add_function(wrap_pyfunction!(rolling_mean_axis0_np, m)?)?;
+    m.add_function(wrap_pyfunction!(rolling_std_axis0_np, m)?)?;
+
+    // rolling (NaN-aware, full-length)
+    m.add_function(wrap_pyfunction!(rolling_mean_nan_np, m)?)?;
+    m.add_function(wrap_pyfunction!(rolling_std_nan_np, m)?)?;
+    m.add_function(wrap_pyfunction!(rolling_zscore_nan_np, m)?)?;
     m.add_function(wrap_pyfunction!(ewma_np, m)?)?;
 
     // outliers / scaling
@@ -1207,6 +1641,7 @@ fn bunker_stats_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(minmax_scale_np, m)?)?;
     m.add_function(wrap_pyfunction!(robust_scale_np, m)?)?;
     m.add_function(wrap_pyfunction!(winsorize_np, m)?)?;
+    m.add_function(wrap_pyfunction!(winsorize_clip_np, m)?)?;
 
     // diff / cum / ecdf / bins / signs
     m.add_function(wrap_pyfunction!(diff_np, m)?)?;
@@ -1226,8 +1661,30 @@ fn bunker_stats_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rolling_cov_np, m)?)?;
     m.add_function(wrap_pyfunction!(rolling_corr_np, m)?)?;
 
+    // Welford + NaN-aware covariance/correlation
+    m.add_function(wrap_pyfunction!(welford_np, m)?)?;
+    m.add_function(wrap_pyfunction!(cov_nan_np, m)?)?;
+    m.add_function(wrap_pyfunction!(corr_nan_np, m)?)?;
+    m.add_function(wrap_pyfunction!(rolling_cov_nan_np, m)?)?;
+    m.add_function(wrap_pyfunction!(rolling_corr_nan_np, m)?)?;
+
     // KDE
     m.add_function(wrap_pyfunction!(kde_gaussian_np, m)?)?;
+
+    // Inference core (keep your existing wiring style)
+    m.add_function(wrap_pyfunction!(infer::ttest::t_test_1samp_np, m)?)?;
+    m.add_function(wrap_pyfunction!(infer::ttest::t_test_2samp_np, m)?)?;
+    m.add_function(wrap_pyfunction!(infer::chi2::chi2_gof_np, m)?)?;
+    m.add_function(wrap_pyfunction!(infer::chi2::chi2_independence_np, m)?)?;
+    m.add_function(wrap_pyfunction!(infer::effect::mean_diff_ci_np, m)?)?;
+    m.add_function(wrap_pyfunction!(infer::effect::cohens_d_2samp_np, m)?)?;
+    m.add_function(wrap_pyfunction!(hedges_g_2samp_np, m)?)?;
+    m.add_function(wrap_pyfunction!(hedges_g_2samp_raw_np, m)?)?;
+    m.add_function(wrap_pyfunction!(infer::mann_whitney::mann_whitney_u_np, m)?)?;
+    m.add_function(wrap_pyfunction!(infer::ks::ks_1samp_np, m)?)?;
+
+    // padding
+    m.add_function(wrap_pyfunction!(pad_nan_np, m)?)?;
 
     Ok(())
 }

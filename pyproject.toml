@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "bunker-stats-rs"
-version = "0.2A"
+version = "0.2.5"
 description = "Ultra-fast Rust-powered statistics and time-series utilities for Python."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -46,3 +46,19 @@ homepage = "https://github.com/AdamEzzat1/bunker-stats"
 repository = "https://github.com/AdamEzzat1/bunker-stats"
 documentation = "https://github.com/AdamEzzat1/bunker-stats"
 issues = "https://github.com/AdamEzzat1/bunker-stats/issues"
+
+# -------------------------------
+# maturin packaging configuration
+# -------------------------------
+[tool.maturin]
+exclude = [
+    ".venv/**",
+    "venv/**",
+    "target/**",
+    "dist/**",
+    ".hypothesis/**",
+    ".pytest_cache/**",
+    "**/__pycache__/**",
+    "**/*.pyc",
+    ".ipynb_checkpoints/**",
+]
