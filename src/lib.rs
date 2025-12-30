@@ -22,13 +22,17 @@ use kernels::quantile::iqr::iqr_slice as iqr_slice_k;
 use kernels::quantile::winsor::winsorize_vec as winsorize_vec_k;
 use kernels::matrix::cov::cov_matrix_out as cov_matrix_out_k;
 use kernels::matrix::corr::corr_matrix_out as corr_matrix_out_k;
+use kernels::robust::mad::mad_slice as mad_slice_k;
+use kernels::robust::trimmed_mean::trimmed_mean_slice as trimmed_mean_slice_k;
+
 
 
 // ======================
 // Core slice helpers
 // ======================
 
-fn mean_slice(xs: &[f64]) -> f64 {
+pub(crate) fn mean_slice(xs: &[f64]) -> f64 {
+
     if xs.is_empty() {
         return f64::NAN;
     }
@@ -202,24 +206,17 @@ fn iqr_width_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
 
 #[pyfunction]
 fn mad_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(mad_slice(a.as_slice()?))
+    Ok(mad_slice_k(a.as_slice()?))
 }
 
 #[pyfunction]
-fn trimmed_mean_np(a: PyReadonlyArray1<f64>, proportion_to_cut: f64) -> PyResult<f64> {
-    let xs = a.as_slice()?;
-    if xs.is_empty() {
-        return Ok(f64::NAN);
-    }
-    let mut v = xs.to_vec();
-    v.sort_by(|x, y| x.partial_cmp(y).unwrap());
-    let n = v.len();
-    let cut = ((n as f64) * proportion_to_cut).floor() as usize;
-    if cut * 2 >= n {
-        return Ok(f64::NAN);
-    }
-    Ok(mean_slice(&v[cut..(n - cut)]))
+fn trimmed_mean_np(
+    a: PyReadonlyArray1<f64>,
+    proportion_to_cut: f64,
+) -> PyResult<f64> {
+    Ok(trimmed_mean_slice_k(a.as_slice()?, proportion_to_cut))
 }
+
 
 #[pyfunction]
 fn zscore_np<'py>(py: Python<'py>, a: PyReadonlyArray1<f64>) -> PyResult<Bound<'py, PyArray1<f64>>> {

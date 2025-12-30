@@ -6,4 +6,6 @@
 pub(crate) mod rolling;
 pub(crate) mod quantile;
 pub(crate) mod matrix;
+pub(crate) mod robust;
+
 // src/kernels/rolling/mod.r
