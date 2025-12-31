@@ -1,0 +1,253 @@
+fn,status,returncode,stderr_tail,stdout_tail
+mean_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+std_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+var_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+zscore_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+percentile_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+iqr_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+iqr_width_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+mad_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+skew_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+kurtosis_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+trimmed_mean_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+mean_nan_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+std_nan_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+var_nan_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+mean_axis_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+mean_over_last_axis_dyn_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_mean_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_std_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_var_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_mean_std_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_zscore_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+ewma_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_mean_axis0_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_std_axis0_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_mean_std_axis0_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_mean_nan_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_std_nan_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_zscore_nan_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+welford_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+sign_mask_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+demean_with_signs_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+iqr_outliers_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+zscore_outliers_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+minmax_scale_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+robust_scale_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+winsorize_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+quantile_bins_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+diff_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+pct_change_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+cumsum_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+cummean_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+ecdf_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+cov_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+corr_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+cov_matrix_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+corr_matrix_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_cov_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_corr_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+cov_nan_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+corr_nan_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_cov_nan_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+rolling_corr_nan_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+kde_gaussian_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+t_test_1samp_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+t_test_2samp_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+chi2_gof_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+chi2_independence_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+cohens_d_2samp_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+hedges_g_2samp_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+mean_diff_ci_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+mann_whitney_u_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+ks_1samp_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
+pad_nan_np,subproc_failed,1,"Traceback (most recent call last):
+  File ""<string>"", line 21, in <module>
+ModuleNotFoundError: No module named 'bunker_stats'
+",
