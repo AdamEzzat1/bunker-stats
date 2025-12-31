@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Rust
+target/
+*.rlib
+*.rmeta
+
+# Windows build artifacts
+*.dll
+*.pdb
+*.exe
+
+# Benchmark outputs (keep only if intentional)
+results_*.csv
+*_bench_*.csv
