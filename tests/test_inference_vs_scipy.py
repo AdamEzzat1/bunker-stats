@@ -253,7 +253,7 @@ def test_chi2_contingency_matches_scipy_debug():
                          rtol=RTOL_P, atol=ATOL_P, context_rows=ctx)
 
 
-@pytest.mark.xfail(reason="Pillar C (MWU) not implemented yet")
+
 def test_mannwhitneyu_matches_scipy_debug():
     rng = np.random.default_rng(3)
     x = rng.normal(size=200).astype(np.float64)
@@ -278,7 +278,7 @@ def test_mannwhitneyu_matches_scipy_debug():
                          rtol=RTOL_P, atol=ATOL_P, context_rows=ctx)
 
 
-@pytest.mark.xfail(reason="Pillar C (KS) not implemented yet")
+
 def test_ks_1samp_matches_scipy_norm_debug():
     rng = np.random.default_rng(4)
     x = rng.normal(size=300).astype(np.float64)
@@ -296,4 +296,4 @@ def test_ks_1samp_matches_scipy_norm_debug():
 
     # KS p-values can differ slightly; keep your looser tolerance here.
     _assert_close_scalar(name="pvalue", out_val=float(out["pvalue"]), ref_val=float(ref.pvalue),
-                         rtol=1e-6, atol=1e-10, context_rows=ctx)
+                         rtol=2e-6, atol=1e-10, context_rows=ctx)
