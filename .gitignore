@@ -1,18 +1,19 @@
+# Rust
+/target/
+
 # Python
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.whl
+*.egg-info/
 
-# Rust
-target/
-*.rlib
-*.rmeta
+# Hypothesis
+.hypothesis/
 
-# Windows build artifacts
-*.dll
-*.pdb
-*.exe
+# Local CSV / benchmarks
+*.csv
 
-# Benchmark outputs (keep only if intentional)
-results_*.csv
-*_bench_*.csv
+RECOVERY_DIFF.patch
+

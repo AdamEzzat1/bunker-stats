@@ -1,6 +1,6 @@
 [package]
 name = "bunker-stats-rs"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 
 [lib]
@@ -13,6 +13,9 @@ numpy = { version = "0.22" }
 statrs = "0.16"
 # Rayon available for later parallel speedups, but off by default
 rayon = { version = "1.10", optional = true }
+rand = "0.8"
+nalgebra = "0.29"
+
 
 [features]
 default =  ["parallel"]

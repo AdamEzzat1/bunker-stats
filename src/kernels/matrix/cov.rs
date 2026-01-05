@@ -1,68 +1,37 @@
-// src/kernels/matrix/cov.rs
-//
-// Covariance matrix kernel (fills full symmetric matrix).
+use numpy::ndarray::ArrayView2;
 
-pub(crate) fn cov_matrix_out(
-    x: &[f64],
-    n_rows: usize,
-    n_cols: usize,
-    means: &[f64],
-    denom: f64,
-) -> Vec<f64> {
-    let mut out = vec![0.0f64; n_cols * n_cols];
-
-    #[cfg(feature = "parallel")]
-    {
-        use rayon::prelude::*;
-        let results: Vec<(usize, Vec<f64>)> = (0..n_cols)
-            .into_par_iter()
-            .map(|i| {
-                let mi = means[i];
-                let mut row_upper = vec![0.0f64; n_cols - i];
-                for (ofs, j) in (i..n_cols).enumerate() {
-                    let mj = means[j];
-                    let mut acc = 0.0f64;
-                    for r in 0..n_rows {
-                        let base = r * n_cols;
-                        let xi = x[base + i] - mi;
-                        let xj = x[base + j] - mj;
-                        acc += xi * xj;
-                    }
-                    row_upper[ofs] = acc / denom;
-                }
-                (i, row_upper)
-            })
-            .collect();
-
-        for (i, row_upper) in results {
-            for (ofs, j) in (i..n_cols).enumerate() {
-                let v = row_upper[ofs];
-                out[i * n_cols + j] = v;
-                out[j * n_cols + i] = v;
-            }
-        }
-
-        return out;
+/// Covariance matrix similar to numpy.cov(x, rowvar=False)
+pub fn cov_matrix_view(arr: ArrayView2<f64>) -> Vec<Vec<f64>> {
+    let (n_rows, n_cols) = arr.dim();
+    if n_rows < 2 || n_cols == 0 {
+        return vec![vec![f64::NAN; n_cols]; n_cols];
     }
 
-    #[cfg(not(feature = "parallel"))]
-    {
-        for i in 0..n_cols {
-            let mi = means[i];
-            for j in i..n_cols {
-                let mj = means[j];
-                let mut acc = 0.0f64;
-                for r in 0..n_rows {
-                    let base = r * n_cols;
-                    let xi = x[base + i] - mi;
-                    let xj = x[base + j] - mj;
-                    acc += xi * xj;
-                }
-                let v = acc / denom;
-                out[i * n_cols + j] = v;
-                out[j * n_cols + i] = v;
-            }
+    // column means
+    let mut means = vec![0.0; n_cols];
+    for j in 0..n_cols {
+        let mut s = 0.0;
+        for i in 0..n_rows {
+            s += arr[(i, j)];
         }
-        out
+        means[j] = s / (n_rows as f64);
     }
+
+    // cov
+    let denom = (n_rows as f64) - 1.0;
+    let mut out = vec![vec![0.0; n_cols]; n_cols];
+    for a in 0..n_cols {
+        for b in a..n_cols {
+            let mut s = 0.0;
+            for i in 0..n_rows {
+                let da = arr[(i, a)] - means[a];
+                let db = arr[(i, b)] - means[b];
+                s += da * db;
+            }
+            let v = s / denom;
+            out[a][b] = v;
+            out[b][a] = v;
+        }
+    }
+    out
 }

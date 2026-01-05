@@ -20,10 +20,30 @@ use kernels::rolling::var::vars_from_stds;
 use kernels::quantile::percentile::percentile_slice as percentile_slice_k;
 use kernels::quantile::iqr::iqr_slice as iqr_slice_k;
 use kernels::quantile::winsor::winsorize_vec as winsorize_vec_k;
-use kernels::matrix::cov::cov_matrix_out as cov_matrix_out_k;
+use crate::kernels::matrix::cov::cov_matrix_view; 
 use kernels::matrix::corr::corr_matrix_out as corr_matrix_out_k;
 use kernels::robust::mad::mad_slice as mad_slice_k;
 use kernels::robust::trimmed_mean::trimmed_mean_slice as trimmed_mean_slice_k;
+
+// resampling
+use crate::kernels::resampling::bootstrap::{
+    bootstrap_mean, bootstrap_mean_ci, bootstrap_ci, bootstrap_corr,
+};
+use crate::kernels::resampling::jackknife::{ jackknife_mean, jackknife_mean_ci };
+
+// tsa
+use crate::kernels::tsa::stationarity::{ adf_test, kpss_test, pp_test };
+use crate::kernels::tsa::diagnostics::{ ljung_box, durbin_watson, bg_test };
+use crate::kernels::tsa::acf_pacf::{ acf, pacf };
+use crate::kernels::tsa::spectral::{ periodogram };
+use crate::kernels::tsa::rolling_autocorr::rolling_autocorr;
+ 
+
+// dist
+use crate::kernels::dist::normal::{ norm_pdf, norm_cdf, norm_ppf };
+use crate::kernels::dist::exponential::{ exp_pdf, exp_cdf };
+use crate::kernels::dist::uniform::{ unif_pdf, unif_cdf };
+
 
 
 
@@ -1040,37 +1060,25 @@ fn corr_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> 
 }
 
 #[pyfunction]
-fn cov_matrix_np<'py>(
+pub fn cov_matrix_np<'py>(
     py: Python<'py>,
-    a: PyReadonlyArray2<f64>,
-) -> Bound<'py, PyArray2<f64>> {
-    let arr = a.as_array();
+    x: PyReadonlyArray2<f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let arr = x.as_array();
     let n_rows = arr.shape()[0];
     let n_cols = arr.shape()[1];
-    let x = arr.as_slice().expect("input must be C-contiguous (row-major)");
 
     if n_rows < 2 || n_cols == 0 {
-        let out2 = Array2::<f64>::zeros((n_cols, n_cols));
-        return out2.into_pyarray_bound(py);
+        let out2 = numpy::ndarray::Array2::<f64>::zeros((n_cols, n_cols));
+        return Ok(out2.into_pyarray_bound(py));
     }
 
-    // column means
-    let mut means = vec![0.0f64; n_cols];
-    for r in 0..n_rows {
-        let base = r * n_cols;
-        for j in 0..n_cols {
-            means[j] += x[base + j];
-        }
-    }
-    for j in 0..n_cols {
-        means[j] /= n_rows as f64;
-    }
+    let out = cov_matrix_view(arr);
 
-    let denom = (n_rows as f64 - 1.0).max(1.0);
-    let out = cov_matrix_out_k(x, n_rows, n_cols, &means, denom);
-
-    let out2 = Array2::from_shape_vec((n_cols, n_cols), out).unwrap();
-    out2.into_pyarray_bound(py)
+    Ok(
+        PyArray2::from_vec2_bound(py, &out)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("cov_matrix_np: from_vec2_bound failed"))?
+    )
 }
 
 
@@ -1679,6 +1687,41 @@ fn bunker_stats_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hedges_g_2samp_raw_np, m)?)?;
     m.add_function(wrap_pyfunction!(infer::mann_whitney::mann_whitney_u_np, m)?)?;
     m.add_function(wrap_pyfunction!(infer::ks::ks_1samp_np, m)?)?;
+	
+	    // ----------------------
+    // sandboxstats payload
+    // ----------------------
+
+    // resampling
+    m.add_function(wrap_pyfunction!(bootstrap_mean, m)?)?;
+    m.add_function(wrap_pyfunction!(bootstrap_mean_ci, m)?)?;
+    m.add_function(wrap_pyfunction!(bootstrap_ci, m)?)?;
+    m.add_function(wrap_pyfunction!(bootstrap_corr, m)?)?;
+    m.add_function(wrap_pyfunction!(jackknife_mean, m)?)?;
+    m.add_function(wrap_pyfunction!(jackknife_mean_ci, m)?)?;
+
+    // tsa
+    m.add_function(wrap_pyfunction!(adf_test, m)?)?;
+    m.add_function(wrap_pyfunction!(kpss_test, m)?)?;
+    m.add_function(wrap_pyfunction!(pp_test, m)?)?;
+    m.add_function(wrap_pyfunction!(ljung_box, m)?)?;
+    m.add_function(wrap_pyfunction!(durbin_watson, m)?)?;
+    m.add_function(wrap_pyfunction!(bg_test, m)?)?;
+
+    m.add_function(wrap_pyfunction!(acf, m)?)?;
+    m.add_function(wrap_pyfunction!(pacf, m)?)?;
+    m.add_function(wrap_pyfunction!(rolling_autocorr, m)?)?;
+    m.add_function(wrap_pyfunction!(periodogram, m)?)?;
+
+    // dist
+    m.add_function(wrap_pyfunction!(norm_pdf, m)?)?;
+    m.add_function(wrap_pyfunction!(norm_cdf, m)?)?;
+    m.add_function(wrap_pyfunction!(norm_ppf, m)?)?;
+    m.add_function(wrap_pyfunction!(exp_pdf, m)?)?;
+    m.add_function(wrap_pyfunction!(exp_cdf, m)?)?;
+    m.add_function(wrap_pyfunction!(unif_pdf, m)?)?;
+    m.add_function(wrap_pyfunction!(unif_cdf, m)?)?;
+
 
     // padding
     m.add_function(wrap_pyfunction!(pad_nan_np, m)?)?;

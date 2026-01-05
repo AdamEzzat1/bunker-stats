@@ -100,6 +100,158 @@ Internally, the crate is organized into two main Rust modules:
 > **Python calling style:** functions are imported from `bunker_stats` (or whichever top-level module you expose in `__init__.py`).
 > Below, “Location” refers to the Rust source module.
 
+# bunker-stats v0.2.8 — Release Notes
+
+## 🔁 Sandbox Integration (Major Internal Milestone)
+
+v0.2.8 integrates nearly all functionality from the sandbox into the main library, consolidating experimental work into a single, coherent Rust core with a stable Python API.
+
+This release significantly expands the scope of **bunker-stats** beyond core statistics into resampling, time-series diagnostics, and distribution utilities, while keeping the original performance and numerical-stability goals intact.
+
+---
+
+## ✨ New & Expanded Capabilities
+
+### Resampling utilities
+
+**Bootstrap utilities**
+- `bootstrap_mean`
+- `bootstrap_mean_ci`
+- `bootstrap_ci`
+- `bootstrap_corr`
+
+**Jackknife utilities**
+- `jackknife_mean`
+- `jackknife_mean_ci`
+
+All resampling routines are implemented in Rust and exposed via Python, avoiding Python-level resampling loops.
+
+---
+
+### Time-series diagnostics & analysis
+
+**Stationarity tests**
+- Augmented Dickey–Fuller (ADF)
+- KPSS
+- Phillips–Perron (PP)
+
+**Diagnostic tests**
+- Ljung–Box
+- Durbin–Watson
+
+**Autocorrelation tools**
+- ACF
+- PACF
+- Rolling autocorrelation
+
+**Spectral analysis**
+- Periodogram  
+  *(currently skipped in benchmarks; see Known Issues)*
+
+---
+
+### Distribution helpers
+
+**Normal distribution**
+- `norm_pdf`
+- `norm_cdf`
+- `norm_ppf`
+
+**Exponential distribution**
+- `exp_pdf`
+- `exp_cdf`
+
+**Uniform distribution**
+- `unif_pdf`
+- `unif_cdf`
+
+These helpers are lightweight numerical kernels designed for fast evaluation on large arrays.
+
+---
+
+### Benchmarking focus (continued)
+
+Benchmarks remain a first-class concern in this release:
+
+- 500k-row workloads
+- Subprocess isolation per function
+- Warmups + repeated runs
+- Percentile latency reporting (p50 / p95 / p99)
+- Coefficient of variation (CV) for stability
+- Optional peak memory tracking
+
+This ensures results reflect realistic orchestration costs, not just microbenchmarks.
+
+---
+
+## 📈 Performance Summary
+
+Strongest wins remain concentrated in:
+
+- Rolling / windowed statistics
+- Pairwise operations (covariance, correlation, rolling cov/corr)
+- Several inference tests (e.g., chi-square, t-tests)
+
+Performance improvements come primarily from:
+
+- Fewer passes over data
+- Reduced allocations
+- Cache-friendly Rust loops
+- Avoidance of Python-level rolling and masking logic
+
+---
+
+## ⚠️ Known Issues (Short & Explicit)
+
+- `bg_test` is currently skipped (known correctness issue)
+- `periodogram` is currently skipped in benchmarks
+- `norm_ppf` currently expects inputs in `[0, 1]`  
+  *(input validation and error handling to be improved)*
+
+---
+
+## 🔮 Planned for v0.2.9
+
+### Performance & architecture
+- Matrix / axis-wise performance fixes
+- Reduce Python ↔ Rust marshaling overhead
+  - Avoid `Vec<Vec<f64>>` rebuilds
+  - Minimize copies
+  - Return contiguous buffers more efficiently
+
+### Safety & correctness
+- Replace internal panics with clean Python exceptions
+- Improve input validation (e.g., `norm_ppf` and similar edge cases)
+
+### Benchmark & API hardening
+- Tighten parity tolerances where appropriate
+- Ensure benchmarks reflect the cleaned surface API
+  - No `_np`-name coupling
+  - Benchmark against public, documented functions only
+
+### General improvements
+- Optimization pass on hotspots revealed by 500k-row benchmarks
+- Documentation & docstrings for Python-facing APIs
+  - Clear parameter semantics
+  - Short usage examples
+
+---
+
+## 📦 What Else Came from the Sandbox (`sand_lib.rs` → `lib.rs`)
+
+In addition to the headline features above, the sandbox also contributed:
+
+- Internal Rust kernel refactors that:
+  - Standardized slice-based APIs (`&[f64]`) for statistical routines
+  - Reduced duplicated logic across inference and resampling paths
+- Shared numerical helpers reused by:
+  - Bootstrap
+  - Jackknife
+  - Hypothesis tests
+- Consistent return-value conventions across:
+  - Scalars
+  - Tuples (e.g.
+
 ---
 
 ### ✅ Inference (SciPy parity) — `src/infer/*`
