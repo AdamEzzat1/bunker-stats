@@ -81,7 +81,11 @@ fn mann_whitney_asymptotic(x: &[f64], y: &[f64], alt: Alternative) -> (f64, f64)
     // tie-corrected variance (SciPy style)
     // var = n1*n2/12 * (N+1 - tie_sum/(N*(N-1)))
     let denom = nf * (nf - 1.0);
-    let tie_c = if denom > 0.0 { tie_sum / denom } else { 0.0 };
+    let tie_c = if denom > 0.0 && tie_sum.is_finite() {
+        tie_sum / denom
+    } else {
+        0.0
+    };
     let var_u = n1f * n2f / 12.0 * (nf + 1.0 - tie_c);
     let sd_u = var_u.sqrt();
 
@@ -121,6 +125,7 @@ fn mann_whitney_asymptotic(x: &[f64], y: &[f64], alt: Alternative) -> (f64, f64)
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, y, alternative="two-sided"))]
 pub fn mann_whitney_u_np(
     py: Python<'_>,
     x: numpy::PyReadonlyArray1<f64>,

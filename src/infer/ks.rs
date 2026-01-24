@@ -109,25 +109,24 @@ fn ks_pvalue_asymp_two_sided_stephens(n: usize, d: f64) -> f64 {
     let x2 = x * x;
 
     // Q_KS(x) = 2 * sum_{k=1}^∞ (-1)^{k-1} exp(-2 k^2 x^2)
-let mut sum = 0.0;
-let mut c = 0.0; // Kahan compensation
+    let mut sum = 0.0;
+    let mut c = 0.0; // Kahan compensation
 
-for k in 1..=100000 {
-    let term = (-2.0 * (k as f64).powi(2) * x2).exp();
-    let signed = if k % 2 == 1 { term } else { -term };
+    for k in 1..=100000 {
+        let term = (-2.0 * (k as f64).powi(2) * x2).exp();
+        let signed = if k % 2 == 1 { term } else { -term };
 
-    let y = signed - c;
-    let t = sum + y;
-    c = (t - sum) - y;
-    sum = t;
+        let y = signed - c;
+        let t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
 
-    if term < 1e-20 {
-        break;
+        if term < 1e-20 {
+            break;
+        }
     }
-}
 
-(2.0 * sum).clamp(0.0, 1.0)
-
+    (2.0 * sum).clamp(0.0, 1.0)
 }
 
 /// Finite-n two-sided KS survival function (p-value for D_n >= d).
@@ -201,55 +200,63 @@ fn ks_pvalue_two_sided_finite(n: usize, d: f64) -> f64 {
         hmat[idx(m - 1, 0, m)] += two_h_minus_one.powi(m as i32) * inv_fact[m];
     }
 
-fn mat_mul_scaled(a: &[f64], b: &[f64], m: usize) -> (Vec<f64>, f64) {
-    // Kahan-compensated accumulation per output cell to reduce cancellation error.
-    let mut c = vec![0.0f64; m * m];
-    let mut comp = vec![0.0f64; m * m];
+    fn mat_mul_scaled(a: &[f64], b: &[f64], m: usize) -> (Vec<f64>, f64) {
+        // Kahan-compensated accumulation per output cell to reduce cancellation error.
+        let mut c = vec![0.0f64; m * m];
+        let mut comp = vec![0.0f64; m * m];
 
-    for i in 0..m {
-        for k in 0..m {
-            let aik = a[i * m + k];
-            if aik == 0.0 {
-                continue;
+        for i in 0..m {
+            for k in 0..m {
+                let aik = a[i * m + k];
+                if aik == 0.0 {
+                    continue;
+                }
+                let bk = &b[k * m..k * m + m];
+                let row_base = i * m;
+                for j in 0..m {
+                    let idx = row_base + j;
+                    let prod = aik * bk[j];
+
+                    // Kahan summation: c[idx] += prod
+                    let y = prod - comp[idx];
+                    let t = c[idx] + y;
+                    comp[idx] = (t - c[idx]) - y;
+                    c[idx] = t;
+                }
             }
-            let bk = &b[k * m..k * m + m];
-            let row_base = i * m;
-            for j in 0..m {
-                let idx = row_base + j;
-                let prod = aik * bk[j];
+        }
 
-                // Kahan summation: c[idx] += prod
-                let y = prod - comp[idx];
-                let t = c[idx] + y;
-                comp[idx] = (t - c[idx]) - y;
-                c[idx] = t;
+        // scale down if needed to avoid overflow/underflow during powering
+        let mut max_abs = 0.0f64;
+        for &v in &c {
+            let av = v.abs();
+            if av > max_abs {
+                max_abs = av;
             }
         }
-    }
-
-    // scale down if needed to avoid overflow/underflow during powering
-    let mut max_abs = 0.0f64;
-    for &v in &c {
-        let av = v.abs();
-        if av > max_abs {
-            max_abs = av;
+        
+        if max_abs == 0.0 {
+            return (c, 0.0);
         }
-    }
-    if max_abs == 0.0 {
-        return (c, 0.0);
-    }
-    // keep values roughly in [1e-150, 1e150]
-    let target = 1e150;
-    if max_abs > target {
-        let s = max_abs / target;
-        for v in &mut c {
-            *v /= s;
+        
+        // More aggressive scaling thresholds to prevent overflow
+        let (target_min, target_max) = (1e-100, 1e100);
+        if max_abs > target_max {
+            let s = max_abs / target_max;
+            for v in &mut c {
+                *v /= s;
+            }
+            return (c, s.ln());
+        } else if max_abs < target_min && max_abs > 0.0 {
+            let s = max_abs / target_min;
+            for v in &mut c {
+                *v /= s;
+            }
+            return (c, s.ln());
         }
-        return (c, s.ln());
+        
+        (c, 0.0)
     }
-    (c, 0.0)
-}
-
 
     fn mat_pow_scaled(mut base: Vec<f64>, mut exp: usize, m: usize) -> (Vec<f64>, f64) {
         // identity
@@ -300,6 +307,7 @@ fn ks_pvalue_asymp_one_sided(n: usize, d: f64) -> f64 {
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, cdf, params, alternative="two-sided"))]
 pub fn ks_1samp_np(
     py: Python<'_>,
     x: numpy::PyReadonlyArray1<f64>,

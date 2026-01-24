@@ -1,6 +1,6 @@
 [package]
 name = "bunker-stats-rs"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 
 [lib]
@@ -15,10 +15,15 @@ statrs = "0.16"
 rayon = { version = "1.10", optional = true }
 rand = "0.8"
 nalgebra = "0.29"
-
+libm = "0.2"
+rand_pcg = "0.3"
+# ADD: FFT for spectral analysis (100× speedup)
+rustfft = "6.2"
+# NEW v0.2.9: Bitflags for StatsMask in rolling module
+bitflags = "2.4"
 
 [features]
-default =  ["parallel"]
+default = ["parallel"]
 parallel = ["rayon"]   # enable this if you later add Rayon-based parallel loops
 
 [profile.release]
@@ -27,5 +32,3 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 debug = false
-
-

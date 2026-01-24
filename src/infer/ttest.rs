@@ -27,6 +27,7 @@ fn p_from_t(t: f64, df: f64, alt: Alternative) -> f64 {
 /// Python signature:
 /// t_test_1samp_np(x: np.ndarray, popmean: float, alternative="two-sided") -> dict
 #[pyfunction]
+#[pyo3(signature = (x, popmean, alternative="two-sided"))]
 pub fn t_test_1samp_np(
     py: Python<'_>,
     x: numpy::PyReadonlyArray1<f64>,
@@ -45,7 +46,10 @@ pub fn t_test_1samp_np(
     let v = var_sample(xs, m);
 
     if !v.is_finite() || v < 0.0 {
-        return Err(PyValueError::new_err("variance is not finite"));
+        return Err(PyValueError::new_err(format!(
+            "variance is not finite: var={:.6e}, mean={:.6e}, n={}",
+            v, m, n
+        )));
     }
 
     let se = (v / (n as f64)).sqrt();
@@ -75,11 +79,12 @@ pub fn t_test_1samp_np(
 /// Two-sample t-test.
 ///
 /// If `equal_var=True`, performs the pooled-variance Student t-test.
-/// If `equal_var=False`, performs Welch’s t-test.
+/// If `equal_var=False`, performs Welch's t-test.
 ///
 /// Python signature:
 /// t_test_2samp_np(x: np.ndarray, y: np.ndarray, equal_var: bool, alternative="two-sided") -> dict
 #[pyfunction]
+#[pyo3(signature = (x, y, equal_var, alternative="two-sided"))]
 pub fn t_test_2samp_np(
     py: Python<'_>,
     x: numpy::PyReadonlyArray1<f64>,
@@ -106,7 +111,10 @@ pub fn t_test_2samp_np(
     let v2 = var_sample(ys, m2);
 
     if !v1.is_finite() || !v2.is_finite() || v1 < 0.0 || v2 < 0.0 {
-        return Err(PyValueError::new_err("variance is not finite"));
+        return Err(PyValueError::new_err(format!(
+            "variance is not finite: v1={:.6e}, v2={:.6e}",
+            v1, v2
+        )));
     }
 
     let alt = Alternative::from_str(alternative)?;
@@ -117,24 +125,48 @@ pub fn t_test_2samp_np(
         let sp2 = (((n1 - 1) as f64) * v1 + ((n2 - 1) as f64) * v2) / df;
 
         let se = (sp2 * (1.0 / (n1 as f64) + 1.0 / (n2 as f64))).sqrt();
-        let t = if se == 0.0 { 0.0 } else { (m1 - m2) / se };
+        let t = if se == 0.0 { 
+            // Both samples have zero variance
+            if (m1 - m2).abs() < 1e-15 {
+                0.0
+            } else {
+                f64::INFINITY * (m1 - m2).signum()
+            }
+        } else { 
+            (m1 - m2) / se 
+        };
         (t, df)
     } else {
         // Welch t-test
         let se2 = v1 / (n1 as f64) + v2 / (n2 as f64);
         let se = se2.sqrt();
-        let t = if se == 0.0 { 0.0 } else { (m1 - m2) / se };
+        let t = if se == 0.0 { 
+            // Both samples have zero variance
+            if (m1 - m2).abs() < 1e-15 {
+                0.0
+            } else {
+                f64::INFINITY * (m1 - m2).signum()
+            }
+        } else { 
+            (m1 - m2) / se 
+        };
 
-        // Welch–Satterthwaite df
+        // Welch-Satterthwaite df with improved edge case handling
         let num = se2 * se2;
         let den = (v1 * v1)
             / (((n1 as f64) * (n1 as f64)) * ((n1 - 1) as f64))
             + (v2 * v2) / (((n2 as f64) * (n2 as f64)) * ((n2 - 1) as f64));
 
         let df = if den == 0.0 {
+            // Both samples have zero variance - use pooled df
             (n1 + n2 - 2) as f64
+        } else if den.is_finite() {
+            let welch_df = num / den;
+            // Ensure df is positive and reasonable
+            welch_df.max(1.0).min((n1 + n2 - 2) as f64)
         } else {
-            num / den
+            // Numerical issues - fall back to pooled
+            (n1 + n2 - 2) as f64
         };
 
         (t, df)

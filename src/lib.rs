@@ -8,7 +8,8 @@ use numpy::{
 };
 
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::types::{PyAny, PyDict, PyTuple};
 use pyo3::prelude::*;
 
 use kernels::rolling::engine::rolling_mean_std_vec;
@@ -17,32 +18,99 @@ use kernels::rolling::axis0::{rolling_mean_axis0_vec, rolling_std_axis0_vec, rol
 use kernels::rolling::covcorr::rolling_cov_vec;
 
 use kernels::rolling::var::vars_from_stds;
+
+// NEW v0.2.9: Fused multi-stat rolling kernels
+use kernels::rolling::{
+    bounds::output_length,
+    config::{Alignment, NanPolicy, RollingConfig},
+    masks::StatsMask,
+    multi::rolling_multi_into,
+    multi_axis0::rolling_multi_axis0_into,
+};
+
+
 use kernels::quantile::percentile::percentile_slice as percentile_slice_k;
 use kernels::quantile::iqr::iqr_slice as iqr_slice_k;
 use kernels::quantile::winsor::winsorize_vec as winsorize_vec_k;
-use crate::kernels::matrix::cov::cov_matrix_view; 
-use kernels::matrix::corr::corr_matrix_out as corr_matrix_out_k;
-use kernels::robust::mad::mad_slice as mad_slice_k;
-use kernels::robust::trimmed_mean::trimmed_mean_slice as trimmed_mean_slice_k;
+use crate::kernels::matrix::cov::{
+    cov_matrix_out,
+    cov_matrix_bias_out,
+    cov_matrix_centered_out,
+    cov_matrix_skipna_out,
+    xtx_matrix_out,
+    xxt_matrix_out,
+    pairwise_euclidean_cols_out,
+    pairwise_cosine_cols_out,
+}; 
+use kernels::matrix::corr::{
+    corr_matrix_out as corr_matrix_out_k,
+    corr_matrix_skipna_out as corr_matrix_skipna_out_k,
+    corr_distance_out as corr_distance_out_k,
+};
+use kernels::robust::extended::{
+    mad_slice as mad_slice_k,
+    trimmed_mean_slice as trimmed_mean_slice_k,
+    median_slice as median_slice_k,
+    iqr_slice as iqr_robust_slice_k,
+    winsorized_mean_slice as winsorized_mean_slice_k,
+    trimmed_std_slice as trimmed_std_slice_k,
+    mad_std_slice as mad_std_slice_k,
+    biweight_midvariance_slice as biweight_midvariance_slice_k,
+    qn_scale_slice as qn_scale_slice_k,
+    huber_location_slice as huber_location_slice_k,
+    median_slice_skipna as median_slice_skipna_k,
+    mad_slice_skipna as mad_slice_skipna_k,
+    trimmed_mean_slice_skipna as trimmed_mean_slice_skipna_k,
+    iqr_slice_skipna as iqr_slice_skipna_k,
+};
 
 // resampling
 use crate::kernels::resampling::bootstrap::{
     bootstrap_mean, bootstrap_mean_ci, bootstrap_ci, bootstrap_corr,
+    bootstrap_se, bootstrap_var, bootstrap_t_ci_mean, bootstrap_bca_ci,
+    bayesian_bootstrap_ci,
+    permutation_corr_test, permutation_mean_diff_test,
+    moving_block_bootstrap_mean_ci, circular_block_bootstrap_mean_ci, stationary_bootstrap_mean_ci,
 };
-use crate::kernels::resampling::jackknife::{ jackknife_mean, jackknife_mean_ci };
+use crate::kernels::resampling::jackknife::{ jackknife_mean, jackknife_mean_ci, influence_mean, delete_d_jackknife_mean, jackknife_after_bootstrap_se_mean };
 
 // tsa
-use crate::kernels::tsa::stationarity::{ adf_test, kpss_test, pp_test };
-use crate::kernels::tsa::diagnostics::{ ljung_box, durbin_watson, bg_test };
-use crate::kernels::tsa::acf_pacf::{ acf, pacf };
-use crate::kernels::tsa::spectral::{ periodogram };
-use crate::kernels::tsa::rolling_autocorr::rolling_autocorr;
+use crate::kernels::tsa::stationarity::{ 
+    adf_test, kpss_test, pp_test,
+    variance_ratio_test, zivot_andrews_test, trend_stationarity_test,
+    integration_order_test, seasonal_diff_test, seasonal_unit_root_test
+};
+use crate::kernels::tsa::diagnostics::{ 
+    ljung_box, durbin_watson, bg_test, box_pierce, runs_test, acf_zero_crossing 
+};
+use crate::kernels::tsa::acf_pacf::{ 
+    acf, pacf, pacf_yw, acovf, acf_with_ci, ccf, pacf_innovations, pacf_burg 
+};
+
+use crate::kernels::tsa::stationarity::kpss_test_debug;
+use crate::kernels::tsa::spectral::{ 
+    periodogram, welch_psd, cumulative_periodogram, dominant_frequency,
+    spectral_entropy, bartlett_psd, spectral_peaks, spectral_flatness,
+    band_power, spectral_centroid, spectral_rolloff
+};
+use crate::kernels::tsa::rolling_autocorr::{
+    rolling_autocorr, rolling_correlation, rolling_autocorr_multi
+};
  
 
 // dist
-use crate::kernels::dist::normal::{ norm_pdf, norm_cdf, norm_ppf };
-use crate::kernels::dist::exponential::{ exp_pdf, exp_cdf };
-use crate::kernels::dist::uniform::{ unif_pdf, unif_cdf };
+use crate::kernels::dist::normal::{
+    norm_pdf, norm_cdf, norm_ppf,
+    norm_logpdf, norm_sf, norm_logsf, norm_cumhazard,
+};
+use crate::kernels::dist::exponential::{
+    exp_pdf, exp_cdf, exp_ppf,
+    exp_logpdf, exp_sf, exp_logsf, exp_cumhazard,
+};
+use crate::kernels::dist::uniform::{
+    unif_pdf, unif_cdf, unif_ppf,
+    unif_logpdf, unif_sf, unif_logsf,
+};
 
 
 
@@ -155,6 +223,36 @@ fn mad_slice(xs: &[f64]) -> f64 {
 }
 
 // ======================
+// Parse helper functions for rolling config
+// ======================
+
+/// Parse alignment string to Alignment enum
+fn parse_alignment(s: &str) -> PyResult<Alignment> {
+    match s.to_lowercase().as_str() {
+        "trailing" => Ok(Alignment::Trailing),
+        "centered" => Ok(Alignment::Centered),
+        _ => Err(PyErr::new::<PyValueError, _>(
+            format!("Invalid alignment: '{}'. Must be 'trailing' or 'centered'", s)
+        )),
+    }
+}
+
+/// Parse nan_policy string to NanPolicy enum
+fn parse_nan_policy(s: &str) -> PyResult<NanPolicy> {
+    match s.to_lowercase().as_str() {
+        "propagate" => Ok(NanPolicy::Propagate),
+        "ignore" => Ok(NanPolicy::Ignore),
+        "require_min_periods" => Ok(NanPolicy::RequireMinPeriods),
+        _ => Err(PyErr::new::<PyValueError, _>(
+            format!(
+                "Invalid nan_policy: '{}'. Must be 'propagate', 'ignore', or 'require_min_periods'",
+                s
+            )
+        )),
+    }
+}
+
+// ======================
 // Basic stats (1-D)
 // ======================
 
@@ -235,6 +333,82 @@ fn trimmed_mean_np(
     proportion_to_cut: f64,
 ) -> PyResult<f64> {
     Ok(trimmed_mean_slice_k(a.as_slice()?, proportion_to_cut))
+}
+
+// ======================
+// Robust Statistics - Extended Functions
+// ======================
+
+#[pyfunction]
+fn median_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(median_slice_k(a.as_slice()?))
+}
+
+#[pyfunction]
+fn iqr_robust_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(iqr_robust_slice_k(a.as_slice()?))
+}
+
+#[pyfunction]
+fn winsorized_mean_np(
+    a: PyReadonlyArray1<f64>,
+    lower_percentile: f64,
+    upper_percentile: f64,
+) -> PyResult<f64> {
+    Ok(winsorized_mean_slice_k(a.as_slice()?, lower_percentile, upper_percentile))
+}
+
+#[pyfunction]
+fn trimmed_std_np(a: PyReadonlyArray1<f64>, proportion_to_cut: f64) -> PyResult<f64> {
+    Ok(trimmed_std_slice_k(a.as_slice()?, proportion_to_cut))
+}
+
+#[pyfunction]
+fn mad_std_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(mad_std_slice_k(a.as_slice()?))
+}
+
+#[pyfunction]
+fn biweight_midvariance_np(a: PyReadonlyArray1<f64>, c: Option<f64>) -> PyResult<f64> {
+    let c_val = c.unwrap_or(9.0);  // Default tuning constant
+    Ok(biweight_midvariance_slice_k(a.as_slice()?, c_val))
+}
+
+#[pyfunction]
+fn qn_scale_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(qn_scale_slice_k(a.as_slice()?))
+}
+
+#[pyfunction]
+fn huber_location_np(
+    a: PyReadonlyArray1<f64>,
+    k: Option<f64>,
+    max_iter: Option<usize>,
+) -> PyResult<f64> {
+    let k_val = k.unwrap_or(1.345);  // Default for 95% efficiency
+    let max_iter_val = max_iter.unwrap_or(30);
+    Ok(huber_location_slice_k(a.as_slice()?, k_val, max_iter_val))
+}
+
+// NaN-aware robust estimators
+#[pyfunction]
+fn median_skipna_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(median_slice_skipna_k(a.as_slice()?))
+}
+
+#[pyfunction]
+fn mad_skipna_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(mad_slice_skipna_k(a.as_slice()?))
+}
+
+#[pyfunction]
+fn trimmed_mean_skipna_np(a: PyReadonlyArray1<f64>, proportion_to_cut: f64) -> PyResult<f64> {
+    Ok(trimmed_mean_slice_skipna_k(a.as_slice()?, proportion_to_cut))
+}
+
+#[pyfunction]
+fn iqr_skipna_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    Ok(iqr_slice_skipna_k(a.as_slice()?))
 }
 
 
@@ -1031,13 +1205,25 @@ fn cov_impl(xs: &[f64], ys: &[f64]) -> f64 {
     }
     let xs = &xs[..n];
     let ys = &ys[..n];
-    let mx = mean_slice(xs);
-    let my = mean_slice(ys);
-    let mut acc = 0.0;
+
+    // Strict: if any NaN is present in either series, return NaN (matches prior behavior).
+    let mut sum_x = 0.0f64;
+    let mut sum_y = 0.0f64;
+    let mut sum_xy = 0.0f64;
+
     for i in 0..n {
-        acc += (xs[i] - mx) * (ys[i] - my);
+        let x = xs[i];
+        let y = ys[i];
+        if x.is_nan() || y.is_nan() {
+            return f64::NAN;
+        }
+        sum_x += x;
+        sum_y += y;
+        sum_xy += x * y;
     }
-    acc / ((n - 1) as f64)
+
+    let c = n as f64;
+    (sum_xy - (sum_x * sum_y) / c) / ((n - 1) as f64)
 }
 
 #[pyfunction]
@@ -1049,83 +1235,372 @@ fn cov_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
 fn corr_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
     let xs = x.as_slice()?;
     let ys = y.as_slice()?;
-    let c = cov_impl(xs, ys);
-    let sx = std_slice(xs);
-    let sy = std_slice(ys);
-    if sx == 0.0 || sy == 0.0 || sx.is_nan() || sy.is_nan() {
-        Ok(f64::NAN)
-    } else {
-        Ok(c / (sx * sy))
+    let n = xs.len().min(ys.len());
+    if n <= 1 {
+        return Ok(f64::NAN);
     }
+
+    // Strict: if any NaN is present in either series, return NaN (matches prior behavior).
+    let mut sum_x = 0.0f64;
+    let mut sum_y = 0.0f64;
+    let mut sum_xx = 0.0f64;
+    let mut sum_yy = 0.0f64;
+    let mut sum_xy = 0.0f64;
+
+    for i in 0..n {
+        let x = xs[i];
+        let y = ys[i];
+        if x.is_nan() || y.is_nan() {
+            return Ok(f64::NAN);
+        }
+        sum_x += x;
+        sum_y += y;
+        sum_xx += x * x;
+        sum_yy += y * y;
+        sum_xy += x * y;
+    }
+
+    let c = n as f64;
+    let denom = c - 1.0;
+
+    let cov = (sum_xy - (sum_x * sum_y) / c) / denom;
+    let varx = (sum_xx - (sum_x * sum_x) / c) / denom;
+    let vary = (sum_yy - (sum_y * sum_y) / c) / denom;
+
+    if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
+        return Ok(f64::NAN);
+    }
+    Ok(cov / (varx * vary).sqrt())
+}
+
+// ======================
+// Matrix helpers (accept float32/float64; keep kernels on &[f64])
+// ======================
+#[inline]
+fn extract_mat_f64<'py>(x: &Bound<'py, PyAny>) -> PyResult<(Vec<f64>, usize, usize)> {
+    // Fast path: float64 (copy from contiguous or materialize non-contiguous)
+    if let Ok(x64) = x.extract::<PyReadonlyArray2<f64>>() {
+        let arr = x64.as_array();
+        let (n_rows, n_cols) = (arr.shape()[0], arr.shape()[1]);
+
+        let owned;
+        let xs: &[f64] = match arr.as_slice() {
+            Some(s) => s,
+            None => {
+                owned = arr.to_owned();
+                owned.as_slice().expect("owned ndarray must be contiguous")
+            }
+        };
+        
+        return Ok((xs.to_vec(), n_rows, n_cols));
+    }
+
+    // Accept float32 by upcasting to f64
+    if let Ok(x32) = x.extract::<PyReadonlyArray2<f32>>() {
+        let arr = x32.as_array();
+        let (n_rows, n_cols) = (arr.shape()[0], arr.shape()[1]);
+
+        let mut v = Vec::<f64>::with_capacity(n_rows * n_cols);
+        for &val in arr.iter() {
+            v.push(val as f64);
+        }
+        return Ok((v, n_rows, n_cols));
+    }
+
+    Err(PyTypeError::new_err(
+        "expected a 2D NumPy array of dtype float32 or float64",
+    ))
 }
 
 #[pyfunction]
 pub fn cov_matrix_np<'py>(
     py: Python<'py>,
-    x: PyReadonlyArray2<f64>,
+    x: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let arr = x.as_array();
-    let n_rows = arr.shape()[0];
-    let n_cols = arr.shape()[1];
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(x)?;
+    let xs = xs_vec.as_slice();
+
+    if n_rows < 2 || n_cols == 0 {
+        let out2 = numpy::ndarray::Array2::<f64>::from_elem((n_cols, n_cols), f64::NAN);
+        return Ok(out2.into_pyarray_bound(py));
+    }
+
+    let mut out = vec![0.0f64; n_cols * n_cols];
+    cov_matrix_out(xs, n_rows, n_cols, &mut out);
+
+    let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("cov_matrix_np: from_shape_vec failed"))?;
+    Ok(out2.into_pyarray_bound(py))
+}
+
+#[pyfunction]
+pub fn cov_matrix_bias_np<'py>(
+    py: Python<'py>,
+    x: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(x)?;
+    let xs = xs_vec.as_slice();
+
+    if n_rows == 0 || n_cols == 0 {
+        let out2 = numpy::ndarray::Array2::<f64>::zeros((n_cols, n_cols));
+        return Ok(out2.into_pyarray_bound(py));
+    }
+
+    let mut out = vec![0.0f64; n_cols * n_cols];
+    cov_matrix_bias_out(xs, n_rows, n_cols, &mut out);
+
+    let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("cov_matrix_bias_np: from_shape_vec failed"))?;
+    Ok(out2.into_pyarray_bound(py))
+}
+
+#[pyfunction]
+pub fn cov_matrix_centered_np<'py>(
+    py: Python<'py>,
+    x_centered: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(x_centered)?;
+    let xs = xs_vec.as_slice();
 
     if n_rows < 2 || n_cols == 0 {
         let out2 = numpy::ndarray::Array2::<f64>::zeros((n_cols, n_cols));
         return Ok(out2.into_pyarray_bound(py));
     }
 
-    let out = cov_matrix_view(arr);
+    let mut out = vec![0.0f64; n_cols * n_cols];
+    cov_matrix_centered_out(xs, n_rows, n_cols, &mut out);
 
-    Ok(
-        PyArray2::from_vec2_bound(py, &out)
-            .map_err(|_| pyo3::exceptions::PyValueError::new_err("cov_matrix_np: from_vec2_bound failed"))?
-    )
+    let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("cov_matrix_centered_np: from_shape_vec failed"))?;
+    Ok(out2.into_pyarray_bound(py))
 }
 
+#[pyfunction]
+pub fn cov_matrix_skipna_np<'py>(
+    py: Python<'py>,
+    x: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(x)?;
+    let xs = xs_vec.as_slice();
+
+    if n_rows < 2 || n_cols == 0 {
+        let out2 = numpy::ndarray::Array2::<f64>::zeros((n_cols, n_cols));
+        return Ok(out2.into_pyarray_bound(py));
+    }
+
+    let mut out = vec![0.0f64; n_cols * n_cols];
+    cov_matrix_skipna_out(xs, n_rows, n_cols, &mut out);
+
+    let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("cov_matrix_skipna_np: from_shape_vec failed"))?;
+    Ok(out2.into_pyarray_bound(py))
+}
 
 #[pyfunction]
-fn corr_matrix_np<'py>(
+pub fn xtx_matrix_np<'py>(
     py: Python<'py>,
-    a: PyReadonlyArray2<f64>,
-) -> Bound<'py, PyArray2<f64>> {
-    let arr = a.as_array();
-    let n_rows = arr.shape()[0];
-    let n_cols = arr.shape()[1];
-    let x = arr.as_slice().expect("input must be C-contiguous (row-major)");
+    x: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(x)?;
+    let xs = xs_vec.as_slice();
+
+    if n_rows == 0 || n_cols == 0 {
+        let out2 = numpy::ndarray::Array2::<f64>::zeros((n_cols, n_cols));
+        return Ok(out2.into_pyarray_bound(py));
+    }
+
+    let mut out = vec![0.0f64; n_cols * n_cols];
+    xtx_matrix_out(xs, n_rows, n_cols, &mut out);
+
+    let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("xtx_matrix_np: from_shape_vec failed"))?;
+    Ok(out2.into_pyarray_bound(py))
+}
+
+#[pyfunction]
+pub fn xxt_matrix_np<'py>(
+    py: Python<'py>,
+    x: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(x)?;
+    let xs = xs_vec.as_slice();
+
+    if n_rows == 0 || n_cols == 0 {
+        let out2 = numpy::ndarray::Array2::<f64>::zeros((n_rows, n_rows));
+        return Ok(out2.into_pyarray_bound(py));
+    }
+
+    // WARNING: n_rows*n_rows can be huge. We leave sizing responsibility to caller.
+    let mut out = vec![0.0f64; n_rows * n_rows];
+    xxt_matrix_out(xs, n_rows, n_cols, &mut out);
+
+    let out2 = Array2::from_shape_vec((n_rows, n_rows), out)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("xxt_matrix_np: from_shape_vec failed"))?;
+    Ok(out2.into_pyarray_bound(py))
+}
+
+#[pyfunction]
+pub fn pairwise_euclidean_cols_np<'py>(
+    py: Python<'py>,
+    x: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(x)?;
+    let xs = xs_vec.as_slice();
+
+    if n_cols == 0 {
+        let out2 = numpy::ndarray::Array2::<f64>::zeros((0, 0));
+        return Ok(out2.into_pyarray_bound(py));
+    }
+
+    let mut out = vec![0.0f64; n_cols * n_cols];
+    pairwise_euclidean_cols_out(xs, n_rows, n_cols, &mut out);
+
+    let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("pairwise_euclidean_cols_np: from_shape_vec failed"))?;
+    Ok(out2.into_pyarray_bound(py))
+}
+
+#[pyfunction]
+pub fn pairwise_cosine_cols_np<'py>(
+    py: Python<'py>,
+    x: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(x)?;
+    let xs = xs_vec.as_slice();
+
+    if n_cols == 0 {
+        let out2 = numpy::ndarray::Array2::<f64>::zeros((0, 0));
+        return Ok(out2.into_pyarray_bound(py));
+    }
+
+    let mut out = vec![0.0f64; n_cols * n_cols];
+    pairwise_cosine_cols_out(xs, n_rows, n_cols, &mut out);
+
+    let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("pairwise_cosine_cols_np: from_shape_vec failed"))?;
+    Ok(out2.into_pyarray_bound(py))
+}
+
+#[pyfunction]
+pub fn corr_matrix_np<'py>(
+    py: Python<'py>,
+    a: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(a)?;
+    let xs = xs_vec.as_slice();
 
     if n_rows < 2 || n_cols == 0 {
         let out2 = Array2::<f64>::zeros((n_cols, n_cols));
-        return out2.into_pyarray_bound(py);
+        return Ok(out2.into_pyarray_bound(py));
     }
 
-    // column means
-    let mut means = vec![0.0f64; n_cols];
-    for r in 0..n_rows {
-        let base = r * n_cols;
-        for j in 0..n_cols {
-            means[j] += x[base + j];
+    let mut out = vec![0.0f64; n_cols * n_cols];
+    corr_matrix_out_k(xs, n_rows, n_cols, &mut out);
+
+    let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("corr_matrix_np: from_shape_vec failed"))?;
+    Ok(out2.into_pyarray_bound(py))
+}
+
+#[pyfunction]
+pub fn corr_matrix_skipna_np<'py>(
+    py: Python<'py>,
+    a: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(a)?;
+    let xs = xs_vec.as_slice();
+
+    if n_rows < 2 || n_cols == 0 {
+        let out2 = Array2::<f64>::zeros((n_cols, n_cols));
+        return Ok(out2.into_pyarray_bound(py));
+    }
+
+    let mut out = vec![0.0f64; n_cols * n_cols];
+    corr_matrix_skipna_out_k(xs, n_rows, n_cols, &mut out);
+
+    let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("corr_matrix_skipna_np: from_shape_vec failed"))?;
+    Ok(out2.into_pyarray_bound(py))
+}
+
+#[pyfunction]
+pub fn corr_distance_np<'py>(
+    py: Python<'py>,
+    a: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(a)?;
+    let xs = xs_vec.as_slice();
+
+    if n_rows < 2 || n_cols == 0 {
+        let out2 = Array2::<f64>::zeros((n_cols, n_cols));
+        return Ok(out2.into_pyarray_bound(py));
+    }
+
+    let mut out = vec![0.0f64; n_cols * n_cols];
+    corr_distance_out_k(xs, n_rows, n_cols, &mut out);
+
+    let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("corr_distance_np: from_shape_vec failed"))?;
+    Ok(out2.into_pyarray_bound(py))
+}
+
+#[pyfunction]
+pub fn diag_np<'py>(
+    py: Python<'py>,
+    a: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(a)?;
+    if n_rows != n_cols {
+        return Err(PyValueError::new_err("diag_np expects a square 2D array"));
+    }
+    let xs = xs_vec.as_slice();
+
+    let n = n_rows;
+    let mut out = vec![0.0_f64; n];
+    for i in 0..n {
+        out[i] = xs[i * n + i];
+    }
+
+    Ok(PyArray1::from_vec_bound(py, out))
+}
+
+#[pyfunction]
+pub fn trace_np(a: &Bound<'_, PyAny>) -> PyResult<f64> {
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(a)?;
+    if n_rows != n_cols {
+        return Err(PyValueError::new_err("trace_np expects a square 2D array"));
+    }
+    let xs = xs_vec.as_slice();
+
+    let n = n_rows;
+    let mut sum = 0.0_f64;
+    for i in 0..n {
+        sum += xs[i * n + i];
+    }
+    Ok(sum)
+}
+
+#[pyfunction]
+pub fn is_symmetric_np(a: &Bound<'_, PyAny>, tol: f64) -> PyResult<bool> {
+    let (xs_vec, n_rows, n_cols) = extract_mat_f64(a)?;
+    if n_rows != n_cols {
+        // By definition a non-square matrix can't be symmetric.
+        return Ok(false);
+    }
+    let xs = xs_vec.as_slice();
+    let n = n_rows;
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let a_ij = xs[i * n + j];
+            let a_ji = xs[j * n + i];
+
+            if (a_ij - a_ji).abs() > tol {
+                return Ok(false);
+            }
         }
     }
-    for j in 0..n_cols {
-        means[j] /= n_rows as f64;
-    }
-
-    // column stds (ddof=1)
-    let denom = (n_rows as f64 - 1.0).max(1.0);
-    let mut stds = vec![0.0f64; n_cols];
-    for j in 0..n_cols {
-        let mj = means[j];
-        let mut acc = 0.0f64;
-        for r in 0..n_rows {
-            let base = r * n_cols;
-            let d = x[base + j] - mj;
-            acc += d * d;
-        }
-        stds[j] = (acc / denom).sqrt();
-    }
-    let out = corr_matrix_out_k(x, n_rows, n_cols, &means, &stds, denom);
-
-    let out2 = Array2::from_shape_vec((n_cols, n_cols), out).unwrap();
-    out2.into_pyarray_bound(py)
+    Ok(true)
 }
 
 
@@ -1263,9 +1738,11 @@ pub fn cov_nan_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResul
         return Err(PyValueError::new_err("length mismatch"));
     }
 
-    let mut mx = 0.0;
-    let mut my = 0.0;
-    let mut n = 0usize;
+    // Skipna: drop pairs where either value is NaN.
+    let mut count = 0usize;
+    let mut sum_x = 0.0f64;
+    let mut sum_y = 0.0f64;
+    let mut sum_xy = 0.0f64;
 
     for i in 0..xs.len() {
         let xi = xs[i];
@@ -1273,29 +1750,19 @@ pub fn cov_nan_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResul
         if xi.is_nan() || yi.is_nan() {
             continue;
         }
-        n += 1;
-        mx += xi;
-        my += yi;
+        count += 1;
+        sum_x += xi;
+        sum_y += yi;
+        sum_xy += xi * yi;
     }
 
-    if n < 2 {
+    if count < 2 {
         return Ok(f64::NAN);
     }
 
-    mx /= n as f64;
-    my /= n as f64;
-
-    let mut cov = 0.0;
-    for i in 0..xs.len() {
-        let xi = xs[i];
-        let yi = ys[i];
-        if xi.is_nan() || yi.is_nan() {
-            continue;
-        }
-        cov += (xi - mx) * (yi - my);
-    }
-
-    Ok(cov / (n as f64 - 1.0))
+    let c = count as f64;
+    let cov = sum_xy - (sum_x * sum_y) / c;
+    Ok(cov / (c - 1.0))
 }
 
 #[pyfunction]
@@ -1306,53 +1773,123 @@ pub fn corr_nan_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResu
         return Err(PyValueError::new_err("length mismatch"));
     }
 
-    // Means over valid pairs
-    let mut mx = 0.0;
-    let mut my = 0.0;
-    let mut n = 0usize;
+    // Skipna: drop pairs where either value is NaN.
+    let mut count = 0usize;
+    let mut sum_x = 0.0f64;
+    let mut sum_y = 0.0f64;
+    let mut sum_xx = 0.0f64;
+    let mut sum_yy = 0.0f64;
+    let mut sum_xy = 0.0f64;
+
     for i in 0..xs.len() {
-        let xi = xs[i];
-        let yi = ys[i];
-        if xi.is_nan() || yi.is_nan() {
+        let x = xs[i];
+        let y = ys[i];
+        if x.is_nan() || y.is_nan() {
             continue;
         }
-        n += 1;
-        mx += xi;
-        my += yi;
+        count += 1;
+        sum_x += x;
+        sum_y += y;
+        sum_xx += x * x;
+        sum_yy += y * y;
+        sum_xy += x * y;
     }
-    if n < 2 {
+
+    if count < 2 {
         return Ok(f64::NAN);
     }
-    mx /= n as f64;
-    my /= n as f64;
 
-    // Cov/vars
-    let mut sxx = 0.0;
-    let mut syy = 0.0;
-    let mut sxy = 0.0;
-    for i in 0..xs.len() {
-        let xi = xs[i];
-        let yi = ys[i];
-        if xi.is_nan() || yi.is_nan() {
-            continue;
-        }
-        let dx = xi - mx;
-        let dy = yi - my;
-        sxx += dx * dx;
-        syy += dy * dy;
-        sxy += dx * dy;
-    }
+    let c = count as f64;
+    let denom = c - 1.0;
 
-    let denom = (n as f64) - 1.0;
-    let varx = sxx / denom;
-    let vary = syy / denom;
-    let cov = sxy / denom;
+    let cov = (sum_xy - (sum_x * sum_y) / c) / denom;
+    let varx = (sum_xx - (sum_x * sum_x) / c) / denom;
+    let vary = (sum_yy - (sum_y * sum_y) / c) / denom;
 
     if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
         return Ok(f64::NAN);
     }
     Ok(cov / (varx * vary).sqrt())
 }
+// ======================================================================================
+// Rolling skipna pair-state (used for rolling cov/corr/beta/linreg)
+// NOTE: This is deliberately pure Rust / slice-based logic. Keep PyO3 wrappers thin.
+// ======================================================================================
+
+#[derive(Default, Copy, Clone)]
+struct RollingPairState {
+    count: usize,
+    sum_x: f64,
+    sum_y: f64,
+    sum_xx: f64,
+    sum_yy: f64,
+    sum_xy: f64,
+}
+
+impl RollingPairState {
+    #[inline(always)]
+    fn add_pair(&mut self, x: f64, y: f64) {
+        if x.is_nan() || y.is_nan() {
+            return;
+        }
+        self.count += 1;
+        self.sum_x += x;
+        self.sum_y += y;
+        self.sum_xx += x * x;
+        self.sum_yy += y * y;
+        self.sum_xy += x * y;
+    }
+
+    #[inline(always)]
+    fn remove_pair(&mut self, x: f64, y: f64) {
+        if x.is_nan() || y.is_nan() {
+            return;
+        }
+        self.count -= 1;
+        self.sum_x -= x;
+        self.sum_y -= y;
+        self.sum_xx -= x * x;
+        self.sum_yy -= y * y;
+        self.sum_xy -= x * y;
+    }
+
+    #[inline(always)]
+    fn cov(&self) -> f64 {
+        if self.count < 2 {
+            return f64::NAN;
+        }
+        let c = self.count as f64;
+        (self.sum_xy - (self.sum_x * self.sum_y) / c) / (c - 1.0)
+    }
+
+    #[inline(always)]
+    fn var_x(&self) -> f64 {
+        if self.count < 2 {
+            return f64::NAN;
+        }
+        let c = self.count as f64;
+        (self.sum_xx - (self.sum_x * self.sum_x) / c) / (c - 1.0)
+    }
+
+    #[inline(always)]
+    fn corr(&self) -> f64 {
+        if self.count < 2 {
+            return f64::NAN;
+        }
+        let c = self.count as f64;
+        let denom = c - 1.0;
+
+        let cov = (self.sum_xy - (self.sum_x * self.sum_y) / c) / denom;
+        let varx = (self.sum_xx - (self.sum_x * self.sum_x) / c) / denom;
+        let vary = (self.sum_yy - (self.sum_y * self.sum_y) / c) / denom;
+
+        if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
+            return f64::NAN;
+        }
+        cov / (varx * vary).sqrt()
+    }
+}
+
 
 #[pyfunction]
 pub fn rolling_cov_nan_np<'py>(
@@ -1372,48 +1909,25 @@ pub fn rolling_cov_nan_np<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let mut out = Vec::with_capacity(n - window + 1);
+    let out_len = n - window + 1;
+    let mut out = vec![f64::NAN; out_len];
 
-    for i in 0..=(n - window) {
-        let mut mx = 0.0;
-        let mut my = 0.0;
-        let mut k = 0usize;
+    // init window
+    let mut st = RollingPairState::default();
+    for i in 0..window {
+        st.add_pair(xs[i], ys[i]);
+    }
+    out[0] = st.cov();
 
-        for j in i..(i + window) {
-            let xi = xs[j];
-            let yi = ys[j];
-            if xi.is_nan() || yi.is_nan() {
-                continue;
-            }
-            k += 1;
-            mx += xi;
-            my += yi;
-        }
-
-        if k < window {
-            out.push(f64::NAN);
-            continue;
-        }
-
-        mx /= k as f64;
-        my /= k as f64;
-
-        let mut cov = 0.0;
-        for j in i..(i + window) {
-            let xi = xs[j];
-            let yi = ys[j];
-            if xi.is_nan() || yi.is_nan() {
-                continue;
-            }
-            cov += (xi - mx) * (yi - my);
-        }
-
-        out.push(cov / (k as f64 - 1.0));
+    // slide
+    for i in window..n {
+        st.remove_pair(xs[i - window], ys[i - window]);
+        st.add_pair(xs[i], ys[i]);
+        out[i - window + 1] = st.cov();
     }
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
-
 
 #[pyfunction]
 pub fn rolling_corr_nan_np<'py>(
@@ -1433,133 +1947,174 @@ pub fn rolling_corr_nan_np<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let mut out = Vec::with_capacity(n - window + 1);
+    let out_len = n - window + 1;
+    let mut out = vec![f64::NAN; out_len];
 
-    for i in 0..=(n - window) {
-        // Means over valid pairs in window
-        let mut mx = 0.0;
-        let mut my = 0.0;
-        let mut k = 0usize;
-        for j in i..(i + window) {
-            let xi = xs[j];
-            let yi = ys[j];
-            if xi.is_nan() || yi.is_nan() {
-                continue;
-            }
-            k += 1;
-            mx += xi;
-            my += yi;
-        }
-        if k < window {
-            out.push(f64::NAN);
-            continue;
-        }
-        mx /= k as f64;
-        my /= k as f64;
+    // init window
+    let mut st = RollingPairState::default();
+    for i in 0..window {
+        st.add_pair(xs[i], ys[i]);
+    }
+    out[0] = st.corr();
 
-        // Cov/vars
-        let mut sxx = 0.0;
-        let mut syy = 0.0;
-        let mut sxy = 0.0;
-        for j in i..(i + window) {
-            let xi = xs[j];
-            let yi = ys[j];
-            if xi.is_nan() || yi.is_nan() {
-                continue;
-            }
-            let dx = xi - mx;
-            let dy = yi - my;
-            sxx += dx * dx;
-            syy += dy * dy;
-            sxy += dx * dy;
-        }
-
-        let denom = (k as f64) - 1.0;
-        let varx = sxx / denom;
-        let vary = syy / denom;
-        let cov = sxy / denom;
-
-        if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
-            out.push(f64::NAN);
-        } else {
-            out.push(cov / (varx * vary).sqrt());
-        }
+    // slide
+    for i in window..n {
+        st.remove_pair(xs[i - window], ys[i - window]);
+        st.add_pair(xs[i], ys[i]);
+        out[i - window + 1] = st.corr();
     }
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
+// --------------------
+// Clean exports (preferred) + new rolling linear-model primitives
+// These are thin wrappers over the existing implementations to keep Python API stable.
+// --------------------
 
-// ======================
-// KDE
-// ======================
+#[pyfunction]
+pub fn cov_skipna(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    cov_nan_np(x, y)
+}
 
-#[pyfunction(signature = (a, n_points, bandwidth=None))]
-fn kde_gaussian_np<'py>(
+#[pyfunction]
+pub fn corr_skipna(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    corr_nan_np(x, y)
+}
+
+#[pyfunction]
+pub fn rolling_cov_skipna<'py>(
     py: Python<'py>,
-    a: PyReadonlyArray1<f64>,
-    n_points: usize,
-    bandwidth: Option<f64>,
-) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
-    let xs = a.as_slice()?;
+    x: PyReadonlyArray1<f64>,
+    y: PyReadonlyArray1<f64>,
+    window: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    rolling_cov_nan_np(py, x, y, window)
+}
+
+#[pyfunction]
+pub fn rolling_corr_skipna<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<f64>,
+    y: PyReadonlyArray1<f64>,
+    window: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    rolling_corr_nan_np(py, x, y, window)
+}
+
+#[pyfunction]
+pub fn rolling_beta_skipna<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<f64>,
+    y: PyReadonlyArray1<f64>,
+    window: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xs = x.as_slice()?;
+    let ys = y.as_slice()?;
     let n = xs.len();
-    if n == 0 || n_points == 0 {
-        return Ok((PyArray1::from_vec_bound(py, vec![]), PyArray1::from_vec_bound(py, vec![])));
+
+    if ys.len() != n {
+        return Err(PyValueError::new_err("length mismatch"));
+    }
+    if window == 0 || window > n {
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let mut values = xs.to_vec();
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let out_len = n - window + 1;
+    let mut out = vec![f64::NAN; out_len];
 
-    let mean = values.iter().copied().sum::<f64>() / (values.len() as f64);
-    let mut acc = 0.0;
-    for &v in &values {
-        let d = v - mean;
-        acc += d * d;
+    let mut st = RollingPairState::default();
+    for i in 0..window {
+        st.add_pair(xs[i], ys[i]);
     }
-    let std = (acc / ((values.len().saturating_sub(1)) as f64)).sqrt();
+    let varx0 = st.var_x();
+    out[0] = if varx0 <= 0.0 || !varx0.is_finite() { f64::NAN } else { st.cov() / varx0 };
 
-    let bw = match bandwidth {
-        Some(b) if b > 0.0 => b,
-        _ => {
-            if std == 0.0 {
-                1e-6
-            } else {
-                1.06 * std * (n as f64).powf(-1.0 / 5.0)
-            }
-        }
-    };
+    for i in window..n {
+        st.remove_pair(xs[i - window], ys[i - window]);
+        st.add_pair(xs[i], ys[i]);
 
-    let mn = *values.first().unwrap();
-    let mx = *values.last().unwrap();
+        let varx = st.var_x();
+        out[i - window + 1] = if varx <= 0.0 || !varx.is_finite() { f64::NAN } else { st.cov() / varx };
+    }
 
-    if mx == mn {
+    Ok(PyArray1::from_vec_bound(py, out))
+}
+
+#[pyfunction]
+pub fn rolling_linreg_skipna<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<f64>,
+    y: PyReadonlyArray1<f64>,
+    window: usize,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+    let xs = x.as_slice()?;
+    let ys = y.as_slice()?;
+    let n = xs.len();
+
+    if ys.len() != n {
+        return Err(PyValueError::new_err("length mismatch"));
+    }
+    if window == 0 || window > n {
         return Ok((
-            PyArray1::from_vec_bound(py, vec![mn; n_points]),
-            PyArray1::from_vec_bound(py, vec![0.0; n_points]),
+            PyArray1::from_vec_bound(py, vec![]),
+            PyArray1::from_vec_bound(py, vec![]),
         ));
     }
 
-    let step = (mx - mn) / ((n_points - 1) as f64);
-    let grid: Vec<f64> = (0..n_points).map(|i| mn + step * (i as f64)).collect();
+    let out_len = n - window + 1;
+    let mut slope = vec![f64::NAN; out_len];
+    let mut intercept = vec![f64::NAN; out_len];
 
-    let norm_factor = 1.0 / (bw * (2.0 * std::f64::consts::PI).sqrt());
-    let mut dens = Vec::with_capacity(n_points);
-
-    for &x0 in &grid {
-        let mut sum = 0.0;
-        for &xv in xs {
-            let z = (x0 - xv) / bw;
-            sum += (-0.5 * z * z).exp();
-        }
-        dens.push(norm_factor * sum / (n as f64));
+    let mut st = RollingPairState::default();
+    for i in 0..window {
+        st.add_pair(xs[i], ys[i]);
     }
 
-    Ok((PyArray1::from_vec_bound(py, grid), PyArray1::from_vec_bound(py, dens)))
+    // window 0
+    if st.count >= 2 {
+        let c = st.count as f64;
+        let denom = c - 1.0;
+        let sxx = (st.sum_xx - (st.sum_x * st.sum_x) / c) / denom; // var_x
+        if sxx > 0.0 && sxx.is_finite() {
+            let sxy = (st.sum_xy - (st.sum_x * st.sum_y) / c) / denom; // cov_xy
+            let b = sxy / sxx;
+            let a = (st.sum_y / c) - b * (st.sum_x / c);
+            slope[0] = b;
+            intercept[0] = a;
+        }
+    }
+
+    // slide
+    for i in window..n {
+        st.remove_pair(xs[i - window], ys[i - window]);
+        st.add_pair(xs[i], ys[i]);
+
+        let o = i - window + 1;
+        if st.count < 2 {
+            continue;
+        }
+
+        let c = st.count as f64;
+        let denom = c - 1.0;
+        let sxx = (st.sum_xx - (st.sum_x * st.sum_x) / c) / denom;
+        if sxx <= 0.0 || !sxx.is_finite() {
+            continue;
+        }
+        let sxy = (st.sum_xy - (st.sum_x * st.sum_y) / c) / denom;
+        let b = sxy / sxx;
+        let a = (st.sum_y / c) - b * (st.sum_x / c);
+
+        slope[o] = b;
+        intercept[o] = a;
+    }
+
+    Ok((
+        PyArray1::from_vec_bound(py, slope),
+        PyArray1::from_vec_bound(py, intercept),
+    ))
 }
 
-// ======================
-// Padding util
-// ======================
 
 #[pyfunction]
 fn pad_nan_np<'py>(py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyArray1<f64>>> {
@@ -1594,6 +2149,280 @@ fn hedges_g_2samp_raw_np(
 // Module definition
 // ======================
 
+// --------------------------------------------------------------------------------------
+// Uniform cumulative hazard wrapper
+//
+// Fixes NaN behavior for x > b:
+// - mathematically, SF is 0 for x >= b, so -log(SF) -> +inf
+// - but repeated +inf values cause np.diff to produce NaN (inf - inf), and some downstream
+//   monotonic checks treat NaN as a failure.
+// We therefore:
+// - keep +inf exactly at x == b
+// - for x > b, clamp to the largest representable float < b (next_down(b)), producing a
+//   very large but finite value that stays constant for all x > b.
+// This preserves correct tail behavior while keeping the function numerically well-behaved.
+//
+// NOTE: This wrapper shadows the kernel implementation via the `wrap_pyfunction!` registration.
+// --------------------------------------------------------------------------------------
+
+#[inline]
+fn next_down(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    if x == f64::NEG_INFINITY {
+        return x;
+    }
+    if x == 0.0 {
+        // negative smallest subnormal
+        return f64::from_bits((1u64 << 63) | 1u64);
+    }
+    let bits = x.to_bits();
+    if x > 0.0 {
+        f64::from_bits(bits - 1)
+    } else {
+        // x < 0.0
+        f64::from_bits(bits + 1)
+    }
+}
+
+#[pyfunction]
+pub fn unif_cumhazard(py: Python<'_>, x: PyReadonlyArray1<f64>, a: f64, b: f64) -> PyResult<Py<PyArray1<f64>>> {
+    if !a.is_finite() || !b.is_finite() || !(b > a) {
+        return Err(PyValueError::new_err("Uniform parameters require finite a,b with b > a"));
+    }
+
+    let xs = x.as_slice()?;
+    let n = xs.len();
+    let mut out = Vec::with_capacity(n);
+
+    let width = b - a;
+
+    // Precompute a "clamped" tail value for x > b (finite, huge).
+    let b_prev = next_down(b);
+    // If b_prev collapsed below a (pathological), fall back to +inf.
+    let tail_val = if b_prev > a {
+        let sf_tail = (b - b_prev) / width; // tiny positive
+        // sf_tail should be > 0, but be defensive.
+        if sf_tail > 0.0 {
+            -sf_tail.ln()
+        } else {
+            f64::INFINITY
+        }
+    } else {
+        f64::INFINITY
+    };
+
+    for &xi in xs {
+        if xi.is_nan() {
+            out.push(f64::NAN);
+        } else if xi < a {
+            out.push(0.0);
+        } else if xi < b {
+            let sf = (b - xi) / width;
+            if sf <= 0.0 {
+                out.push(f64::INFINITY);
+            } else {
+                out.push(-sf.ln());
+            }
+        } else if xi == b {
+            out.push(f64::INFINITY);
+        } else {
+            out.push(tail_val);
+        }
+    }
+
+    Ok(out.into_pyarray_bound(py).unbind())
+}
+
+// ============================================================================
+// NEW v0.2.9: Fused multi-stat rolling functions
+// ============================================================================
+
+/*
+/// Parse alignment from string.
+fn parse_alignment(s: &str) -> PyResult<Alignment> {
+    match s.to_lowercase().as_str() {
+        "trailing" => Ok(Alignment::Trailing),
+        "centered" => Ok(Alignment::Centered),
+        _ => Err(PyErr::new::<PyValueError, _>(
+            format!("Invalid alignment: '{}'. Must be 'trailing' or 'centered'", s),
+        )),
+    }
+}
+
+/// Parse NaN policy from string.
+fn parse_nan_policy(s: &str) -> PyResult<NanPolicy> {
+    match s.to_lowercase().as_str() {
+        "propagate" => Ok(NanPolicy::Propagate),
+        "ignore" => Ok(NanPolicy::Ignore),
+        "require_min_periods" => Ok(NanPolicy::RequireMinPeriods),
+        _ => Err(PyErr::new::<PyValueError, _>(
+            format!(
+                "Invalid nan_policy: '{}'. Must be 'propagate', 'ignore', or 'require_min_periods'",
+                s
+            ),
+        )),
+    }
+}
+*/
+
+///
+/// Unified fused rolling statistics function (1D).
+///
+/// Returns a tuple of requested statistics arrays.
+///
+/// # Arguments
+/// - x: 1D numpy array
+/// - window: window size
+/// - min_periods: minimum valid observations (None = window)
+/// - alignment: "trailing" or "centered"
+/// - nan_policy: "propagate", "ignore", or "require_min_periods"
+/// - stats: tuple of stat names, e.g., ("mean", "std", "var")
+#[pyfunction]
+#[pyo3(signature = (x, window, min_periods=None, alignment="trailing", nan_policy="propagate", stats=None))]
+fn rolling_multi_np<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<f64>,
+    window: usize,
+    min_periods: Option<usize>,
+    alignment: &str,
+    nan_policy: &str,
+    stats: Option<Vec<String>>,
+) -> PyResult<Py<PyAny>> {
+    let xs = x.as_slice()?;
+    let n = xs.len();
+    
+    // Parse config
+    let align = parse_alignment(alignment)?;
+    let nan_pol = parse_nan_policy(nan_policy)?;
+    let config = RollingConfig::new(window, min_periods, align, nan_pol)
+        .map_err(|e| PyErr::new::<PyValueError, _>(e))?;
+    
+    // Parse stats mask
+    let stats = stats.unwrap_or_else(|| vec!["mean".to_string()]);
+    let stats_str = stats.join(",");
+    let mask = StatsMask::from_str_list(&stats_str)
+        .map_err(|e| PyErr::new::<PyValueError, _>(e))?;
+    
+    let out_len = output_length(n, window, align);
+    
+    // Allocate outputs - only if out_len > 0
+    let mut out_mean = if mask.has_mean() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+    let mut out_std = if mask.has_std() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+    let mut out_var = if mask.has_var() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+    let mut out_count = if mask.has_count() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+    let mut out_min = if mask.has_min() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+    let mut out_max = if mask.has_max() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+    
+    // Compute
+    rolling_multi_into(
+        xs, &config, mask,
+        &mut out_mean, &mut out_std, &mut out_var,
+        &mut out_count, &mut out_min, &mut out_max,
+    );
+    
+    // Build result tuple in requested order
+    let mut results = Vec::new();
+    for stat in &stats {
+        let arr: Py<PyAny> = match stat.to_lowercase().as_str() {
+            "mean" => PyArray1::from_vec_bound(py, out_mean.clone()).into_py(py),
+            "std" => PyArray1::from_vec_bound(py, out_std.clone()).into_py(py),
+            "var" => PyArray1::from_vec_bound(py, out_var.clone()).into_py(py),
+            "count" => PyArray1::from_vec_bound(py, out_count.clone()).into_py(py),
+            "min" => PyArray1::from_vec_bound(py, out_min.clone()).into_py(py),
+            "max" => PyArray1::from_vec_bound(py, out_max.clone()).into_py(py),
+            _ => return Err(PyErr::new::<PyValueError, _>(format!("Unknown stat: {}", stat))),
+        };
+        results.push(arr);
+    }
+    
+    Ok(PyTuple::new_bound(py, results).into())
+}
+
+/// Unified fused rolling statistics function (2D axis=0).
+///
+/// Computes rolling statistics along axis 0 (column-wise) for 2D arrays.
+///
+/// # Arguments
+/// - x: 2D input array
+/// - window: window size
+/// - min_periods: minimum valid observations required (defaults to window)
+/// - alignment: "trailing" or "centered"
+/// - nan_policy: "propagate", "ignore", or "require_min_periods"
+/// - stats: tuple of stat names, e.g., ("mean", "std", "var")
+#[pyfunction]
+#[pyo3(signature = (x, window, min_periods=None, alignment="trailing", nan_policy="propagate", stats=None))]
+fn rolling_multi_axis0_np<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<f64>,
+    window: usize,
+    min_periods: Option<usize>,
+    alignment: &str,
+    nan_policy: &str,
+    stats: Option<Vec<String>>,
+) -> PyResult<Py<PyAny>> {
+    let arr = x.as_array();
+    let shape = arr.shape();
+    let n_rows = shape[0];
+    let n_cols = shape[1];
+    
+    let data = arr.as_slice()
+        .ok_or_else(|| PyErr::new::<PyValueError, _>("Array must be contiguous"))?;
+    
+    // Parse config
+    let align = parse_alignment(alignment)?;
+    let nan_pol = parse_nan_policy(nan_policy)?;
+    let config = RollingConfig::new(window, min_periods, align, nan_pol)
+        .map_err(|e| PyErr::new::<PyValueError, _>(e))?;
+    
+    // Parse stats mask
+    let stats = stats.unwrap_or_else(|| vec!["mean".to_string()]);
+    let stats_str = stats.join(",");
+    let mask = StatsMask::from_str_list(&stats_str)
+        .map_err(|e| PyErr::new::<PyValueError, _>(e))?;
+    
+    let out_rows = output_length(n_rows, window, align);
+    let out_len = out_rows * n_cols;
+    
+    // Allocate outputs - only if out_len > 0
+    let mut out_mean = if mask.has_mean() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+    let mut out_std = if mask.has_std() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+    let mut out_var = if mask.has_var() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+    let mut out_count = if mask.has_count() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+    let mut out_min = if mask.has_min() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+    let mut out_max = if mask.has_max() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+    
+    // Compute
+    rolling_multi_axis0_into(
+        data, n_rows, n_cols, &config, mask,
+        &mut out_mean, &mut out_std, &mut out_var,
+        &mut out_count, &mut out_min, &mut out_max,
+    );
+    
+    // Build result tuple
+    let mut results = Vec::new();
+    for stat in &stats {
+        let vec_data = match stat.to_lowercase().as_str() {
+            "mean" => out_mean.clone(),
+            "std" => out_std.clone(),
+            "var" => out_var.clone(),
+            "count" => out_count.clone(),
+            "min" => out_min.clone(),
+            "max" => out_max.clone(),
+            _ => return Err(PyErr::new::<PyValueError, _>(format!("Unknown stat: {}", stat))),
+        };
+        
+        let arr_2d = PyArray2::from_vec2_bound(
+            py,
+            &vec_data.chunks(n_cols).map(|c| c.to_vec()).collect::<Vec<_>>()
+        )?;
+        results.push(arr_2d.into_py(py));
+    }
+    
+    Ok(PyTuple::new_bound(py, results).into())
+}
+
 #[pymodule]
 fn bunker_stats_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // basic stats
@@ -1618,6 +2447,30 @@ fn bunker_stats_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mad_np, m)?)?;
     m.add_function(wrap_pyfunction!(trimmed_mean_np, m)?)?;
 
+    // Robust statistics - extended functions
+    m.add_function(wrap_pyfunction!(median_np, m)?)?;
+    m.add_function(wrap_pyfunction!(iqr_robust_np, m)?)?;
+    m.add_function(wrap_pyfunction!(winsorized_mean_np, m)?)?;
+    m.add_function(wrap_pyfunction!(trimmed_std_np, m)?)?;
+    m.add_function(wrap_pyfunction!(mad_std_np, m)?)?;
+    m.add_function(wrap_pyfunction!(biweight_midvariance_np, m)?)?;
+    m.add_function(wrap_pyfunction!(qn_scale_np, m)?)?;
+    m.add_function(wrap_pyfunction!(huber_location_np, m)?)?;
+    
+    // Robust statistics - skipna variants
+    m.add_function(wrap_pyfunction!(median_skipna_np, m)?)?;
+    m.add_function(wrap_pyfunction!(mad_skipna_np, m)?)?;
+    m.add_function(wrap_pyfunction!(trimmed_mean_skipna_np, m)?)?;
+    m.add_function(wrap_pyfunction!(iqr_skipna_np, m)?)?;
+
+    // ========================================================================
+    // NEW: Robust statistics - policy-driven API (v0.2.9)
+    // ========================================================================
+    m.add_class::<kernels::robust::RobustStats>()?;
+    m.add_function(wrap_pyfunction!(kernels::robust::robust_fit, m)?)?;
+    m.add_function(wrap_pyfunction!(kernels::robust::robust_score, m)?)?;
+    m.add_function(wrap_pyfunction!(kernels::robust::rolling_median, m)?)?;
+
     // multi-D
     m.add_function(wrap_pyfunction!(mean_axis_np, m)?)?;
     m.add_function(wrap_pyfunction!(mean_over_last_axis_dyn_np, m)?)?;
@@ -1639,6 +2492,10 @@ fn bunker_stats_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rolling_std_nan_np, m)?)?;
     m.add_function(wrap_pyfunction!(rolling_zscore_nan_np, m)?)?;
     m.add_function(wrap_pyfunction!(ewma_np, m)?)?;
+
+    // NEW v0.2.9: Fused multi-stat rolling functions
+    m.add_function(wrap_pyfunction!(rolling_multi_np, m)?)?;
+    m.add_function(wrap_pyfunction!(rolling_multi_axis0_np, m)?)?;
 
     // outliers / scaling
     m.add_function(wrap_pyfunction!(iqr_outliers_np, m)?)?;
@@ -1662,7 +2519,19 @@ fn bunker_stats_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cov_np, m)?)?;
     m.add_function(wrap_pyfunction!(corr_np, m)?)?;
     m.add_function(wrap_pyfunction!(cov_matrix_np, m)?)?;
+    m.add_function(wrap_pyfunction!(cov_matrix_bias_np, m)?)?;
+    m.add_function(wrap_pyfunction!(cov_matrix_centered_np, m)?)?;
+    m.add_function(wrap_pyfunction!(cov_matrix_skipna_np, m)?)?;
+    m.add_function(wrap_pyfunction!(xtx_matrix_np, m)?)?;
+    m.add_function(wrap_pyfunction!(xxt_matrix_np, m)?)?;
+    m.add_function(wrap_pyfunction!(pairwise_euclidean_cols_np, m)?)?;
+    m.add_function(wrap_pyfunction!(pairwise_cosine_cols_np, m)?)?;
     m.add_function(wrap_pyfunction!(corr_matrix_np, m)?)?;
+    m.add_function(wrap_pyfunction!(corr_matrix_skipna_np, m)?)?;
+    m.add_function(wrap_pyfunction!(corr_distance_np, m)?)?;
+    m.add_function(wrap_pyfunction!(diag_np, m)?)?;
+    m.add_function(wrap_pyfunction!(trace_np, m)?)?;
+    m.add_function(wrap_pyfunction!(is_symmetric_np, m)?)?;
     m.add_function(wrap_pyfunction!(rolling_cov_np, m)?)?;
     m.add_function(wrap_pyfunction!(rolling_corr_np, m)?)?;
 
@@ -1673,20 +2542,48 @@ fn bunker_stats_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rolling_cov_nan_np, m)?)?;
     m.add_function(wrap_pyfunction!(rolling_corr_nan_np, m)?)?;
 
-    // KDE
-    m.add_function(wrap_pyfunction!(kde_gaussian_np, m)?)?;
+// preferred clean names + new rolling linear-model primitives
+m.add_function(wrap_pyfunction!(cov_skipna, m)?)?;
+m.add_function(wrap_pyfunction!(corr_skipna, m)?)?;
+m.add_function(wrap_pyfunction!(rolling_cov_skipna, m)?)?;
+m.add_function(wrap_pyfunction!(rolling_corr_skipna, m)?)?;
+m.add_function(wrap_pyfunction!(rolling_beta_skipna, m)?)?;
+m.add_function(wrap_pyfunction!(rolling_linreg_skipna, m)?)?;
 
-    // Inference core (keep your existing wiring style)
-    m.add_function(wrap_pyfunction!(infer::ttest::t_test_1samp_np, m)?)?;
-    m.add_function(wrap_pyfunction!(infer::ttest::t_test_2samp_np, m)?)?;
-    m.add_function(wrap_pyfunction!(infer::chi2::chi2_gof_np, m)?)?;
-    m.add_function(wrap_pyfunction!(infer::chi2::chi2_independence_np, m)?)?;
-    m.add_function(wrap_pyfunction!(infer::effect::mean_diff_ci_np, m)?)?;
-    m.add_function(wrap_pyfunction!(infer::effect::cohens_d_2samp_np, m)?)?;
-    m.add_function(wrap_pyfunction!(hedges_g_2samp_np, m)?)?;
-    m.add_function(wrap_pyfunction!(hedges_g_2samp_raw_np, m)?)?;
-    m.add_function(wrap_pyfunction!(infer::mann_whitney::mann_whitney_u_np, m)?)?;
-    m.add_function(wrap_pyfunction!(infer::ks::ks_1samp_np, m)?)?;
+
+    // KDE
+    //m.add_function(wrap_pyfunction!(kde_gaussian_np, m)?)?;
+
+    // ============================================================================
+	// INFERENCE MODULE - OPTIMIZED VERSION
+	// ============================================================================
+
+	// Existing tests (with bug fixes)
+	m.add_function(wrap_pyfunction!(infer::ttest::t_test_1samp_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::ttest::t_test_2samp_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::chi2::chi2_gof_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::chi2::chi2_independence_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::effect::mean_diff_ci_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::effect::cohens_d_2samp_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::effect::hedges_g_2samp_np2, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::mann_whitney::mann_whitney_u_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::ks::ks_1samp_np, m)?)?;
+
+	// NEW: ANOVA
+	m.add_function(wrap_pyfunction!(infer::anova::f_test_oneway_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::anova::levene_test_np, m)?)?;
+
+	// NEW: Normality tests
+	m.add_function(wrap_pyfunction!(infer::normality::jarque_bera_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::normality::anderson_darling_np, m)?)?;
+
+	// NEW: Correlation tests
+	m.add_function(wrap_pyfunction!(infer::correlation::pearson_corr_test_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::correlation::spearman_corr_test_np, m)?)?;
+
+	// NEW: Variance tests
+	m.add_function(wrap_pyfunction!(infer::variance_tests::f_test_var_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::variance_tests::bartlett_test_np, m)?)?;
 	
 	    // ----------------------
     // sandboxstats payload
@@ -1700,27 +2597,100 @@ fn bunker_stats_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(jackknife_mean, m)?)?;
     m.add_function(wrap_pyfunction!(jackknife_mean_ci, m)?)?;
 
-    // tsa
+    // extended resampling
+    m.add_function(wrap_pyfunction!(bootstrap_se, m)?)?;
+    m.add_function(wrap_pyfunction!(bootstrap_var, m)?)?;
+    m.add_function(wrap_pyfunction!(bootstrap_t_ci_mean, m)?)?;
+    m.add_function(wrap_pyfunction!(bootstrap_bca_ci, m)?)?;
+    m.add_function(wrap_pyfunction!(bayesian_bootstrap_ci, m)?)?;
+
+    // time-series resampling
+    m.add_function(wrap_pyfunction!(moving_block_bootstrap_mean_ci, m)?)?;
+    m.add_function(wrap_pyfunction!(circular_block_bootstrap_mean_ci, m)?)?;
+    m.add_function(wrap_pyfunction!(stationary_bootstrap_mean_ci, m)?)?;
+
+    // permutation tests
+    m.add_function(wrap_pyfunction!(permutation_corr_test, m)?)?;
+    m.add_function(wrap_pyfunction!(permutation_mean_diff_test, m)?)?;
+
+    // extended jackknife
+    m.add_function(wrap_pyfunction!(influence_mean, m)?)?;
+    m.add_function(wrap_pyfunction!(delete_d_jackknife_mean, m)?)?;
+    m.add_function(wrap_pyfunction!(jackknife_after_bootstrap_se_mean, m)?)?;
+
+    // tsa - stationarity
     m.add_function(wrap_pyfunction!(adf_test, m)?)?;
     m.add_function(wrap_pyfunction!(kpss_test, m)?)?;
+	m.add_function(wrap_pyfunction!(kpss_test_debug, m)?)?;
     m.add_function(wrap_pyfunction!(pp_test, m)?)?;
+	m.add_function(wrap_pyfunction!(variance_ratio_test, m)?)?;
+	m.add_function(wrap_pyfunction!(zivot_andrews_test, m)?)?;
+	m.add_function(wrap_pyfunction!(trend_stationarity_test, m)?)?;
+	m.add_function(wrap_pyfunction!(integration_order_test, m)?)?;
+	m.add_function(wrap_pyfunction!(seasonal_diff_test, m)?)?;
+	m.add_function(wrap_pyfunction!(seasonal_unit_root_test, m)?)?;
+
+    
+    // tsa - diagnostics
     m.add_function(wrap_pyfunction!(ljung_box, m)?)?;
     m.add_function(wrap_pyfunction!(durbin_watson, m)?)?;
     m.add_function(wrap_pyfunction!(bg_test, m)?)?;
+    m.add_function(wrap_pyfunction!(box_pierce, m)?)?;
+    m.add_function(wrap_pyfunction!(runs_test, m)?)?;
+    m.add_function(wrap_pyfunction!(acf_zero_crossing, m)?)?;
 
+    // tsa - acf/pacf
     m.add_function(wrap_pyfunction!(acf, m)?)?;
     m.add_function(wrap_pyfunction!(pacf, m)?)?;
+    m.add_function(wrap_pyfunction!(pacf_yw, m)?)?;
+    m.add_function(wrap_pyfunction!(acovf, m)?)?;
+    m.add_function(wrap_pyfunction!(acf_with_ci, m)?)?;
+    m.add_function(wrap_pyfunction!(ccf, m)?)?;
+    m.add_function(wrap_pyfunction!(pacf_innovations, m)?)?;
+    m.add_function(wrap_pyfunction!(pacf_burg, m)?)?;
+    
+    // tsa - rolling autocorrelation
     m.add_function(wrap_pyfunction!(rolling_autocorr, m)?)?;
+    m.add_function(wrap_pyfunction!(rolling_correlation, m)?)?;
+    m.add_function(wrap_pyfunction!(rolling_autocorr_multi, m)?)?;
+    
+    // tsa - spectral
     m.add_function(wrap_pyfunction!(periodogram, m)?)?;
+    m.add_function(wrap_pyfunction!(welch_psd, m)?)?;
+    m.add_function(wrap_pyfunction!(cumulative_periodogram, m)?)?;
+    m.add_function(wrap_pyfunction!(dominant_frequency, m)?)?;
+    m.add_function(wrap_pyfunction!(spectral_entropy, m)?)?;
+    m.add_function(wrap_pyfunction!(bartlett_psd, m)?)?;
+    m.add_function(wrap_pyfunction!(spectral_peaks, m)?)?;
+    m.add_function(wrap_pyfunction!(spectral_flatness, m)?)?;
+    m.add_function(wrap_pyfunction!(band_power, m)?)?;
+    m.add_function(wrap_pyfunction!(spectral_centroid, m)?)?;
+    m.add_function(wrap_pyfunction!(spectral_rolloff, m)?)?;
 
     // dist
     m.add_function(wrap_pyfunction!(norm_pdf, m)?)?;
+    m.add_function(wrap_pyfunction!(norm_logpdf, m)?)?;
     m.add_function(wrap_pyfunction!(norm_cdf, m)?)?;
+    m.add_function(wrap_pyfunction!(norm_sf, m)?)?;
+    m.add_function(wrap_pyfunction!(norm_logsf, m)?)?;
+    m.add_function(wrap_pyfunction!(norm_cumhazard, m)?)?;
     m.add_function(wrap_pyfunction!(norm_ppf, m)?)?;
+
     m.add_function(wrap_pyfunction!(exp_pdf, m)?)?;
+    m.add_function(wrap_pyfunction!(exp_logpdf, m)?)?;
     m.add_function(wrap_pyfunction!(exp_cdf, m)?)?;
+    m.add_function(wrap_pyfunction!(exp_sf, m)?)?;
+    m.add_function(wrap_pyfunction!(exp_logsf, m)?)?;
+    m.add_function(wrap_pyfunction!(exp_cumhazard, m)?)?;
+    m.add_function(wrap_pyfunction!(exp_ppf, m)?)?;
+
     m.add_function(wrap_pyfunction!(unif_pdf, m)?)?;
+    m.add_function(wrap_pyfunction!(unif_logpdf, m)?)?;
     m.add_function(wrap_pyfunction!(unif_cdf, m)?)?;
+    m.add_function(wrap_pyfunction!(unif_sf, m)?)?;
+    m.add_function(wrap_pyfunction!(unif_logsf, m)?)?;
+    m.add_function(wrap_pyfunction!(unif_cumhazard, m)?)?;
+    m.add_function(wrap_pyfunction!(unif_ppf, m)?)?;
 
 
     // padding

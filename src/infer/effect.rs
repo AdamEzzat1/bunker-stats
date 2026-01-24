@@ -115,6 +115,7 @@ pub fn mean_diff_ci_np(
             let se2 = v1 / (n1 as f64) + v2 / (n2 as f64);
             let se = se2.sqrt();
 
+            // Welch-Satterthwaite df with improved edge case handling
             let num = se2 * se2;
             let den = (v1 * v1)
                 / (((n1 as f64) * (n1 as f64)) * ((n1 - 1) as f64))
@@ -122,9 +123,15 @@ pub fn mean_diff_ci_np(
                     / (((n2 as f64) * (n2 as f64)) * ((n2 - 1) as f64));
 
             let df = if den == 0.0 {
+                // Both samples have zero variance - use pooled df
                 (n1 + n2 - 2) as f64
+            } else if den.is_finite() {
+                let welch_df = num / den;
+                // Ensure df is positive and reasonable
+                welch_df.max(1.0).min((n1 + n2 - 2) as f64)
             } else {
-                num / den
+                // Numerical issues - fall back to pooled
+                (n1 + n2 - 2) as f64
             };
 
             (diff, se, df)
