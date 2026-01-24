@@ -1,19 +1,16 @@
-# Rust
-/target/
-
-# Python
+# Python / venv
+.venv/
+venv/
 __pycache__/
-*.pyc
-*.pyo
 *.pyd
-*.whl
-*.egg-info/
 
-# Hypothesis
-.hypothesis/
+# Rust / build
+target/
 
-# Local CSV / benchmarks
-*.csv
+# Benchmarks & local artifacts
+bench_*.csv
+tests/results.txt
+build_error.txt
 
-RECOVERY_DIFF.patch
-
+# OS
+.DS_Store
