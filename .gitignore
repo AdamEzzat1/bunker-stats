@@ -1,16 +1,21 @@
-# Python / venv
+# Python env / cache
 .venv/
 venv/
 __pycache__/
+*.pyc
 *.pyd
+.hypothesis/
 
-# Rust / build
+# Rust build
 target/
 
-# Benchmarks & local artifacts
+# Local benchmark / artifacts
 bench_*.csv
-tests/results.txt
+benchmarks/*.csv
 build_error.txt
+tests/results.txt
 
-# OS
+# OS/editor
 .DS_Store
+Thumbs.db
+.vscode/
