@@ -1,21 +1,118 @@
-# Python env / cache
-.venv/
-venv/
-__pycache__/
-*.pyc
-*.pyd
-.hypothesis/
-
-# Rust build
-target/
-
-# Local benchmark / artifacts
-bench_*.csv
-benchmarks/*.csv
-build_error.txt
-tests/results.txt
-
-# OS/editor
+############################################
+# OS / Editor
+############################################
 .DS_Store
 Thumbs.db
+
+.idea/
 .vscode/
+*.swp
+*.swo
+
+############################################
+# Python
+############################################
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.env
+.envrc
+.venv/
+venv/
+
+############################################
+# Rust
+############################################
+target/
+Cargo.lock
+
+############################################
+# Build / Distribution
+############################################
+build/
+dist/
+wheelhouse/
+*.whl
+
+############################################
+# Benchmarks & Performance Artifacts
+############################################
+.benchmarks/
+benchmarks/
+benchmarks_*/
+criterion/
+*.bench
+*.perf
+*.prof
+
+############################################
+# Demos / Experiments / Research Scripts
+############################################
+demo_*.py
+bench_*.py
+benchmark_*.py
+compare_*.py
+capture_*.py
+verify_*.py
+aggressive_fix.py
+reverse_engineer_*.py
+debug_*.py
+find_loaded_*.py
+fix_*.py
+
+############################################
+# Local-only Tests / Scratch
+############################################
+test_localsystem.txt
+*_local*
+*_scratch*
+*_debug*
+
+############################################
+# AI / Agent / Automation Tools
+############################################
+.claude/
+**/.claude/
+.aider/
+**/.aider/
+.cursor/
+**/.cursor/
+.continue/
+**/.continue/
+
+############################################
+# Generated Docs / Reports
+############################################
+*.html
+*_files/
+*.pdf
+
+############################################
+# Data / Outputs
+############################################
+*.csv
+*.tsv
+*.parquet
+*.arrow
+*.feather
+*.npy
+*.npz
+
+############################################
+# Logs / Dumps / Temp
+############################################
+*.log
+*.dump
+*.tmp
+
+############################################
+# Safety Nets (never commit)
+############################################
+notes/
+scratch/
+backups/
+private/
+personal/
