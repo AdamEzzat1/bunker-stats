@@ -4,7 +4,9 @@
 /// 1. select_nth_unstable instead of full sort (O(n) vs O(n log n))
 /// 2. Workspace API for allocation-free operations
 /// 3. Fused median+MAD kernels
-/// 7. Explicit NaN handling via partial_cmp().unwrap()
+/// 7. Explicit NaN handling: reducers short-circuit to NaN on NaN input
+///    (numpy semantics) and sort/select with `f64::total_cmp` so they never
+///    panic — critical under the release profile's `panic = "abort"`.
 /// 8. &[f64] slice-based API throughout
 ///
 /// This file replaces: extended.rs, mad.rs, trimmed_mean.rs
@@ -62,6 +64,13 @@ pub(crate) fn median_inplace(v: &mut [f64]) -> f64 {
         return f64::NAN;
     }
 
+    // NaN has no defined order; propagate NaN (numpy `median` semantics) instead
+    // of feeding it to the selector. This also guards mad/biweight/huber, which
+    // funnel through here, so any NaN input yields NaN rather than a crash.
+    if crate::util::any_nan(v) {
+        return f64::NAN;
+    }
+
     if n == 1 {
         return v[0];
     }
@@ -69,18 +78,14 @@ pub(crate) fn median_inplace(v: &mut [f64]) -> f64 {
     if n & 1 == 1 {
         // Odd length: select middle element
         let mid = n >> 1;
-        let (_, median, _) = v.select_nth_unstable_by(mid, |a, b| {
-            a.partial_cmp(b).unwrap()
-        });
+        let (_, median, _) = v.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
         *median
     } else {
         // Even length: average of two middle elements
         let mid = n >> 1;
-        
+
         // Select upper middle element
-        let (left, median_upper, _) = v.select_nth_unstable_by(mid, |a, b| {
-            a.partial_cmp(b).unwrap()
-        });
+        let (left, median_upper, _) = v.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
         let upper = *median_upper;
         
         // Find max of left partition (lower middle element)
@@ -178,8 +183,12 @@ pub(crate) fn trimmed_mean_slice(xs: &[f64], proportion_to_cut: f64) -> f64 {
         return f64::NAN;
     }
 
+    if crate::util::any_nan(xs) {
+        return f64::NAN;
+    }
+
     let mut v = xs.to_vec();
-    v.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    v.sort_by(|x, y| x.total_cmp(y));
 
     let n = v.len();
     let cut = ((n as f64) * proportion_to_cut).floor() as usize;
@@ -202,8 +211,12 @@ pub(crate) fn iqr_slice(xs: &[f64]) -> f64 {
         return f64::NAN;
     }
 
+    if crate::util::any_nan(xs) {
+        return f64::NAN;
+    }
+
     let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
 
     let q1 = percentile_sorted(&v, 25.0);
     let q3 = percentile_sorted(&v, 75.0);
@@ -218,8 +231,12 @@ pub(crate) fn winsorized_mean_slice(xs: &[f64], lower_percentile: f64, upper_per
         return f64::NAN;
     }
 
+    if crate::util::any_nan(xs) {
+        return f64::NAN;
+    }
+
     let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
 
     let lower_val = percentile_sorted(&v, lower_percentile);
     let upper_val = percentile_sorted(&v, upper_percentile);
@@ -246,8 +263,12 @@ pub(crate) fn trimmed_std_slice(xs: &[f64], proportion_to_cut: f64) -> f64 {
         return f64::NAN;
     }
 
+    if crate::util::any_nan(xs) {
+        return f64::NAN;
+    }
+
     let mut v = xs.to_vec();
-    v.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    v.sort_by(|x, y| x.total_cmp(y));
 
     let n = v.len();
     let cut = ((n as f64) * proportion_to_cut).floor() as usize;
@@ -288,15 +309,25 @@ pub(crate) fn biweight_midvariance_slice(xs: &[f64], c: f64) -> f64 {
         return f64::NAN;
     }
 
+    // Beers–Flynn–Gebhardt biweight midvariance, matching
+    // astropy.stats.biweight_midvariance (modify_sample_size=False):
+    //
+    //   ζ² = n · Σ_{|u|<1} (x−M)² (1−u²)⁴ / [ Σ_{|u|<1} (1−u²)(1−5u²) ]²
+    //
+    // where u = (x−M)/(c·MAD) and n is the full sample size. The previous
+    // implementation used (1−u²)² in the numerator (exponent 2, not 4) and
+    // (1−u²)² in the denominator (instead of (1−u²)(1−5u²)), biasing the scale.
     let mut numerator = 0.0;
     let mut denominator = 0.0;
 
     for &x in xs {
         let u = (x - med) / (c * mad_val);
         if u.abs() < 1.0 {
-            let weight = (1.0 - u * u).powi(2);
-            numerator += weight * (x - med) * (x - med);
-            denominator += weight;
+            let u2 = u * u;
+            let one_minus = 1.0 - u2;
+            let d = x - med;
+            numerator += d * d * one_minus.powi(4);
+            denominator += one_minus * (1.0 - 5.0 * u2);
         }
     }
 
@@ -311,6 +342,10 @@ pub(crate) fn biweight_midvariance_slice(xs: &[f64], c: f64) -> f64 {
 pub(crate) fn qn_scale_slice(xs: &[f64]) -> f64 {
     let n = xs.len();
     if n < 2 {
+        return f64::NAN;
+    }
+
+    if crate::util::any_nan(xs) {
         return f64::NAN;
     }
 
@@ -334,9 +369,7 @@ pub(crate) fn qn_scale_slice(xs: &[f64]) -> f64 {
 
     // Use selection for first quartile (Optimization #1)
     let k = diffs.len() / 4;
-    let (_, selected, _) = diffs.select_nth_unstable_by(k, |a, b| {
-        a.partial_cmp(b).unwrap()
-    });
+    let (_, selected, _) = diffs.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
 
     *selected * 2.2219
 }
@@ -494,5 +527,114 @@ mod tests {
 
         let mad = mad_slice_skipna(&data);
         assert!(mad.is_finite());
+    }
+
+    /// Regression for the CRITICAL abort vector: with `panic = "abort"` any
+    /// panic here is a hard interpreter crash (SIGABRT). Every order-statistic
+    /// reducer must return NaN on NaN input, never panic. Before the fix these
+    /// hit `partial_cmp(..).unwrap()` and aborted.
+    #[test]
+    fn test_nan_input_propagates_not_panics() {
+        let data = vec![1.0, f64::NAN, 3.0, 4.0, 5.0];
+        assert!(median_slice(&data).is_nan(), "median must propagate NaN");
+        assert!(mad_slice(&data).is_nan(), "mad must propagate NaN");
+        let (med, mad) = median_mad_fused(&data);
+        assert!(med.is_nan() && mad.is_nan(), "fused must propagate NaN");
+        assert!(iqr_slice(&data).is_nan(), "iqr must propagate NaN");
+        assert!(trimmed_mean_slice(&data, 0.1).is_nan(), "trimmed_mean must propagate NaN");
+        assert!(trimmed_std_slice(&data, 0.1).is_nan(), "trimmed_std must propagate NaN");
+        assert!(winsorized_mean_slice(&data, 10.0, 90.0).is_nan(), "winsorized must propagate NaN");
+        assert!(qn_scale_slice(&data).is_nan(), "qn must propagate NaN");
+        assert!(biweight_midvariance_slice(&data, 9.0).is_nan(), "biweight must propagate NaN");
+        assert!(huber_location_slice(&data, 1.345, 50).is_nan(), "huber must propagate NaN");
+    }
+
+    /// ±Inf is a valid, ordered f64: sort/select must not panic on it. Median of
+    /// {1, 2, 3, +inf, +inf} is the middle order statistic = 3.
+    #[test]
+    fn test_inf_input_does_not_panic() {
+        let data = vec![1.0, 2.0, 3.0, f64::INFINITY, f64::INFINITY];
+        assert_eq!(median_slice(&data), 3.0);
+        assert!(mad_slice(&data).is_finite() || mad_slice(&data).is_nan());
+    }
+
+    /// Biweight midvariance pinned to the astropy/Beers-Flynn-Gebhardt formula
+    /// (c=9, raw MAD). Reference values computed from
+    ///   ζ² = n·Σ(x−M)²(1−u²)⁴ / [Σ(1−u²)(1−5u²)]².
+    /// The previous (wrong) exponents produced materially different numbers, so
+    /// this test would fail against the old implementation.
+    #[test]
+    fn test_biweight_midvariance_astropy_reference() {
+        let simple = biweight_midvariance_slice(&[1.0, 2.0, 3.0, 4.0, 5.0], 9.0);
+        assert!((simple - 2.297_063_991_357_617).abs() < 1e-12, "got {simple}");
+
+        // With a large outlier the estimator stays close to the inlier spread,
+        // unlike the sample variance which would blow up.
+        let outlier = biweight_midvariance_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 100.0], 9.0);
+        assert!((outlier - 2.850_366_011_689_22).abs() < 1e-12, "got {outlier}");
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Any f64 INCLUDING NaN and ±Inf — this is the "never aborts" fuzz layer.
+    fn any_vec() -> impl Strategy<Value = Vec<f64>> {
+        prop::collection::vec(proptest::num::f64::ANY, 0..48)
+    }
+
+    // Finite f64 in a sane range, for algebraic-invariant properties.
+    fn finite_vec() -> impl Strategy<Value = Vec<f64>> {
+        prop::collection::vec(-1e6f64..1e6f64, 1..48)
+    }
+
+    proptest! {
+        // Every robust reducer must return (not panic/abort) for ANY input,
+        // including NaN and ±Inf. proptest treats a panic as a test failure, so
+        // simply calling each fn exercises the panic="abort" guarantee.
+        #[test]
+        fn robust_reducers_never_panic(xs in any_vec()) {
+            let _ = median_slice(&xs);
+            let _ = mad_slice(&xs);
+            let _ = median_mad_fused(&xs);
+            let _ = iqr_slice(&xs);
+            let _ = trimmed_mean_slice(&xs, 0.1);
+            let _ = trimmed_std_slice(&xs, 0.1);
+            let _ = winsorized_mean_slice(&xs, 10.0, 90.0);
+            let _ = qn_scale_slice(&xs);
+            let _ = biweight_midvariance_slice(&xs, 9.0);
+            let _ = huber_location_slice(&xs, 1.345, 20);
+        }
+
+        // If any element is NaN, order-statistic reducers propagate NaN (numpy
+        // semantics), never a spurious finite value.
+        #[test]
+        fn nan_in_propagates_nan_out(mut xs in finite_vec(), idx in 0usize..48) {
+            let i = idx % xs.len();
+            xs[i] = f64::NAN;
+            prop_assert!(median_slice(&xs).is_nan());
+            prop_assert!(mad_slice(&xs).is_nan());
+            prop_assert!(iqr_slice(&xs).is_nan());
+        }
+
+        // Median is translation-equivariant: median(x + c) == median(x) + c.
+        #[test]
+        fn median_translation_equivariant(xs in finite_vec(), c in -1e5f64..1e5f64) {
+            let shifted: Vec<f64> = xs.iter().map(|v| v + c).collect();
+            let lhs = median_slice(&shifted);
+            let rhs = median_slice(&xs) + c;
+            prop_assert!((lhs - rhs).abs() <= 1e-6 * (1.0 + rhs.abs()));
+        }
+
+        // MAD is scale-equivariant: MAD(a*x) == |a| * MAD(x).
+        #[test]
+        fn mad_scale_equivariant(xs in finite_vec(), a in -100.0f64..100.0) {
+            let scaled: Vec<f64> = xs.iter().map(|v| a * v).collect();
+            let lhs = mad_slice(&scaled);
+            let rhs = a.abs() * mad_slice(&xs);
+            prop_assert!((lhs - rhs).abs() <= 1e-6 * (1.0 + rhs.abs()));
+        }
     }
 }

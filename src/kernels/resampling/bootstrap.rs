@@ -1,10 +1,13 @@
-﻿use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyArray2, IntoPyArray};
-use numpy::ndarray::Array2;
+﻿use numpy::PyReadonlyArray1;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rand_pcg::Pcg64;  // Faster RNG: 2-3x faster than StdRng
 use rand::{Rng, SeedableRng};
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
+// Serial fallback: supplies `into_par_iter()` == `into_iter()` when rayon is off.
+#[cfg(not(feature = "parallel"))]
+use super::IntoParIterCompat;
 
 // ==============================================
 // RNG MIXING UTILITY - TIER 1 OPTIMIZATION
@@ -405,21 +408,21 @@ fn norm_ppf_approx(p: f64) -> f64 {
 
     if p < P_LOW {
         let q = (-2.0 * p.ln()).sqrt();
-        let num = (((((C[0]*q + C[1])*q + C[2])*q + C[3])*q + C[4])*q + C[5]);
-        let den = ((((D[0]*q + D[1])*q + D[2])*q + D[3]));
+        let num = ((((C[0]*q + C[1])*q + C[2])*q + C[3])*q + C[4])*q + C[5];
+        let den = ((D[0]*q + D[1])*q + D[2])*q + D[3];
         return num / den;
     }
     if p > P_HIGH {
         let q = (-2.0 * (1.0 - p).ln()).sqrt();
-        let num = (((((C[0]*q + C[1])*q + C[2])*q + C[3])*q + C[4])*q + C[5]);
-        let den = ((((D[0]*q + D[1])*q + D[2])*q + D[3]));
+        let num = ((((C[0]*q + C[1])*q + C[2])*q + C[3])*q + C[4])*q + C[5];
+        let den = ((D[0]*q + D[1])*q + D[2])*q + D[3];
         return -(num / den);
     }
 
     let q = p - 0.5;
     let r = q * q;
     let num = (((((A[0]*r + A[1])*r + A[2])*r + A[3])*r + A[4])*r + A[5]) * q;
-    let den = (((((B[0]*r + B[1])*r + B[2])*r + B[3])*r + B[4]) * r + 1.0);
+    let den = ((((B[0]*r + B[1])*r + B[2])*r + B[3])*r + B[4]) * r + 1.0;
     num / den
 }
 
@@ -507,7 +510,6 @@ pub fn bootstrap_se(
                     let seed = mix_seed(base_seed, b as u64);
                     let mut rng = Pcg64::seed_from_u64(seed);
                     let mut idx = vec![0usize; n];
-                    let mut scratch = vec![0.0_f64; n];
                     resample_indices(&mut rng, n, &mut idx);
                     match stat {
                         "mean" => mean_from_indices(x, &idx),
@@ -777,7 +779,7 @@ pub fn bootstrap_bca_ci(
             // for each removed element, median index in the shortened sorted list
             let m = n - 1;
             let mid = m / 2;
-            let is_even = (m % 2 == 0);
+            let is_even = m % 2 == 0;
 
             for rem in 0..n {
                 let r = rank_of[rem];

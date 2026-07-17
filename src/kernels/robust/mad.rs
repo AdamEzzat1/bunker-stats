@@ -10,9 +10,14 @@ pub(crate) fn mad_slice(xs: &[f64]) -> f64 {
     if xs.is_empty() {
         return f64::NAN;
     }
+    // NaN in input -> NaN out (numpy semantics); also avoids feeding NaN to the
+    // comparator, which under panic="abort" would crash the interpreter.
+    if crate::util::any_nan(xs) {
+        return f64::NAN;
+    }
     // Copy once, sort once for the median, then reuse the same buffer for deviations.
     let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
 
     let n = v.len();
     // Optimized: use bitwise AND for even/odd check, bit shift for division
@@ -27,7 +32,7 @@ pub(crate) fn mad_slice(xs: &[f64]) -> f64 {
     for val in &mut v {
         *val = (*val - med).abs();
     }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
 
     if n & 1 == 1 {
         v[n >> 1]

@@ -100,7 +100,7 @@ pub fn anderson_darling_np(
     let std = v.sqrt();
     
     let mut z: Vec<f64> = xs.iter().map(|&x| (x - m) / std).collect();
-    z.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    z.sort_by(|a, b| a.total_cmp(b));
     
     let norm = Normal::new(0.0, 1.0).unwrap();
     

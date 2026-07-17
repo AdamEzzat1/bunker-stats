@@ -536,10 +536,13 @@ pub fn pairwise_cosine_cols_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) 
                 out[j * p + i] = out[i * p + j];
             }
         }
-        return;
     }
 
-    // Sequential path
+    // Sequential path — only compiled when the parallel feature is off. With it
+    // on, the block above computes and returns everything; gating this with
+    // `not(parallel)` (instead of an early `return`) avoids an unreachable-code
+    // warning in the parallel build.
+    #[cfg(not(feature = "parallel"))]
     for i in 0..p {
         let ni = norms[i];
 

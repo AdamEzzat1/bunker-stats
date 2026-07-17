@@ -51,6 +51,9 @@ issues = "https://github.com/AdamEzzat1/bunker-stats/issues"
 # maturin packaging configuration
 # -------------------------------
 [tool.maturin]
+# Build the extension with the pyo3/extension-module feature enabled (it is not a
+# default dependency feature so that `cargo test`/`cargo bolero` can link libpython).
+features = ["extension-module"]
 exclude = [
     ".venv/**",
     "venv/**",

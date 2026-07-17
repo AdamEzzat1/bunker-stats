@@ -107,9 +107,6 @@ pub fn bg_test(resid: PyReadonlyArray1<f64>, max_lag: usize) -> PyResult<(f64, f
 
     let t0 = max_lag;
     let t_len = n - t0;
-    
-    eprintln!("\n=== BG TEST DEBUG ===");
-    eprintln!("n = {}, max_lag = {}, t0 = {}, t_len = {}", n, max_lag, t0, t_len);
 
     // Dependent variable: current residuals e[t] for t >= max_lag
     let mut y = Vec::with_capacity(t_len);
@@ -127,8 +124,7 @@ pub fn bg_test(resid: PyReadonlyArray1<f64>, max_lag: usize) -> PyResult<(f64, f
     }
 
     let p = max_lag + 1;
-    eprintln!("Auxiliary regression: {} observations, {} predictors", t_len, p);
-    
+
     let mut xtx = vec![0.0_f64; p * p];
     let mut xty = vec![0.0_f64; p];
 
@@ -150,8 +146,6 @@ pub fn bg_test(resid: PyReadonlyArray1<f64>, max_lag: usize) -> PyResult<(f64, f
     } else {
         return Ok((f64::NAN, f64::NAN));
     };
-    
-    eprintln!("Beta coefficients: [{:.6}, {:.6}, ...]", beta[0], beta[1]);
 
     // Calculate RSS (Residual Sum of Squares from auxiliary regression)
     let mut rss = 0.0;
@@ -172,30 +166,29 @@ pub fn bg_test(resid: PyReadonlyArray1<f64>, max_lag: usize) -> PyResult<(f64, f
         tss += dev * dev;
     }
     
-    eprintln!("RSS = {:.6}, TSS = {:.6}", rss, tss);
-
     // R² from auxiliary regression
     let r2 = if tss > 0.0 {
         1.0 - rss / tss
     } else {
         0.0
     };
-    
-    eprintln!("R² = {:.6}", r2);
-    
-    // LM statistic - currently using auxiliary regression sample size
-    // TODO: Debug why this gives 21.46 when statsmodels gives 23.80
-    let stat_with_t_len = (t_len as f64) * r2;
-    let stat_with_n = (n as f64) * r2;
-    eprintln!("LM with t_len ({}) = {:.6}", t_len, stat_with_t_len);
-    eprintln!("LM with n ({}) = {:.6}", n, stat_with_n);
-    eprintln!("Ratio n/t_len = {:.6}", n as f64 / t_len as f64);
-    
-    let stat = ((n * n) as f64 / t_len as f64) * r2;;  // Using t_len for now
 
-    // P-value from chi-squared distribution with max_lag degrees of freedom
-    let chi = ChiSquared::new(max_lag as f64).unwrap();
-    let p_val = 1.0 - chi.cdf(stat);
+    // Breusch-Godfrey LM statistic = T · R², where T is the number of
+    // observations in the auxiliary regression (here the reduced sample
+    // t_len = n - max_lag, since the first max_lag rows have no full lag set).
+    // Asymptotically ~ χ²(max_lag) under the null of no serial correlation.
+    // NOTE: statsmodels' `acorr_breusch_godfrey` zero-pads the pre-sample lags
+    // to keep all n rows and reports n · R²; that is a different finite-sample
+    // convention, not a discrepancy in this statistic.
+    let stat = (t_len as f64) * r2;
+
+    // P-value from chi-squared distribution with max_lag degrees of freedom.
+    // max_lag >= 1 is guaranteed above, so ChiSquared::new cannot fail; fall
+    // back to NaN defensively rather than risk an abort under panic="abort".
+    let p_val = match ChiSquared::new(max_lag as f64) {
+        Ok(chi) => 1.0 - chi.cdf(stat),
+        Err(_) => f64::NAN,
+    };
 
     Ok((stat, p_val))
 }
@@ -266,7 +259,7 @@ pub fn runs_test(x: PyReadonlyArray1<f64>) -> PyResult<(usize, f64, f64)> {
     
     // Calculate median
     let mut sorted = x.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.total_cmp(b));
     let median = if n % 2 == 1 {
         sorted[n / 2]
     } else {

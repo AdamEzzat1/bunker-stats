@@ -325,7 +325,7 @@ pub fn ks_1samp_np(
     let dist = parse_named_dist(cdf, &params)?;
 
     let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
 
     let n = v.len();
     let nf = n as f64;

@@ -132,7 +132,7 @@ pub fn rankdata_average(data: &[f64]) -> Vec<f64> {
         .collect();
     
     // Sort by value
-    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
     
     let mut ranks = vec![0.0; n];
     let mut i = 0;
@@ -168,7 +168,7 @@ pub fn median(xs: &[f64]) -> f64 {
     }
     
     let mut sorted = xs.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.total_cmp(b));
     
     let n = sorted.len();
     if n % 2 == 1 {

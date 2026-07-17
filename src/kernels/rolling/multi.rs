@@ -242,8 +242,6 @@ fn rolling_multi_trailing(
     out_min: &mut [f64],
     out_max: &mut [f64],
 ) {
-    let n = xs.len();
-    
     // For Propagate policy with trailing, we can optimize:
     // - Check for NaNs once per window
     // - Use fast path if no NaNs

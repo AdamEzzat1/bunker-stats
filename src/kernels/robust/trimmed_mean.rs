@@ -20,8 +20,14 @@ pub(crate) fn trimmed_mean_slice(xs: &[f64], proportion_to_cut: f64) -> f64 {
         return f64::NAN;
     }
 
+    // NaN in input -> NaN out (numpy semantics) and avoids a NaN reaching the
+    // comparator (which under panic="abort" would crash the interpreter).
+    if crate::util::any_nan(xs) {
+        return f64::NAN;
+    }
+
     let mut v = xs.to_vec();
-    v.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    v.sort_by(|x, y| x.total_cmp(y));
 
     let n = v.len();
     let cut = ((n as f64) * proportion_to_cut).floor() as usize;

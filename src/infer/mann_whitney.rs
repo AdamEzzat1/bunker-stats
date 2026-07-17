@@ -15,7 +15,7 @@ struct Obs {
 /// Compute average ranks for tied groups.
 /// Returns (sum_ranks_x, tie_term_sum, n_total).
 fn rankdata_average(obs: &mut [Obs]) -> (f64, f64, usize) {
-    obs.sort_by(|a, b| a.v.partial_cmp(&b.v).unwrap());
+    obs.sort_by(|a, b| a.v.total_cmp(&b.v));
 
     let n = obs.len();
     let mut rank = 1usize;

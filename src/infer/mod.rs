@@ -21,4 +21,3 @@ pub mod correlation;    // NEW
 pub mod variance_tests; // NEW
 
 // Re-export for convenience
-pub use common::{Alternative, reject_nonfinite, mean, var_sample, rankdata_average};

@@ -115,7 +115,11 @@ mod tests {
         let result = rolling_median(&data, 70);
         
         assert!(result[68].is_nan());
-        assert_eq!(result[69], 35.0);  // median of 1..=70
+        // Median of the 70 consecutive integers 1..=70 (an even count) is the
+        // mean of the two central order statistics: (35 + 36) / 2 = 35.5.
+        // (numpy.median(np.arange(1, 71)) == 35.5.) The previous expected value
+        // of 35.0 was an incorrect constant, not a kernel bug.
+        assert_eq!(result[69], 35.5);  // median of 1..=70
     }
 
     #[test]
@@ -149,8 +153,17 @@ mod tests {
         
         let r1 = rolling_median(&data, 5);
         let r2 = rolling_median(&data, 5);
-        
-        assert_eq!(r1, r2);
+
+        // The warm-up positions are NaN, and NaN != NaN, so a plain
+        // `assert_eq!` on the vectors can never pass. Compare element-wise with
+        // NaN treated as equal to NaN (bit-identical determinism check).
+        assert_eq!(r1.len(), r2.len());
+        for (a, b) in r1.iter().zip(r2.iter()) {
+            assert!(
+                (a.is_nan() && b.is_nan()) || a == b,
+                "non-deterministic rolling_median: {a} vs {b}"
+            );
+        }
     }
 
     #[test]

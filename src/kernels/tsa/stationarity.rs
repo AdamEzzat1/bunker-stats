@@ -793,8 +793,13 @@ pub fn zivot_andrews_test(x: PyReadonlyArray1<f64>, max_lag: Option<usize>) -> P
         
         let m = n - p - 1;  // Sample size for regression (after lagging)
         
-        // Build design matrix X and dependent variable y
-        let n_regressors = 4 + p;  // intercept, trend, DU, DT, y_{t-1}, plus p lags of Δy
+        // Build design matrix X and dependent variable y.
+        // Columns: intercept, trend, DU, DT, y_{t-1} (5 base columns) plus p
+        // lagged differences of Δy written at index 4+i for i=1..=p. That is
+        // 5 + p columns; the previous `4 + p` under-counted by one and caused an
+        // out-of-bounds Vec write at `t*n_regressors + 4 + p` on every call
+        // (a guaranteed SIGABRT under panic="abort").
+        let n_regressors = 5 + p;
         let mut x_mat = vec![0.0; m * n_regressors];
         let mut y_vec = vec![0.0; m];
         
@@ -914,17 +919,21 @@ pub fn trend_stationarity_test(x: PyReadonlyArray1<f64>) -> PyResult<(f64, f64, 
 /// Python signature:
 ///     integration_order_test(x) -> (is_i0, is_i1, adf_level, adf_diff1)
 #[pyfunction]
-pub fn integration_order_test(x: PyReadonlyArray1<f64>) -> PyResult<(bool, bool, f64, f64)> {
+pub fn integration_order_test(
+    py: Python<'_>,
+    x: PyReadonlyArray1<f64>,
+) -> PyResult<(bool, bool, f64, f64)> {
     let x_slice = x.as_slice()?;
     let n = x_slice.len();
-    
+
     if n < 3 {
         return Ok((false, false, f64::NAN, f64::NAN));
     }
-    
-    // Test on levels - recreate array from slice to avoid move
+
+    // Test on levels - recreate array from slice to avoid move.
+    // `py` is a real GIL token injected by PyO3 (invisible in the Python
+    // signature), replacing the previous unsound `assume_gil_acquired()`.
     use numpy::PyArray1;
-    let py = unsafe { Python::assume_gil_acquired() };
     let x_arr = PyArray1::from_slice_bound(py, x_slice);
     let x_readonly = x_arr.readonly();
     
@@ -954,25 +963,26 @@ pub fn integration_order_test(x: PyReadonlyArray1<f64>) -> PyResult<(bool, bool,
 ///     seasonal_diff_test(x, period=12) -> (stat, pvalue, is_stationary)
 #[pyfunction(signature = (x, period=12))]
 pub fn seasonal_diff_test(
+    py: Python<'_>,
     x: PyReadonlyArray1<f64>,
     period: usize,
 ) -> PyResult<(f64, f64, bool)> {
     let x_slice = x.as_slice()?;
     let n = x_slice.len();
-    
+
     if n <= period {
         return Ok((f64::NAN, f64::NAN, false));
     }
-    
+
     // Seasonal difference
     let mut dx = Vec::with_capacity(n - period);
     for t in period..n {
         dx.push(x_slice[t] - x_slice[t - period]);
     }
-    
-    // Test differenced series - convert Vec to PyReadonlyArray1
+
+    // Test differenced series - convert Vec to PyReadonlyArray1.
+    // `py` is a real injected GIL token (invisible in the Python signature).
     use numpy::PyArray1;
-    let py = unsafe { Python::assume_gil_acquired() };
     let dx_array = PyArray1::from_vec_bound(py, dx);
     let dx_readonly = dx_array.readonly();
     
@@ -989,50 +999,44 @@ pub fn seasonal_diff_test(
 ///     seasonal_unit_root_test(x, period=12) -> Vec<(lag, stat, pvalue)>
 #[pyfunction(signature = (x, period=12))]
 pub fn seasonal_unit_root_test(
+    py: Python<'_>,
     x: PyReadonlyArray1<f64>,
     period: usize,
 ) -> PyResult<Vec<(usize, f64, f64)>> {
     let x_slice = x.as_slice()?;
     let n = x_slice.len();
-    
+
     if n < period * 2 {
         return Ok(vec![]);
     }
-    
+
     let mut results = Vec::new();
-    
-    // Need to work around x being consumed - extract slice once
-    let x_slice = x.as_slice()?;
-    let n = x_slice.len();
-    
-    if n < period * 2 {
-        return Ok(vec![]);
-    }
-    
-    // Test at lag 1 (regular ADF) - recreate PyReadonlyArray
+
+    // Test at lag 1 (regular ADF) - recreate PyReadonlyArray.
+    // `py` is a real injected GIL token (invisible in the Python signature),
+    // replacing the previous unsound `assume_gil_acquired()`.
     use numpy::PyArray1;
-    let py = unsafe { Python::assume_gil_acquired() };
     let x_arr = PyArray1::from_slice_bound(py, x_slice);
     let x_readonly = x_arr.readonly();
-    
+
     let (stat1, pval1) = adf_test(x_readonly, "c", None)?;
     results.push((1, stat1, pval1));
-    
+
     // Test at seasonal lag
     if n > period {
         let x_arr2 = PyArray1::from_slice_bound(py, x_slice);
         let x_readonly2 = x_arr2.readonly();
-        let (stat_s, pval_s, _is_stat) = seasonal_diff_test(x_readonly2, period)?;
+        let (stat_s, pval_s, _is_stat) = seasonal_diff_test(py, x_readonly2, period)?;
         results.push((period, stat_s, pval_s));
     }
-    
+
     // Test at 2*seasonal lag
     if n > period * 2 {
         let x_arr3 = PyArray1::from_slice_bound(py, x_slice);
         let x_readonly3 = x_arr3.readonly();
-        let (stat_2s, pval_2s, _is_stat) = seasonal_diff_test(x_readonly3, period * 2)?;
+        let (stat_2s, pval_2s, _is_stat) = seasonal_diff_test(py, x_readonly3, period * 2)?;
         results.push((period * 2, stat_2s, pval_2s));
     }
-    
+
     Ok(results)
 }

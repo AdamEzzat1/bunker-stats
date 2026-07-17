@@ -28,7 +28,11 @@ pub(crate) fn iqr_slice(xs: &[f64]) -> (f64, f64, f64) {
     if xs.is_empty() {
         return (f64::NAN, f64::NAN, f64::NAN);
     }
+    // NaN has no order; propagate NaN (numpy semantics) rather than sorting it.
+    if crate::util::any_nan(xs) {
+        return (f64::NAN, f64::NAN, f64::NAN);
+    }
     let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
     iqr_from_sorted(&v)
 }

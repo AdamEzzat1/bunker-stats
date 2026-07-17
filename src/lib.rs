@@ -1,5 +1,15 @@
+// The crate deliberately retains a number of pure-`&[f64]` slice-core kernel
+// helpers and work-in-progress time-series functions (e.g. `kernels::tsa::rolling`,
+// several `infer::common` reducers) that are part of the internal kernel library
+// but are not all wired to a `#[pyfunction]` yet. Allowing dead_code keeps
+// `cargo check` a clean release gate without deleting API that callers/tests may
+// wire up next. A follow-up pass should prune what is truly obsolete (tracked
+// separately; see the review's dead-code findings).
+#![allow(dead_code)]
+
 mod kernels;
 mod infer;
+pub(crate) mod util;
 
 
 use numpy::{
@@ -9,7 +19,7 @@ use numpy::{
 
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
-use pyo3::types::{PyAny, PyDict, PyTuple};
+use pyo3::types::{PyAny, PyTuple};
 use pyo3::prelude::*;
 
 use kernels::rolling::engine::rolling_mean_std_vec;
@@ -198,9 +208,14 @@ fn mad_slice(xs: &[f64]) -> f64 {
     if xs.is_empty() {
         return f64::NAN;
     }
+    // NaN in input -> NaN out (numpy semantics); also keeps NaN away from the
+    // comparator, which under panic="abort" would abort the interpreter.
+    if crate::util::any_nan(xs) {
+        return f64::NAN;
+    }
     // Copy once, sort once for the median, then reuse the same buffer for deviations.
     let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
 
     let n = v.len();
     let med = if n % 2 == 1 {
@@ -213,7 +228,7 @@ fn mad_slice(xs: &[f64]) -> f64 {
     for val in &mut v {
         *val = (*val - med).abs();
     }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
 
     if n % 2 == 1 {
         v[n / 2]
@@ -368,7 +383,7 @@ fn mad_std_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
     Ok(mad_std_slice_k(a.as_slice()?))
 }
 
-#[pyfunction]
+#[pyfunction(signature = (a, c=None))]
 fn biweight_midvariance_np(a: PyReadonlyArray1<f64>, c: Option<f64>) -> PyResult<f64> {
     let c_val = c.unwrap_or(9.0);  // Default tuning constant
     Ok(biweight_midvariance_slice_k(a.as_slice()?, c_val))
@@ -379,7 +394,7 @@ fn qn_scale_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
     Ok(qn_scale_slice_k(a.as_slice()?))
 }
 
-#[pyfunction]
+#[pyfunction(signature = (a, k=None, max_iter=None))]
 fn huber_location_np(
     a: PyReadonlyArray1<f64>,
     k: Option<f64>,
@@ -978,9 +993,14 @@ fn robust_scale_np<'py>(
     if xs.is_empty() {
         return Ok((PyArray1::from_vec_bound(py, vec![]), f64::NAN, f64::NAN));
     }
+    // NaN in input -> NaN out (numpy semantics), never a crash under panic="abort".
+    if crate::util::any_nan(xs) {
+        let nans = vec![f64::NAN; xs.len()];
+        return Ok((PyArray1::from_vec_bound(py, nans), f64::NAN, f64::NAN));
+    }
     let mad = mad_slice(xs);
     let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
     let n = v.len();
     let med = if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) };
 
@@ -1132,7 +1152,8 @@ fn ecdf_np<'py>(
         return Ok((PyArray1::from_vec_bound(py, vec![]), PyArray1::from_vec_bound(py, vec![])));
     }
     let mut vals = xs.to_vec();
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // total_cmp is a total order over f64 (NaN sorts last), so this never panics.
+    vals.sort_by(|a, b| a.total_cmp(b));
     let n = vals.len();
     let cdf: Vec<f64> = (0..n).map(|i| (i + 1) as f64 / (n as f64)).collect();
     Ok((PyArray1::from_vec_bound(py, vals), PyArray1::from_vec_bound(py, cdf)))
@@ -1151,7 +1172,8 @@ fn quantile_bins_np<'py>(
     }
 
     let mut pairs: Vec<(f64, usize)> = xs.iter().copied().zip(0..n).collect();
-    pairs.sort_by(|(v1, _), (v2, _)| v1.partial_cmp(v2).unwrap());
+    // total_cmp is a total order over f64 (NaN sorts last), so this never panics.
+    pairs.sort_by(|(v1, _), (v2, _)| v1.total_cmp(v2));
 
     let mut bins = vec![-1_i64; n];
     let mut start = 0usize;

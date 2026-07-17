@@ -2,7 +2,11 @@ use numpy::{PyReadonlyArray1, PyArray1, IntoPyArray};
 use pyo3::prelude::*;
 use rand_pcg::Pcg64;  // Switched from StdRng for consistency
 use rand::{Rng, SeedableRng};
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
+// Serial fallback: supplies `into_par_iter()` == `into_iter()` when rayon is off.
+#[cfg(not(feature = "parallel"))]
+use super::IntoParIterCompat;
 
 // ==============================================
 // RNG MIXING UTILITY - TIER 1 OPTIMIZATION

@@ -5,10 +5,16 @@ edition = "2021"
 
 [lib]
 name = "bunker_stats_rs"
-crate-type = ["cdylib"]
+# cdylib: the Python extension module maturin loads.
+# rlib:   lets external `tests/*.rs`, proptest, and bolero targets link the crate.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
+# NOTE: `extension-module` is intentionally NOT enabled here. It is a feature
+# (see [features]) that maturin turns on for wheel builds. `cargo test` / `cargo
+# bolero` must leave it OFF so the test binary links against a real libpython on
+# Linux/macOS instead of relying on symbols supplied by the host interpreter.
+pyo3 = { version = "0.22" }
 numpy = { version = "0.22" }
 statrs = "0.16"
 # Rayon available for later parallel speedups, but off by default
@@ -22,9 +28,14 @@ rustfft = "6.2"
 # NEW v0.2.9: Bitflags for StatsMask in rolling module
 bitflags = "2.4"
 
+[dev-dependencies]
+proptest = "1"
+approx = "0.5"
+
 [features]
-default = ["parallel"]
-parallel = ["rayon"]   # enable this if you later add Rayon-based parallel loops
+default = ["parallel", "extension-module"]
+parallel = ["rayon"]                       # rayon-backed parallel loops
+extension-module = ["pyo3/extension-module"]  # enabled by maturin for wheel builds
 
 [profile.release]
 opt-level = 3
