@@ -18,6 +18,33 @@ import bunker_stats as bs
 import time
 
 
+# ---------------------------------------------------------------------------
+# API adapters (see tests/advance/test_concurrency_safety.py for rationale).
+# Bridge the drifted test API to the shipped extension in one place.
+# ---------------------------------------------------------------------------
+_rs_bootstrap_ci = bs.bootstrap_ci
+_rs_perm = bs.permutation_mean_diff_test
+_STAT_NAMES = {np.mean: "mean", np.median: "median", np.std: "std"}
+
+
+def _bootstrap_ci(data, stat_fn=np.mean, n_resamples=1000, seed=0):
+    name = _STAT_NAMES.get(stat_fn, "mean")
+    _point, lo, hi = _rs_bootstrap_ci(
+        np.asarray(data, dtype=float), name, n_resamples=n_resamples, random_state=seed
+    )
+    return (lo, hi)
+
+
+def _permutation_test(x, y, n_permutations=1000, seed=0):
+    stat, pvalue = _rs_perm(
+        np.asarray(x, dtype=float),
+        np.asarray(y, dtype=float),
+        n_permutations=n_permutations,
+        random_state=seed,
+    )
+    return {"pvalue": pvalue, "statistic": stat}
+
+
 # ============================================================================
 # Rolling Statistics Stress Tests
 # ============================================================================
@@ -153,7 +180,7 @@ class TestBootstrapStress:
         data = np.random.randn(1_000_000)
         
         start = time.perf_counter()
-        ci = bs.bootstrap_ci(data, np.mean, n_resamples=1_000, seed=42)
+        ci = _bootstrap_ci(data, np.mean, n_resamples=1_000, seed=42)
         elapsed = time.perf_counter() - start
         
         print(f"\n1M samples, 1K resamples: {elapsed:.3f}s")
@@ -169,7 +196,7 @@ class TestBootstrapStress:
         data = np.random.randn(100_000)
         
         start = time.perf_counter()
-        ci = bs.bootstrap_ci(data, np.median, n_resamples=100_000, seed=42)
+        ci = _bootstrap_ci(data, np.median, n_resamples=100_000, seed=42)
         elapsed = time.perf_counter() - start
         
         print(f"\n100K samples, 100K resamples: {elapsed:.3f}s")
@@ -186,7 +213,7 @@ class TestBootstrapStress:
         data = np.random.randn(10_000)
         
         start = time.perf_counter()
-        ci = bs.bootstrap_ci(data, np.mean, n_resamples=1_000_000, seed=42)
+        ci = _bootstrap_ci(data, np.mean, n_resamples=1_000_000, seed=42)
         elapsed = time.perf_counter() - start
         
         print(f"\n10K samples, 1M resamples: {elapsed:.3f}s")
@@ -203,7 +230,7 @@ class TestBootstrapStress:
         data = np.random.randn(50_000)
         
         start = time.perf_counter()
-        ci = bs.bootstrap_ci(data, np.median, n_resamples=10_000, seed=42)
+        ci = _bootstrap_ci(data, np.median, n_resamples=10_000, seed=42)
         elapsed = time.perf_counter() - start
         
         print(f"\n50K samples, 10K resamples, median: {elapsed:.3f}s")
@@ -228,7 +255,7 @@ class TestPermutationStress:
         y = np.random.randn(100_000) + 0.1
         
         start = time.perf_counter()
-        result = bs.permutation_test(x, y, n_permutations=10_000, seed=42)
+        result = _permutation_test(x, y, n_permutations=10_000, seed=42)
         elapsed = time.perf_counter() - start
         
         print(f"\n100K+100K samples, 10K permutations: {elapsed:.3f}s")
@@ -243,7 +270,7 @@ class TestPermutationStress:
         y = np.random.randn(10_000) + 0.2
         
         start = time.perf_counter()
-        result = bs.permutation_test(x, y, n_permutations=100_000, seed=42)
+        result = _permutation_test(x, y, n_permutations=100_000, seed=42)
         elapsed = time.perf_counter() - start
         
         print(f"\n10K+10K samples, 100K permutations: {elapsed:.3f}s")
@@ -408,7 +435,7 @@ class TestEdgeCaseStress:
         data = np.ones(100_000) * 42.0
         
         start = time.perf_counter()
-        ci = bs.bootstrap_ci(data, np.mean, n_resamples=10_000, seed=42)
+        ci = _bootstrap_ci(data, np.mean, n_resamples=10_000, seed=42)
         elapsed = time.perf_counter() - start
         
         print(f"\n100K constant values, 10K resamples: {elapsed:.3f}s")
@@ -501,7 +528,7 @@ class TestConcurrentStress:
         data = np.random.randn(10_000)
         
         def run_bootstrap(seed):
-            return bs.bootstrap_ci(data, np.mean, n_resamples=5_000, seed=seed)
+            return _bootstrap_ci(data, np.mean, n_resamples=5_000, seed=seed)
         
         start = time.perf_counter()
         

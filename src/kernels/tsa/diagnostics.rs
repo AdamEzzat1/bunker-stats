@@ -105,25 +105,26 @@ pub fn bg_test(resid: PyReadonlyArray1<f64>, max_lag: usize) -> PyResult<(f64, f
         return Ok((f64::NAN, f64::NAN));
     }
 
-    let t0 = max_lag;
-    let t_len = n - t0;
+    // Auxiliary regression over the FULL sample, zero-padding the pre-sample
+    // lagged residuals (e[t-j] := 0 for t-j < 0). This matches statsmodels'
+    // `acorr_breusch_godfrey`, which keeps all n rows and reports LM = n * R².
+    let t_len = n;
+    let p = max_lag + 1;
 
-    // Dependent variable: current residuals e[t] for t >= max_lag
+    // Dependent variable: current residuals e[t] for all t.
     let mut y = Vec::with_capacity(t_len);
-    for t in t0..n {
+    for t in 0..n {
         y.push(e[t]);
     }
 
-    // Independent variables: intercept + lagged residuals e[t-1], ..., e[t-max_lag]
-    let mut x_mat = Vec::with_capacity(t_len * (max_lag + 1));
-    for t in t0..n {
-        x_mat.push(1.0);  // intercept
+    // Independent variables: intercept + lagged residuals (0 before the sample).
+    let mut x_mat = Vec::with_capacity(t_len * p);
+    for t in 0..n {
+        x_mat.push(1.0); // intercept
         for j in 1..=max_lag {
-            x_mat.push(e[t - j]);
+            x_mat.push(if t >= j { e[t - j] } else { 0.0 });
         }
     }
-
-    let p = max_lag + 1;
 
     let mut xtx = vec![0.0_f64; p * p];
     let mut xty = vec![0.0_f64; p];
@@ -173,14 +174,10 @@ pub fn bg_test(resid: PyReadonlyArray1<f64>, max_lag: usize) -> PyResult<(f64, f
         0.0
     };
 
-    // Breusch-Godfrey LM statistic = T · R², where T is the number of
-    // observations in the auxiliary regression (here the reduced sample
-    // t_len = n - max_lag, since the first max_lag rows have no full lag set).
-    // Asymptotically ~ χ²(max_lag) under the null of no serial correlation.
-    // NOTE: statsmodels' `acorr_breusch_godfrey` zero-pads the pre-sample lags
-    // to keep all n rows and reports n · R²; that is a different finite-sample
-    // convention, not a discrepancy in this statistic.
-    let stat = (t_len as f64) * r2;
+    // Breusch-Godfrey LM statistic = n · R² over the full (zero-padded) sample,
+    // asymptotically ~ χ²(max_lag) under the null of no serial correlation.
+    // (The previous code used n²/T · R², inflating the statistic by n/T.)
+    let stat = (n as f64) * r2;
 
     // P-value from chi-squared distribution with max_lag degrees of freedom.
     // max_lag >= 1 is guaranteed above, so ChiSquared::new cannot fail; fall

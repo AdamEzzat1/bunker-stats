@@ -302,7 +302,11 @@ std_np = _deprecated_alias("std", "std_np", std)
 var_np = _deprecated_alias("var", "var_np", var)
 zscore_np = _deprecated_alias("zscore", "zscore_np", zscore)
 percentile_np = _deprecated_alias("percentile", "percentile_np", percentile)
-iqr_np = _deprecated_alias("iqr", "iqr_np", iqr)
+# `iqr_np` historically returned the (q1, q3, width) tuple from the Rust kernel.
+# Preserve that return shape so existing callers (and parity tests) keep working;
+# aliasing it to the scalar `iqr` was a silent breaking change. New code should
+# use `iqr` (scalar width) or `iqr_width`.
+iqr_np = _deprecated_alias("iqr", "iqr_np", _get_rs("iqr_np"))
 iqr_width_np = _deprecated_alias("iqr_width", "iqr_width_np", iqr_width)
 mad_np = _deprecated_alias("mad", "mad_np", mad)
 skew_np = _deprecated_alias("skew", "skew_np", skew)

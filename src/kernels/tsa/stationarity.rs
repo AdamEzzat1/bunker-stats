@@ -110,80 +110,105 @@ fn df_pvalue(stat: f64, n: usize, regression: &str) -> f64 {
     
     0.50 // Fallback
 }
-#[pyfunction(signature = (x, _regression="c", _max_lag=None))]
-pub fn adf_test(x: PyReadonlyArray1<f64>, _regression: &str, _max_lag: Option<usize>) -> PyResult<(f64, f64)> {
+/// Normalize a Dickey-Fuller deterministic specification.
+/// "c" = constant, "ct" = constant+trend, "n"/"nc" = none.
+fn normalize_reg(reg: &str) -> PyResult<&'static str> {
+    match reg {
+        "c" | "" => Ok("c"),
+        "ct" => Ok("ct"),
+        "n" | "nc" => Ok("nc"),
+        other => Err(PyValueError::new_err(format!(
+            "regression must be one of 'c', 'ct', 'n' (got '{other}')"
+        ))),
+    }
+}
+
+/// OLS for the (augmented) Dickey-Fuller regression:
+///   Δy_t = [deterministic] + β·y_{t-1} + Σ_{i=1}^p γ_i·Δy_{t-i} + ε_t
+/// where deterministic is {} (nc), {1} (c), or {1, t} (ct). The test statistic
+/// is the t-ratio on β. Returns
+///   (t_stat, se_β, β, residuals, m_obs, k_params, regression_stderr_s)
+/// or None if the design is rank-deficient / too small.
+fn df_ols(x: &[f64], reg: &str, p: usize) -> Option<(f64, f64, f64, Vec<f64>, usize, usize, f64)> {
+    use nalgebra::{DMatrix, DVector};
+    let n = x.len();
+    let det = match reg {
+        "ct" => 2usize,
+        "c" => 1,
+        _ => 0, // "nc"
+    };
+    if n <= p + 2 {
+        return None;
+    }
+    let start = p + 1; // first t with a full lag set and y_{t-1}
+    let m = n - start; // regression rows
+    let k = det + 1 + p; // params: deterministic + y_{t-1} + p lags
+    if m <= k {
+        return None;
+    }
+    let ylag_idx = det; // column index of the y_{t-1} coefficient
+
+    let mut y = DVector::zeros(m);
+    let mut xd = vec![0.0f64; m * k]; // row-major design
+    for (row, t) in (start..n).enumerate() {
+        y[row] = x[t] - x[t - 1];
+        let base = row * k;
+        let mut col = 0;
+        if det >= 1 {
+            xd[base + col] = 1.0; // constant
+            col += 1;
+        }
+        if det == 2 {
+            xd[base + col] = t as f64; // linear trend
+            col += 1;
+        }
+        xd[base + col] = x[t - 1]; // y_{t-1}
+        col += 1;
+        for i in 1..=p {
+            xd[base + col] = x[t - i] - x[t - i - 1]; // Δy_{t-i}
+            col += 1;
+        }
+    }
+
+    let xm = DMatrix::from_row_slice(m, k, &xd);
+    let xtx = xm.transpose() * &xm;
+    let xty = xm.transpose() * &y;
+    let beta = xtx.clone().lu().solve(&xty)?;
+    let resid_v = &y - &xm * &beta;
+    let rss: f64 = resid_v.iter().map(|e| e * e).sum();
+    let dof = m as f64 - k as f64;
+    if dof <= 0.0 {
+        return None;
+    }
+    let sigma2 = rss / dof;
+    let xtx_inv = xtx.try_inverse()?;
+    let var_b = sigma2 * xtx_inv[(ylag_idx, ylag_idx)];
+    if !(var_b > 0.0) {
+        return None;
+    }
+    let se = var_b.sqrt();
+    let b = beta[ylag_idx];
+    let residuals: Vec<f64> = resid_v.iter().copied().collect();
+    Some((b / se, se, b, residuals, m, k, sigma2.sqrt()))
+}
+
+/// Augmented Dickey-Fuller test.
+///
+/// `regression`: "c" (constant, default), "ct" (constant+trend), "n"/"nc" (none).
+/// `max_lag`: number of augmenting lagged differences of Δy (0 = plain DF).
+/// Both arguments are now honored (previously ignored). Returns (t_stat, p_value)
+/// with p-values from the Dickey-Fuller distribution matching the specification.
+#[pyfunction(signature = (x, regression="c", max_lag=None))]
+pub fn adf_test(x: PyReadonlyArray1<f64>, regression: &str, max_lag: Option<usize>) -> PyResult<(f64, f64)> {
     let x = x.as_slice()?;
     let n = x.len();
+    let reg = normalize_reg(regression)?;
+    let p = max_lag.unwrap_or(0);
 
-    if n < 3 {
-        return Ok((f64::NAN, f64::NAN));
+    match df_ols(x, reg, p) {
+        Some((t_stat, _, _, _, _, _, _)) => Ok((t_stat, df_pvalue(t_stat, n, reg))),
+        None => Ok((f64::NAN, f64::NAN)),
     }
-
-    // Δy_t = y_t - y_{t-1}, t=1..n-1
-    let m = n - 1;
-    if m <= 2 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-
-    // OPTIMIZATION: Compute diffs and lags in single pass
-    let mut dy = Vec::with_capacity(m);
-    let mut y_lag = Vec::with_capacity(m);
-    for t in 1..n {
-        dy.push(x[t] - x[t - 1]);
-        y_lag.push(x[t - 1]);
-    }
-
-    let m_f = m as f64;
-    
-    // OPTIMIZATION: Single-pass mean calculation
-    let mean_y_lag = y_lag.iter().sum::<f64>() / m_f;
-    let mean_dy = dy.iter().sum::<f64>() / m_f;
-
-    // OLS: dy ~ α + β y_{t-1}
-    let mut sxx = 0.0;
-    let mut sxy = 0.0;
-    for i in 0..m {
-        let xi = y_lag[i] - mean_y_lag;
-        let yi = dy[i] - mean_dy;
-        sxx += xi * xi;
-        sxy += xi * yi;
-    }
-    
-    if sxx <= 0.0 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-
-    let beta = sxy / sxx;
-    let alpha = mean_dy - beta * mean_y_lag;
-
-    // Residual variance
-    let mut rss = 0.0;
-    for i in 0..m {
-        let yi = dy[i];
-        let xi = y_lag[i];
-        let y_hat = alpha + beta * xi;
-        let e = yi - y_hat;
-        rss += e * e;
-    }
-
-    let dof = m as i64 - 2;
-    if dof <= 0 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-    
-    let sigma2 = rss / (dof as f64);
-    let se_beta = (sigma2 / sxx).sqrt();
-
-    if se_beta <= 0.0 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-
-    let t_stat = beta / se_beta;
-
-    //FIXED: Use proper Dickey-Fuller critical values instead of normal distribution
-    let p_val = df_pvalue(t_stat, n, "c");
-
-    Ok((t_stat, p_val))
 }
 
 /// Calculate KPSS p-value using critical value tables
@@ -598,65 +623,37 @@ pub fn kpss_test_debug(
 /// OPTIMIZED: Single-pass calculation
 /// Python signature:
 ///     pp_test(x, regression="c") -> (statistic, pvalue)
-#[pyfunction(signature = (x, _regression="c"))]
-pub fn pp_test(x: PyReadonlyArray1<f64>, _regression: &str) -> PyResult<(f64, f64)> {
+#[pyfunction(signature = (x, regression="c"))]
+pub fn pp_test(x: PyReadonlyArray1<f64>, regression: &str) -> PyResult<(f64, f64)> {
     let x = x.as_slice()?;
     let n = x.len();
-    if n < 3 {
-        return Ok((f64::NAN, f64::NAN));
-    }
+    let reg = normalize_reg(regression)?;
 
-    // Calculate first differences
-    let mut dy = Vec::with_capacity(n - 1);
-    for t in 1..n {
-        dy.push(x[t] - x[t - 1]);
-    }
-
-    // OPTIMIZATION: Single-pass calculation of means and regression
-    let m = n - 1;
+    // Base DF regression (no augmenting lags): Δy_t = [det] + β·y_{t-1} + u_t.
+    let (t_stat, se_b, _beta, resid, m, _k, s) = match df_ols(x, reg, 0) {
+        Some(v) => v,
+        None => return Ok((f64::NAN, f64::NAN)),
+    };
     let m_f = m as f64;
-    let mean_y_lag = x[..m].iter().sum::<f64>() / m_f;
-    let mean_dy = dy.iter().sum::<f64>() / m_f;
 
-    let mut sxx = 0.0;
-    let mut sxy = 0.0;
-    for t in 0..m {
-        let y_lag = x[t] - mean_y_lag;
-        let dy_t = dy[t] - mean_dy;
-        sxx += y_lag * y_lag;
-        sxy += y_lag * dy_t;
-    }
+    // Short-run vs long-run residual variance.
+    let gamma0 = resid.iter().map(|e| e * e).sum::<f64>() / m_f; // ≈ RSS/T
+    let lam2 = long_run_variance(&resid, None); // Newey-West HAC (Bartlett)
 
-    if sxx <= 0.0 {
+    if !(gamma0 > 0.0) || !(lam2 > 0.0) || !(s > 0.0) {
         return Ok((f64::NAN, f64::NAN));
     }
+    let lam = lam2.sqrt();
 
-    let beta = sxy / sxx;
+    // Phillips-Perron Z_t (Hamilton 1994, Prop. 17.6): correct the OLS t-ratio
+    // for serial correlation in the residuals using the long-run variance,
+    //   Z_t = sqrt(γ0/λ²)·t − (λ² − γ0)·T·SE(β) / (2·λ·s),
+    // and evaluate against the Dickey-Fuller distribution (NOT the Normal — the
+    // previous implementation used neither the HAC correction nor the DF CVs).
+    let z_t = (gamma0 / lam2).sqrt() * t_stat - (lam2 - gamma0) * m_f * se_b / (2.0 * lam * s);
+    let p_val = df_pvalue(z_t, n, reg);
 
-    let mut rss = 0.0;
-    for t in 0..m {
-        let y_hat = mean_dy + beta * (x[t] - mean_y_lag);
-        let e = dy[t] - y_hat;
-        rss += e * e;
-    }
-
-    let dof = m as i64 - 2;
-    if dof <= 0 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-
-    let sigma2 = rss / (dof as f64);
-    let se_beta = (sigma2 / sxx).sqrt();
-    
-    if se_beta <= 0.0 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-
-    let t_stat = beta / se_beta;
-    let z = Normal::new(0.0, 1.0).unwrap();
-    let p_val = 2.0 * (1.0 - z.cdf(t_stat.abs()));
-
-    Ok((t_stat, p_val))
+    Ok((z_t, p_val))
 }
 
 // ======================

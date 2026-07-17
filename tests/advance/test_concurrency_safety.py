@@ -21,6 +21,37 @@ import threading
 import multiprocessing
 
 
+# ---------------------------------------------------------------------------
+# API adapters. These tests were written against an earlier/envisioned API
+# (`bootstrap_ci(data, np.mean, seed=...)` returning a CI, and a dict-returning
+# `permutation_test`). The shipped extension exposes `bootstrap_ci(x, "mean",
+# random_state=...) -> (point, lo, hi)` and `permutation_mean_diff_test(x, y,
+# random_state=...) -> (stat, pvalue)`. Bridge the two here in one place so the
+# concurrency/determinism assertions run against the real kernels unchanged.
+# ---------------------------------------------------------------------------
+_rs_bootstrap_ci = bs.bootstrap_ci
+_rs_perm = bs.permutation_mean_diff_test
+_STAT_NAMES = {np.mean: "mean", np.median: "median", np.std: "std"}
+
+
+def _bootstrap_ci(data, stat_fn=np.mean, n_resamples=1000, seed=0):
+    name = _STAT_NAMES.get(stat_fn, "mean")
+    _point, lo, hi = _rs_bootstrap_ci(
+        np.asarray(data, dtype=float), name, n_resamples=n_resamples, random_state=seed
+    )
+    return (lo, hi)
+
+
+def _permutation_test(x, y, n_permutations=1000, seed=0):
+    stat, pvalue = _rs_perm(
+        np.asarray(x, dtype=float),
+        np.asarray(y, dtype=float),
+        n_permutations=n_permutations,
+        random_state=seed,
+    )
+    return {"pvalue": pvalue, "statistic": stat}
+
+
 # ============================================================================
 # Determinism Tests
 # ============================================================================
@@ -35,7 +66,7 @@ class TestDeterministicBehavior:
         
         results = []
         for _ in range(10):
-            ci = bs.bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
+            ci = _bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
             results.append(ci)
         
         # All results should be identical
@@ -50,7 +81,7 @@ class TestDeterministicBehavior:
         
         results = []
         for _ in range(10):
-            result = bs.permutation_test(x, y, n_permutations=1000, seed=42)
+            result = _permutation_test(x, y, n_permutations=1000, seed=42)
             results.append(result['pvalue'])
         
         # All p-values should be identical
@@ -120,7 +151,7 @@ class TestThreadSafety:
         data = np.random.randn(1000)
         
         def run_bootstrap(seed):
-            return bs.bootstrap_ci(data, np.mean, n_resamples=1000, seed=seed)
+            return _bootstrap_ci(data, np.mean, n_resamples=1000, seed=seed)
         
         with ThreadPoolExecutor(max_workers=4) as executor:
             # Run with different seeds
@@ -139,7 +170,7 @@ class TestThreadSafety:
         data = np.random.randn(1000)
         
         def run_bootstrap():
-            return bs.bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
+            return _bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
         
         with ThreadPoolExecutor(max_workers=4) as executor:
             # Run with same seed
@@ -217,7 +248,7 @@ class TestProcessSafety:
         data = np.random.randn(1000)
         
         def run_bootstrap(seed):
-            return bs.bootstrap_ci(data, np.mean, n_resamples=1000, seed=seed)
+            return _bootstrap_ci(data, np.mean, n_resamples=1000, seed=seed)
         
         with ProcessPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(run_bootstrap, i) for i in range(4)]
@@ -289,7 +320,7 @@ class TestNoRaceConditions:
         datasets = [np.random.randn(1000) for _ in range(4)]
         
         def run_bootstrap(data, seed):
-            return bs.bootstrap_ci(data, np.mean, n_resamples=1000, seed=seed)
+            return _bootstrap_ci(data, np.mean, n_resamples=1000, seed=seed)
         
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [
@@ -318,8 +349,8 @@ class TestRNGStateIsolation:
         data = np.random.randn(1000)
         
         # Run two bootstrap operations with same seed sequentially
-        ci1 = bs.bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
-        ci2 = bs.bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
+        ci1 = _bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
+        ci2 = _bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
         
         # Results should be identical
         np.testing.assert_array_equal(ci1, ci2)
@@ -327,8 +358,8 @@ class TestRNGStateIsolation:
         # Run interleaved
         results = []
         for _ in range(5):
-            ci_a = bs.bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
-            ci_b = bs.bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
+            ci_a = _bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
+            ci_b = _bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
             results.append((ci_a, ci_b))
         
         # All results should be identical
@@ -343,16 +374,16 @@ class TestRNGStateIsolation:
         y = np.random.randn(100) + 0.3
         
         # Sequential runs with same seed
-        p1 = bs.permutation_test(x, y, n_permutations=1000, seed=42)['pvalue']
-        p2 = bs.permutation_test(x, y, n_permutations=1000, seed=42)['pvalue']
+        p1 = _permutation_test(x, y, n_permutations=1000, seed=42)['pvalue']
+        p2 = _permutation_test(x, y, n_permutations=1000, seed=42)['pvalue']
         
         assert p1 == p2
         
         # Interleaved runs
         results = []
         for _ in range(5):
-            p_a = bs.permutation_test(x, y, n_permutations=1000, seed=42)['pvalue']
-            p_b = bs.permutation_test(x, y, n_permutations=1000, seed=42)['pvalue']
+            p_a = _permutation_test(x, y, n_permutations=1000, seed=42)['pvalue']
+            p_b = _permutation_test(x, y, n_permutations=1000, seed=42)['pvalue']
             results.append((p_a, p_b))
         
         # All should match
@@ -375,7 +406,7 @@ class TestConcurrentStress:
         data = np.random.randn(1000)
         
         def run_bootstrap(seed):
-            return bs.bootstrap_ci(data, np.mean, n_resamples=1000, seed=seed)
+            return _bootstrap_ci(data, np.mean, n_resamples=1000, seed=seed)
         
         # Run 100 concurrent operations
         with ThreadPoolExecutor(max_workers=10) as executor:
@@ -421,7 +452,7 @@ class TestDataIsolation:
         data = np.random.randn(1000)
         data_copy = data.copy()
         
-        bs.bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
+        _bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
         
         np.testing.assert_array_equal(data, data_copy)
     

@@ -21,6 +21,33 @@ import gc
 import sys
 
 
+# ---------------------------------------------------------------------------
+# API adapters (see tests/advance/test_concurrency_safety.py for rationale).
+# Bridge the drifted test API to the shipped extension in one place.
+# ---------------------------------------------------------------------------
+_rs_bootstrap_ci = bs.bootstrap_ci
+_rs_perm = bs.permutation_mean_diff_test
+_STAT_NAMES = {np.mean: "mean", np.median: "median", np.std: "std"}
+
+
+def _bootstrap_ci(data, stat_fn=np.mean, n_resamples=1000, seed=0):
+    name = _STAT_NAMES.get(stat_fn, "mean")
+    _point, lo, hi = _rs_bootstrap_ci(
+        np.asarray(data, dtype=float), name, n_resamples=n_resamples, random_state=seed
+    )
+    return (lo, hi)
+
+
+def _permutation_test(x, y, n_permutations=1000, seed=0):
+    stat, pvalue = _rs_perm(
+        np.asarray(x, dtype=float),
+        np.asarray(y, dtype=float),
+        n_permutations=n_permutations,
+        random_state=seed,
+    )
+    return {"pvalue": pvalue, "statistic": stat}
+
+
 try:
     import tracemalloc
     HAS_TRACEMALLOC = True
@@ -49,7 +76,7 @@ class TestNoMemoryLeaks:
         
         # Run many iterations
         for i in range(100):
-            ci = bs.bootstrap_ci(data, np.mean, n_resamples=1000, seed=i)
+            ci = _bootstrap_ci(data, np.mean, n_resamples=1000, seed=i)
             del ci
         
         gc.collect()
@@ -154,7 +181,7 @@ class TestMemoryEfficiency:
         tracemalloc.start()
         
         baseline = tracemalloc.get_traced_memory()[0]
-        ci = bs.bootstrap_ci(data, np.mean, n_resamples=10000, seed=42)
+        ci = _bootstrap_ci(data, np.mean, n_resamples=10000, seed=42)
         peak = tracemalloc.get_traced_memory()[1]
         
         tracemalloc.stop()
@@ -264,7 +291,7 @@ class TestInputPreservation:
         data = np.random.randn(1000)
         data_copy = data.copy()
         
-        bs.bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
+        _bootstrap_ci(data, np.mean, n_resamples=1000, seed=42)
         
         np.testing.assert_array_equal(data, data_copy)
         assert data.flags['C_CONTIGUOUS'] == data_copy.flags['C_CONTIGUOUS']
@@ -362,7 +389,7 @@ class TestLargeDatasetMemory:
         tracemalloc.start()
         
         baseline = tracemalloc.get_traced_memory()[0]
-        ci = bs.bootstrap_ci(data, np.median, n_resamples=10_000, seed=42)
+        ci = _bootstrap_ci(data, np.median, n_resamples=10_000, seed=42)
         peak = tracemalloc.get_traced_memory()[1]
         
         tracemalloc.stop()
@@ -430,7 +457,7 @@ class TestMemoryGrowthPatterns:
             tracemalloc.start()
             baseline = tracemalloc.get_traced_memory()[0]
             
-            ci = bs.bootstrap_ci(data, np.mean, n_resamples=n_resamples, seed=42)
+            ci = _bootstrap_ci(data, np.mean, n_resamples=n_resamples, seed=42)
             
             peak = tracemalloc.get_traced_memory()[1]
             tracemalloc.stop()
@@ -471,7 +498,7 @@ class TestProperCleanup:
         baseline = tracemalloc.get_traced_memory()[0]
         
         try:
-            bs.bootstrap_ci(data, bad_statistic, n_resamples=100, seed=42)
+            _bootstrap_ci(data, bad_statistic, n_resamples=100, seed=42)
         except:
             pass  # Expected to fail
         

@@ -9,6 +9,21 @@
 ///   backwards-compatibility with older call sites; they are "strict" (NaNs
 ///   propagate) and allocate an output `Vec`.
 
+/// First finite element (or 0.0). Used as a translation offset: covariance,
+/// variance, and correlation are all invariant under a constant shift of each
+/// series, so shifting by a value near the data magnitude keeps the
+/// cross/second-moment accumulators from catastrophically cancelling on
+/// large-offset data. Must be finite so a leading NaN is not used as the offset.
+#[inline]
+fn first_finite(v: &[f64]) -> f64 {
+    for &x in v {
+        if x.is_finite() {
+            return x;
+        }
+    }
+    0.0
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct RollingPairState {
     count: usize,
@@ -94,16 +109,17 @@ pub fn rolling_cov_skipna(x: &[f64], y: &[f64], window: usize, out: &mut [f64]) 
 
     let x = &x[..n];
     let y = &y[..n];
+    let (ox, oy) = (first_finite(x), first_finite(y));
 
     let mut s = RollingPairState::default();
     for i in 0..window {
-        add_pair(&mut s, x[i], y[i]);
+        add_pair(&mut s, x[i] - ox, y[i] - oy);
     }
     out[0] = cov_from_state(&s);
 
     for i in window..n {
-        remove_pair(&mut s, x[i - window], y[i - window]);
-        add_pair(&mut s, x[i], y[i]);
+        remove_pair(&mut s, x[i - window] - ox, y[i - window] - oy);
+        add_pair(&mut s, x[i] - ox, y[i] - oy);
         out[i - window + 1] = cov_from_state(&s);
     }
 }
@@ -124,16 +140,17 @@ pub fn rolling_corr_skipna(x: &[f64], y: &[f64], window: usize, out: &mut [f64])
 
     let x = &x[..n];
     let y = &y[..n];
+    let (ox, oy) = (first_finite(x), first_finite(y));
 
     let mut s = RollingPairState::default();
     for i in 0..window {
-        add_pair(&mut s, x[i], y[i]);
+        add_pair(&mut s, x[i] - ox, y[i] - oy);
     }
     out[0] = corr_from_state(&s);
 
     for i in window..n {
-        remove_pair(&mut s, x[i - window], y[i - window]);
-        add_pair(&mut s, x[i], y[i]);
+        remove_pair(&mut s, x[i - window] - ox, y[i - window] - oy);
+        add_pair(&mut s, x[i] - ox, y[i] - oy);
         out[i - window + 1] = corr_from_state(&s);
     }
 }
@@ -144,6 +161,7 @@ pub(crate) fn rolling_cov_vec(x: &[f64], y: &[f64], window: usize) -> Vec<f64> {
     }
     let x = &x[..n];
     let y = &y[..n];
+    let (ox, oy) = (first_finite(x), first_finite(y));
 
     let mut out = Vec::with_capacity(n - window + 1);
 
@@ -152,8 +170,8 @@ pub(crate) fn rolling_cov_vec(x: &[f64], y: &[f64], window: usize) -> Vec<f64> {
     let mut sum_xy = 0.0f64;
 
     for i in 0..window {
-        let xi = x[i];
-        let yi = y[i];
+        let xi = x[i] - ox;
+        let yi = y[i] - oy;
         sum_x += xi;
         sum_y += yi;
         sum_xy += xi * yi;
@@ -161,10 +179,10 @@ pub(crate) fn rolling_cov_vec(x: &[f64], y: &[f64], window: usize) -> Vec<f64> {
 
     for i in (window - 1)..n {
         if i >= window {
-            let xi_new = x[i];
-            let yi_new = y[i];
-            let xi_old = x[i - window];
-            let yi_old = y[i - window];
+            let xi_new = x[i] - ox;
+            let yi_new = y[i] - oy;
+            let xi_old = x[i - window] - ox;
+            let yi_old = y[i - window] - oy;
             sum_x += xi_new - xi_old;
             sum_y += yi_new - yi_old;
             sum_xy += xi_new * yi_new - xi_old * yi_old;
@@ -188,6 +206,7 @@ pub(crate) fn rolling_corr_vec(x: &[f64], y: &[f64], window: usize) -> Vec<f64> 
     }
     let x = &x[..n];
     let y = &y[..n];
+    let (ox, oy) = (first_finite(x), first_finite(y));
 
     let mut out = Vec::with_capacity(n - window + 1);
 
@@ -198,8 +217,8 @@ pub(crate) fn rolling_corr_vec(x: &[f64], y: &[f64], window: usize) -> Vec<f64> 
     let mut sum_xy = 0.0f64;
 
     for i in 0..window {
-        let xi = x[i];
-        let yi = y[i];
+        let xi = x[i] - ox;
+        let yi = y[i] - oy;
         sum_x += xi;
         sum_y += yi;
         sum_x2 += xi * xi;
@@ -209,10 +228,10 @@ pub(crate) fn rolling_corr_vec(x: &[f64], y: &[f64], window: usize) -> Vec<f64> 
 
     for i in (window - 1)..n {
         if i >= window {
-            let xi_new = x[i];
-            let yi_new = y[i];
-            let xi_old = x[i - window];
-            let yi_old = y[i - window];
+            let xi_new = x[i] - ox;
+            let yi_new = y[i] - oy;
+            let xi_old = x[i - window] - ox;
+            let yi_old = y[i - window] - oy;
             sum_x += xi_new - xi_old;
             sum_y += yi_new - yi_old;
             sum_x2 += xi_new * xi_new - xi_old * xi_old;
@@ -233,4 +252,29 @@ pub(crate) fn rolling_corr_vec(x: &[f64], y: &[f64], window: usize) -> Vec<f64> 
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rolling cov/corr over large-offset series. Both series are
+    /// 1e8 + [1,2,3,4]; sample covariance of 3 consecutive equal integer runs is
+    /// 1.0 and correlation is 1.0, regardless of the 1e8 offset. The old
+    /// cross-moment `sum_xy - sum_x*sum_y/c` cancelled catastrophically here.
+    #[test]
+    fn test_rolling_cov_corr_large_offset() {
+        let x: Vec<f64> = (1..=4).map(|k| 1e8 + k as f64).collect();
+        let y = x.clone();
+        let mut cov = vec![0.0; 2];
+        let mut corr = vec![0.0; 2];
+        rolling_cov_skipna(&x, &y, 3, &mut cov);
+        rolling_corr_skipna(&x, &y, 3, &mut corr);
+        for c in &cov {
+            assert!((c - 1.0).abs() < 1e-9, "cov={c}, expected 1.0");
+        }
+        for c in &corr {
+            assert!((c - 1.0).abs() < 1e-9, "corr={c}, expected 1.0");
+        }
+    }
 }

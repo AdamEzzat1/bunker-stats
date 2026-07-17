@@ -35,6 +35,11 @@ struct RollingState {
     valid_count: usize,  // Non-NaN count
     min: f64,
     max: f64,
+    // Translation offset (the first finite value added). Variance is
+    // shift-invariant, so accumulating sum/sumsq on `x - offset` avoids
+    // catastrophic cancellation in `sumsq - n*mean^2` for large-offset data.
+    // mean/min/max add the offset back on read; variance/std need no adjustment.
+    offset: f64,
 }
 
 impl RollingState {
@@ -46,6 +51,7 @@ impl RollingState {
             valid_count: 0,
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
+            offset: 0.0,
         }
     }
     
@@ -61,14 +67,19 @@ impl RollingState {
         if x.is_nan() {
             return;
         }
-        self.valid_count += 1;
-        self.sum.add(x);
-        self.sumsq.add(x * x);
-        if x < self.min {
-            self.min = x;
+        // Anchor the offset on the first finite value in this window.
+        if self.valid_count == 0 {
+            self.offset = x;
         }
-        if x > self.max {
-            self.max = x;
+        let xs = x - self.offset;
+        self.valid_count += 1;
+        self.sum.add(xs);
+        self.sumsq.add(xs * xs);
+        if xs < self.min {
+            self.min = xs;
+        }
+        if xs > self.max {
+            self.max = xs;
         }
     }
     
@@ -78,7 +89,7 @@ impl RollingState {
         if !self.is_valid(min_periods, nan_policy) {
             return f64::NAN;
         }
-        self.sum.value() / self.valid_count as f64
+        self.sum.value() / self.valid_count as f64 + self.offset
     }
     
     /// Compute sample variance (ddof=1).
@@ -115,7 +126,7 @@ impl RollingState {
         if !self.is_valid(min_periods, nan_policy) {
             f64::NAN
         } else {
-            self.min
+            self.min + self.offset
         }
     }
     
@@ -125,7 +136,7 @@ impl RollingState {
         if !self.is_valid(min_periods, nan_policy) {
             f64::NAN
         } else {
-            self.max
+            self.max + self.offset
         }
     }
     
@@ -281,27 +292,33 @@ fn rolling_multi_trailing_propagate(
     let mut max_val = f64::NEG_INFINITY;
     let mut has_nan = false;
     
+    // Per-window translation offset for numerical stability of the variance
+    // (see write_stats). NaN windows output all-NaN, so the offset is only
+    // consulted for finite windows where xs[start] is finite.
+    let off0 = if xs[0].is_finite() { xs[0] } else { 0.0 };
+
     // Initialize first window
     for &x in &xs[..window] {
         if x.is_nan() {
             has_nan = true;
         }
-        sum.add(x);
-        sumsq.add(x * x);
-        if x < min_val {
-            min_val = x;
+        let xv = x - off0;
+        sum.add(xv);
+        sumsq.add(xv * xv);
+        if xv < min_val {
+            min_val = xv;
         }
-        if x > max_val {
-            max_val = x;
+        if xv > max_val {
+            max_val = xv;
         }
     }
-    
+
     // First output
     write_stats(
-        0, &sum, &sumsq, window, min_val, max_val, has_nan, mask,
+        0, &sum, &sumsq, window, min_val, max_val, has_nan, off0, mask,
         out_mean, out_std, out_var, out_count, out_min, out_max,
     );
-    
+
     // Slide window (recalculate everything to avoid NaN contamination)
     for k in 1..out_len {
         // Recalculate sum, sumsq, min, max, and NaN check for current window
@@ -310,23 +327,25 @@ fn rolling_multi_trailing_propagate(
         min_val = f64::INFINITY;
         max_val = f64::NEG_INFINITY;
         has_nan = false;
-        
+
+        let offk = if xs[k].is_finite() { xs[k] } else { 0.0 };
         for &x in &xs[k..k + window] {
             if x.is_nan() {
                 has_nan = true;
             }
-            sum.add(x);
-            sumsq.add(x * x);
-            if x < min_val {
-                min_val = x;
+            let xv = x - offk;
+            sum.add(xv);
+            sumsq.add(xv * xv);
+            if xv < min_val {
+                min_val = xv;
             }
-            if x > max_val {
-                max_val = x;
+            if xv > max_val {
+                max_val = xv;
             }
         }
-        
+
         write_stats(
-            k, &sum, &sumsq, window, min_val, max_val, has_nan, mask,
+            k, &sum, &sumsq, window, min_val, max_val, has_nan, offk, mask,
             out_mean, out_std, out_var, out_count, out_min, out_max,
         );
     }
@@ -451,6 +470,7 @@ fn write_stats(
     min_val: f64,
     max_val: f64,
     has_nan: bool,
+    offset: f64,
     mask: StatsMask,
     out_mean: &mut [f64],
     out_std: &mut [f64],
@@ -481,13 +501,16 @@ fn write_stats(
         }
     } else {
         let n = window as f64;
-        let mean = sum.value() / n;
-        
+        // sum/sumsq/min_val/max_val were accumulated on values shifted by
+        // `offset` (variance is shift-invariant). The shifted mean feeds the
+        // variance formula; add the offset back for the reported mean/min/max.
+        let mean_shifted = sum.value() / n;
+
         if mask.has_mean() {
-            out_mean[k] = mean;
+            out_mean[k] = mean_shifted + offset;
         }
         if mask.has_var() || mask.has_std() {
-            let var = (sumsq.value() - n * mean * mean) / (n - 1.0);
+            let var = (sumsq.value() - n * mean_shifted * mean_shifted) / (n - 1.0);
             let var = var.max(0.0);
             if mask.has_var() {
                 out_var[k] = var;
@@ -500,10 +523,10 @@ fn write_stats(
             out_count[k] = n;
         }
         if mask.has_min() {
-            out_min[k] = min_val;
+            out_min[k] = min_val + offset;
         }
         if mask.has_max() {
-            out_max[k] = max_val;
+            out_max[k] = max_val + offset;
         }
     }
 }
