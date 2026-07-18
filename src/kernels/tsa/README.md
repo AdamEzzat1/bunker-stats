@@ -95,7 +95,7 @@ Source layout:
 |---|---|---|
 | `rolling_autocorr` | `(x, lag=1, window=50)` | `ndarray`, length `n-window+1` |
 | `rolling_correlation` | `(x, y, window=50)` | `ndarray`, length `n-window+1` |
-| `rolling_autocorr_multi` | `(x, lags, window=50)` | `ndarray`, shape `(n-window+1, len(lags))` — see known issue |
+| `rolling_autocorr_multi` | `(x, lags, window=50)` | `ndarray`, shape `(n-window+1, len(lags))` |
 
 ---
 
@@ -585,20 +585,21 @@ length `n - window + 1`; zero-variance windows produce NaN.
 
 ### `rolling_autocorr_multi(x, lags, window=50) -> ndarray`
 
-Intended behavior: a 2-D array of shape `(n - window + 1, len(lags))` whose
-column `j` equals `rolling_autocorr(x, lags[j], window)`. `lags` has no
-default and must be provided.
+Returns a 2-D array of shape `(n - window + 1, len(lags))` whose column `j`
+equals `rolling_autocorr(x, lags[j], window)`. `lags` has no default and must
+be provided.
 
-**Known issue (current implementation):** with more than one lag the values
-are written to an internal buffer in column-major order but reinterpreted
-row-major, so the returned matrix is a scrambled reshape — columns do **not**
-correspond to per-lag rolling autocorrelations. Single-lag calls
-(`lags=[k]`) are correct and match `rolling_autocorr` exactly. Until this is
-fixed, call `rolling_autocorr` per lag and stack the results:
+Equivalent to (but cheaper than, since the window mean/variance are computed
+once per window rather than once per lag):
 
 ```python
 out = np.column_stack([bs.rolling_autocorr(x, k, window) for k in lags])
 ```
+
+Historical note: before 0.2.9 the multi-lag output buffer was written
+column-major but reshaped row-major, scrambling the result whenever more than
+one lag was requested. This is fixed and covered by a regression test
+(`test_rolling_autocorr_multi_row_major`).
 
 ---
 
@@ -654,4 +655,4 @@ Perron (1988); Hamilton (1994); Lo & MacKinlay (1988); Zivot & Andrews
 | KPSS p-value outside table | Clamped: `0.10` ⇒ p ≥ 0.10, `0.01` ⇒ p ≤ 0.01. |
 | ADF statistic outside MacKinnon range | Exact `0.0` / `1.0`, matching statsmodels. |
 | `welch_psd` with `n < nperseg` or zero step | Falls back to the full-series periodogram. |
-| `rolling_autocorr_multi` with multiple lags | Scrambled output (see known issue above); use single-lag calls. |
+| `rolling_autocorr_multi` with multiple lags | Each column `j` equals `rolling_autocorr(x, lags[j], window)`; zero-variance windows produce NaN. |

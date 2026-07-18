@@ -556,6 +556,17 @@ class TestRemaining:
                 ref = np.sum(d[lag:] * d[:-lag]) / denom
                 assert np.isclose(out[row, col], ref, atol=1e-12), (row, lag)
 
+    def test_rolling_autocorr_multi_matches_single_lag(self):
+        # Cross-function parity: each column of the multi-lag output must
+        # equal the corresponding single-lag rolling_autocorr call.
+        x = np.random.default_rng(3).standard_normal(300)
+        w, lags = 60, [1, 3, 5]
+        out = np.asarray(b.rolling_autocorr_multi(x, lags, w))
+        assert out.shape == (len(x) - w + 1, len(lags))
+        for col, lag in enumerate(lags):
+            single = np.asarray(b.rolling_autocorr(x, lag, w))
+            assert np.allclose(out[:, col], single, atol=1e-12), lag
+
     def test_matrix_accepts_fortran_order(self):
         # Regression: np.asfortranarray input hit an expect() abort in
         # extract_mat_f64 (to_owned() keeps F-layout, as_slice() -> None).
