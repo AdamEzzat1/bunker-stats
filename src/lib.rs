@@ -472,17 +472,24 @@ fn skew_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
     if xs.len() < 3 {
         return Ok(f64::NAN);
     }
+    // Population skewness g1 = m3 / m2^(3/2) with CONSISTENT central moments
+    // (both divided by n). Matches scipy.stats.skew (bias=True). The previous
+    // code divided m3 by the SAMPLE std (ddof=1), mixing estimators, so it
+    // matched neither scipy convention.
     let m = mean_slice(xs);
-    let s = std_slice(xs);
-    if s == 0.0 || s.is_nan() {
+    let n = xs.len() as f64;
+    let (mut m2, mut m3) = (0.0f64, 0.0f64);
+    for &v in xs {
+        let d = v - m;
+        m2 += d * d;
+        m3 += d * d * d;
+    }
+    m2 /= n;
+    m3 /= n;
+    if m2 <= 0.0 {
         return Ok(f64::NAN);
     }
-    let mut m3 = 0.0f64;
-    for &v in xs {
-        let z = (v - m) / s;
-        m3 += z.powi(3);
-    }
-    Ok(m3 / (xs.len() as f64))
+    Ok(m3 / m2.powf(1.5))
 }
 
 #[pyfunction]
@@ -491,17 +498,24 @@ fn kurtosis_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
     if xs.len() < 4 {
         return Ok(f64::NAN);
     }
+    // Excess (Fisher) kurtosis = m4 / m2^2 - 3 with CONSISTENT central moments
+    // (both divided by n). Matches scipy.stats.kurtosis (bias=True). The previous
+    // code divided m4 by the SAMPLE variance^2 (ddof=1), mixing estimators.
     let m = mean_slice(xs);
-    let s = std_slice(xs);
-    if s == 0.0 || s.is_nan() {
+    let n = xs.len() as f64;
+    let (mut m2, mut m4) = (0.0f64, 0.0f64);
+    for &v in xs {
+        let d = v - m;
+        let d2 = d * d;
+        m2 += d2;
+        m4 += d2 * d2;
+    }
+    m2 /= n;
+    m4 /= n;
+    if m2 <= 0.0 {
         return Ok(f64::NAN);
     }
-    let mut m4 = 0.0f64;
-    for &v in xs {
-        let z = (v - m) / s;
-        m4 += z.powi(4);
-    }
-    Ok(m4 / (xs.len() as f64) - 3.0)
+    Ok(m4 / (m2 * m2) - 3.0)
 }
 
 // ======================
