@@ -140,7 +140,7 @@ Each module has comprehensive documentation with detailed API references, usage 
 
 **Status:** 73/73 tests passing  
 **Performance:** 2-244× faster than SciPy/pandas  
-**Documentation:** See [ROBUST_STATS_README.md](./ROBUST_STATS_README.md)
+**Documentation:** See [src/kernels/robust/README.md](./src/kernels/robust/README.md)
 
 Outlier-resistant statistical estimators including:
 - Location estimators (median, trimmed mean, Huber location)
@@ -161,7 +161,7 @@ Outlier-resistant statistical estimators including:
 
 **Status:** 15/15 tests passing  
 **Performance:** 1.2-1.5× faster than SciPy  
-**Documentation:** See [INFERENCE_README.md](./INFERENCE_README.md)
+**Documentation:** See [src/infer/INFERENCE_README.md](./src/infer/INFERENCE_README.md)
 
 Comprehensive statistical hypothesis testing suite:
 - **Chi-square tests:** Goodness-of-fit, independence
@@ -184,7 +184,7 @@ Comprehensive statistical hypothesis testing suite:
 
 **Status:** 83/83 tests passing  
 **Performance:** ~9,500 ops/sec (100×20 matrices)  
-**Documentation:** See [MATRIX_MODULE_README.md](./MATRIX_MODULE_README.md)
+**Documentation:** See [src/kernels/matrix/README.md](./src/kernels/matrix/README.md)
 
 High-performance matrix computations for statistical analysis:
 - **Covariance matrices:** Sample, population, centered, pairwise-complete
@@ -205,7 +205,7 @@ High-performance matrix computations for statistical analysis:
 
 **Status:** 53/53 tests passing  
 **Performance:** 244× faster than pandas for rolling median  
-**Documentation:** See [ROLLING_README.md](./ROLLING_README.md)
+**Documentation:** See [src/kernels/rolling/ROLLING_README.md](./src/kernels/rolling/ROLLING_README.md)
 
 Flexible rolling window statistics with policy-driven configuration:
 - **Statistics:** Mean, std, variance, min, max, count
@@ -227,12 +227,13 @@ Flexible rolling window statistics with policy-driven configuration:
 
 **Status:** 25/25 tests passing, 100% coverage  
 **Performance:** 10-200× faster than pure Python  
-**Documentation:** See [README_RESAMPLING.md](./README_RESAMPLING.md)
+**Documentation:** See [src/kernels/resampling/README.md](./src/kernels/resampling/README.md)
 
 Lightning-fast resampling methods with ergonomic interfaces:
-- **Bootstrap:** Confidence intervals for mean, median, std
-- **Permutation tests:** Coming in v0.3
-- **Jackknife:** Coming in v0.3
+- **Bootstrap:** Percentile, BCa, bootstrap-t, and Bayesian CIs; standard error and variance
+- **Block bootstraps:** Moving, circular, and stationary variants for autocorrelated series
+- **Permutation tests:** Mean-difference and correlation
+- **Jackknife:** Leave-one-out, delete-d, jackknife-after-bootstrap, influence values
 
 **Key Features:**
 - `BootstrapConfig` class with comprehensive validation
@@ -243,24 +244,44 @@ Lightning-fast resampling methods with ergonomic interfaces:
 
 ---
 
-### 6. **Time Series Analysis** ⚠️ Near Production
+### 6. **Time Series Analysis** ✅ Production-Ready
 
-**Status:** 45/47 tests passing (95.7%)  
-**Known Issues:** 2 algorithmic corrections needed, 1 optimization pending  
-**Documentation:** See [TSA_MODULE_README.md](./TSA_MODULE_README.md)
+**Status:** Core statistics validated against statsmodels (ADF, KPSS, Ljung-Box, ACF/PACF to machine precision)  
+**Documentation:** See [src/kernels/tsa/README.md](./src/kernels/tsa/README.md)
 
 Comprehensive temporal data analysis tools:
 - **Correlation:** ACF, PACF (Levinson-Durbin, Yule-Walker, Innovations, Burg)
 - **Spectral analysis:** Periodogram, Welch PSD, spectral density
-- **Diagnostic tests:** Ljung-Box, Durbin-Watson
-- **Stationarity:** ADF, KPSS, variance ratio tests
-- **Rolling operations:** Rolling autocorrelation
+- **Diagnostic tests:** Ljung-Box, Box-Pierce, Breusch-Godfrey, Durbin-Watson, runs test
+- **Stationarity:** ADF (MacKinnon p-values), KPSS (automatic bandwidth), Phillips-Perron, Zivot-Andrews structural break, variance ratio
+- **Rolling operations:** Rolling autocorrelation (single and multi-lag)
 
-**v0.3 Roadmap:**
-- Fix KPSS test calculation (8.4% error)
-- Correct variance ratio test
-- Optimize Zivot-Andrews test (currently hangs)
-- Target: 50/50 tests passing
+---
+
+### 7. **Distributions** ✅ Production-Ready
+
+**Status:** Round-trip (`ppf(cdf(x)) ≈ x`) and reference-parity tested  
+**Documentation:** See [src/kernels/dist/README.md](./src/kernels/dist/README.md)
+
+Vectorized distribution functions for Normal, Exponential (rate-parameterized), and Uniform:
+- **Densities:** `pdf`, `logpdf`
+- **Probabilities:** `cdf`, `sf`, `logsf` — dedicated survival functions keep far-tail
+  p-values accurate where `1 - cdf` would cancel to zero
+- **Quantiles:** `ppf` with strict domain checks
+- **Reliability:** cumulative hazard functions for survival analysis
+
+---
+
+### 8. **Quantiles & Order Statistics** ✅ Production-Ready
+
+**Status:** NumPy-parity tested, NaN-safe  
+**Documentation:** See [src/kernels/quantile/README.md](./src/kernels/quantile/README.md)
+
+Order-statistic utilities built on O(n) selection:
+- **Percentiles & IQR:** `percentile`, IQR family including skip-NaN variants
+- **Winsorization:** Percentile-based and explicit-bound clipping
+- **Outlier masks:** IQR fences and z-score thresholds
+- **Empirical distributions:** ECDF and quantile binning
 
 ---
 
