@@ -72,7 +72,7 @@ test_localsystem.txt
 *_debug*
 
 ############################################
-# AI / Agent / Automation Tools
+# Local tooling & editor state
 ############################################
 .claude/
 **/.claude/

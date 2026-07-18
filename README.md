@@ -23,6 +23,71 @@ License: See LICENSE file
 
 ---
 
+## Release Notes — 0.2.9 Hardening
+
+A full-codebase review and hardening pass. Every fix below is pinned by a
+regression test; the suite now stands at **458 Python tests + 53 Rust tests
+passing, 0 compiler warnings**.
+
+### Crash fixes (highest impact)
+
+- **NaN inputs no longer kill the Python process.** The release build uses
+  `panic = "abort"`, so any Rust panic terminated the whole interpreter rather
+  than raising an exception. ~24 sort/select code paths (`median`, `mad`,
+  `iqr`, `percentile`, `robust_scale`, `ecdf`, `quantile_bins`, `qn_scale`,
+  `runs_test`, and others) panicked on NaN input. All now use total-order
+  comparison and propagate NaN (`NaN in → NaN out`) or raise a normal
+  `ValueError`. *Impact: a single NaN in production data could previously
+  crash the entire process, losing all in-flight work.*
+- **`zivot_andrews_test` crashed on every call** via an out-of-bounds buffer
+  write (the design-matrix column count was off by one). *Impact: the function
+  was unusable; the crash mode was a hard interpreter abort.*
+
+### Statistical correctness
+
+- **Zivot-Andrews regression was numerically scrambled** — the design matrix
+  was built row-major but read column-major, so breakpoint estimates and
+  t-statistics were noise. It now recovers the true structural break
+  (verified against `statsmodels`).
+- **Rolling variance/std/cov/corr suffered catastrophic cancellation** on
+  large-offset data (e.g. values near 1e8): results silently degraded to
+  wrong zeros. All rolling second-moment kernels now use translation-offset
+  accumulators. *Impact: correct results on price-level-style series, not
+  just mean-zero data.*
+- **KPSS** now uses the same automatic bandwidth as `statsmodels`
+  (`nlags="auto"`); statistics match statsmodels to machine precision.
+- **ADF / Phillips-Perron p-values** now come from the MacKinnon (1994)
+  regression surface (statsmodels-identical, including extreme tails). ADF
+  honors its `regression` and `max_lag` arguments (previously ignored); PP
+  applies the HAC long-run-variance correction and the correct
+  Dickey-Fuller reference distribution (previously Normal).
+- **Breusch-Godfrey** statistic corrected to the standard `T·R²` form.
+- **Variance-ratio test** rewritten as the proper Lo-MacKinlay overlapping
+  estimator; a random walk now yields VR ≈ 1 as expected.
+- **Biweight midvariance** exponents corrected to the standard
+  (Beers-Flynn-Gebhardt / astropy) definition.
+- **Skewness/kurtosis** now use scipy-consistent population moments
+  (previously mixed sample/population estimators matching no standard
+  convention).
+- **NaN-aware rolling cov/corr** now match pandas `min_periods=window`
+  semantics.
+
+### Test coverage & tooling
+
+- Function-level test coverage rose from **51% to 99%** of the 188 public
+  functions: 67 new parity tests validate outputs directly against
+  numpy / scipy / pandas / statsmodels references.
+- New test layers: Rust unit + property tests (including
+  never-panic-on-any-input properties), a binding-surface test asserting
+  every registered export is callable, and a subprocess-isolated NaN-crash
+  regression test.
+- The `parallel` feature is now genuinely optional
+  (`--no-default-features` builds and passes tests with a serial fallback),
+  and the crate builds an `rlib` so Rust integration tests and fuzzing can
+  link against it.
+
+---
+
 ## Quick Start
 
 ### Installation
