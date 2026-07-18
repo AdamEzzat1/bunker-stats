@@ -1,7 +1,6 @@
 use numpy::{PyReadonlyArray1, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use statrs::distribution::{ContinuousCDF, Normal};
 
 // ======================
 // OPTIMIZED STATIONARITY TESTS
@@ -16,99 +15,51 @@ use statrs::distribution::{ContinuousCDF, Normal};
 // DICKEY-FULLER CRITICAL VALUES
 // ======================
 
-/// Calculate p-value for Dickey-Fuller test statistic using proper DF distribution
-fn df_pvalue(stat: f64, n: usize, regression: &str) -> f64 {
-    // Define critical value tables: (critical_value, p_value)
-    let cv_table = match regression {
-        "c" => {
-            // Constant only (most common)
-            vec![
-                (-3.96, 0.001),
-                (-3.43, 0.01),
-                (-3.13, 0.025),
-                (-2.86, 0.05),
-                (-2.57, 0.10),
-                (-1.94, 0.25),
-                (-0.91, 0.50),
-                (0.00, 0.75),
-                (1.33, 0.90),
-                (1.70, 0.95),
-                (2.16, 0.975),
-                (2.54, 0.99),
-            ]
-        },
-        "ct" => {
-            // Constant + trend
-            vec![
-                (-4.38, 0.001),
-                (-3.96, 0.01),
-                (-3.66, 0.025),
-                (-3.41, 0.05),
-                (-3.13, 0.10),
-                (-2.57, 0.25),
-                (-1.62, 0.50),
-                (-0.65, 0.75),
-                (0.71, 0.90),
-                (1.03, 0.95),
-                (1.66, 0.975),
-                (2.08, 0.99),
-            ]
-        },
-        "nc" => {
-            // No constant - use normal approximation
-            let normal = Normal::new(0.0, 1.0).unwrap();
-            return 2.0 * (1.0 - normal.cdf(stat.abs()));
-        },
-        _ => {
-            // Default to constant
-            vec![
-                (-3.96, 0.001),
-                (-3.43, 0.01),
-                (-3.13, 0.025),
-                (-2.86, 0.05),
-                (-2.57, 0.10),
-                (-1.94, 0.25),
-                (-0.91, 0.50),
-                (0.00, 0.75),
-                (1.33, 0.90),
-                (1.70, 0.95),
-                (2.16, 0.975),
-                (2.54, 0.99),
-            ]
-        }
-    };
-    
-    // Small sample adjustment (MacKinnon correction)
-    let sample_adj = if n < 100 {
-        0.05
-    } else if n < 250 {
-        0.02
+/// Approximate p-value for a Dickey-Fuller t-statistic via the MacKinnon
+/// (1994) regression surface — the same method as statsmodels' `mackinnonp`
+/// (N=1): p = Φ(c₀ + c₁τ + c₂τ² [+ c₃τ³]), with a small-p polynomial below τ*
+/// and a large-p polynomial above it, clamped to exactly 0/1 outside the
+/// tabulated range. Replaces a coarse critical-value interpolation whose tail
+/// clamp (min p = 5e-4) and two-sided-Normal "nc" branch both diverged from
+/// statsmodels.
+fn df_pvalue(stat: f64, _n: usize, regression: &str) -> f64 {
+    use statrs::distribution::{ContinuousCDF, Normal};
+
+    // (tau_min, tau_max, tau_star, small-p coeffs, large-p coeffs), constants
+    // from statsmodels.tsa.adfvalues (scaling already applied).
+    let (tau_min, tau_max, tau_star, smallp, largep): (f64, f64, f64, [f64; 3], [f64; 4]) =
+        match regression {
+            "nc" => (
+                -19.04, 1.51, -1.04,
+                [0.6344, 1.2378, 0.032496],
+                [0.4797, 0.93557, -0.06999, 0.033066],
+            ),
+            "ct" => (
+                -16.18, 0.70, -2.21,
+                [3.2512, 1.6047, 0.049588],
+                [2.5261, 0.61654, -0.37956, -0.060285],
+            ),
+            // "c" and any fallback
+            _ => (
+                -18.83, 2.74, -1.61,
+                [2.1659, 1.4412, 0.038269],
+                [1.7339, 0.93202, -0.12745, -0.010368],
+            ),
+        };
+
+    if stat > tau_max {
+        return 1.0;
+    }
+    if stat < tau_min {
+        return 0.0;
+    }
+    let z = if stat <= tau_star {
+        smallp[0] + smallp[1] * stat + smallp[2] * stat * stat
     } else {
-        0.0
+        largep[0] + largep[1] * stat + largep[2] * stat * stat + largep[3] * stat * stat * stat
     };
-    
-    let adj_stat = stat - sample_adj;
-    
-    // Handle extremes
-    if adj_stat <= cv_table[0].0 {
-        return cv_table[0].1 * 0.5; // Very negative - strong stationarity
-    }
-    if adj_stat >= cv_table[cv_table.len() - 1].0 {
-        return 1.0 - (1.0 - cv_table[cv_table.len() - 1].1) * 0.5; // Positive - non-stationary
-    }
-    
-    // Linear interpolation between critical values
-    for i in 0..(cv_table.len() - 1) {
-        let (cv_low, p_low) = cv_table[i];
-        let (cv_high, p_high) = cv_table[i + 1];
-        
-        if adj_stat >= cv_low && adj_stat <= cv_high {
-            let weight = (adj_stat - cv_low) / (cv_high - cv_low);
-            return p_low + weight * (p_high - p_low);
-        }
-    }
-    
-    0.50 // Fallback
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    normal.cdf(z)
 }
 /// Normalize a Dickey-Fuller deterministic specification.
 /// "c" = constant, "ct" = constant+trend, "n"/"nc" = none.
@@ -260,6 +211,42 @@ fn kpss_pvalue(stat: f64, regression: &str) -> f64 {
 
 /// Newey-West long-run variance estimator with Bartlett weights
 /// Used by KPSS test for HAC-consistent variance estimation
+/// Data-dependent bandwidth for the KPSS long-run variance (Hobijn, Franses &
+/// Ooms), identical to statsmodels' `_kpss_autolag` (`nlags="auto"`, the
+/// statsmodels default that the parity tests pin). The previous default —
+/// Schwert's 12·(n/100)^¼ — over-smooths white-noise-like residuals (lag 23 vs
+/// ~9 at n=1200), shifting the KPSS statistic by >15%.
+fn kpss_autolag(resid: &[f64]) -> usize {
+    let n = resid.len();
+    if n < 2 {
+        return 0;
+    }
+    let nf = n as f64;
+    let covlags = (nf.powf(2.0 / 9.0) as usize).min(n - 1);
+    let mut s0: f64 = resid.iter().map(|e| e * e).sum::<f64>() / nf;
+    let mut s1 = 0.0;
+    for i in 1..=covlags {
+        let mut prod = 0.0;
+        for t in i..n {
+            prod += resid[t] * resid[t - i];
+        }
+        prod /= nf / 2.0;
+        s0 += prod;
+        s1 += (i as f64) * prod;
+    }
+    if s0 <= 0.0 || !s0.is_finite() {
+        return 0;
+    }
+    let s_hat = s1 / s0;
+    let pwr = 1.0 / 3.0;
+    let gamma_hat = 1.1447 * (s_hat * s_hat).powf(pwr);
+    let autolags = gamma_hat * nf.powf(pwr);
+    if !autolags.is_finite() || autolags < 0.0 {
+        return 0;
+    }
+    (autolags as usize).min(n - 1)
+}
+
 fn long_run_variance(resid: &[f64], max_lag: Option<usize>) -> f64 {
     let n = resid.len();
     if n < 2 {
@@ -383,9 +370,14 @@ pub fn kpss_test(
         s.push(cum);
     }
 
-    // Calculate variance
-    let lrv = long_run_variance(&resid, max_lag);
-    
+    // Bandwidth: user-supplied, else the Hobijn data-dependent rule
+    // (statsmodels `nlags="auto"`, its default).
+    let nlags = match max_lag {
+        Some(v) => v.min(n - 1),
+        None => kpss_autolag(&resid),
+    };
+    let lrv = long_run_variance(&resid, Some(nlags));
+
     if !lrv.is_finite() || lrv <= 0.0 {
         return Ok((f64::NAN, f64::NAN));
     }
@@ -669,78 +661,56 @@ pub fn pp_test(x: PyReadonlyArray1<f64>, regression: &str) -> PyResult<(f64, f64
 ///     variance_ratio_test(x, lags=2) -> (vr, z_score, pvalue)
 #[pyfunction(signature = (x, lags=2))]
 pub fn variance_ratio_test(x: PyReadonlyArray1<f64>, lags: usize) -> PyResult<(f64, f64, f64)> {
-    let x = x.as_slice()?;
-    let n = x.len();
-    
-    if n < lags + 2 {
+    // `x` is the INCREMENT (return) series — the repo's own tests pass
+    // np.diff(levels). The previous implementation differenced again (treating
+    // returns as levels), so a random walk's returns came out as MA(1) with
+    // VR(2) ≈ 0.5 instead of ≈ 1.
+    let r = x.as_slice()?;
+    let n = r.len();
+    let q = lags;
+
+    if q < 2 || n < q + 2 {
         return Ok((f64::NAN, f64::NAN, f64::NAN));
     }
-    
-    // Calculate returns (first differences)
-    let mut returns = Vec::with_capacity(n - 1);
-    for t in 1..n {
-        returns.push(x[t] - x[t - 1]);
-    }
-    
-    let n_r = returns.len();
-    let n_r_f = n_r as f64;
-    
-    // Variance of 1-period returns
-    let mean_r = returns.iter().sum::<f64>() / n_r_f;
-    let mut var_1 = 0.0;
-    for &r in &returns {
-        let d = r - mean_r;
-        var_1 += d * d;
-    }
-    var_1 /= n_r_f;
-    
-    if var_1 <= 0.0 {
+
+    let nf = n as f64;
+    let qf = q as f64;
+    let mu = r.iter().sum::<f64>() / nf;
+
+    // Unbiased 1-period variance.
+    let var1: f64 = r.iter().map(|&v| (v - mu) * (v - mu)).sum::<f64>() / (nf - 1.0);
+    if var1 <= 0.0 || !var1.is_finite() {
         return Ok((f64::NAN, f64::NAN, f64::NAN));
     }
-    
-    // Variance of q-period returns using NON-OVERLAPPING windows
-    // This is the standard approach to avoid bias from overlapping observations
-    let n_q = n_r / lags;  // Integer division - only complete q-periods
-    
-    if n_q == 0 {
-        return Ok((f64::NAN, f64::NAN, f64::NAN));
+
+    // q-period variance from OVERLAPPING q-sums (Lo–MacKinlay 1988) with the
+    // bias-adjusted denominator m = q(n−q+1)(1−q/n). Overlapping is required
+    // for consistency with the asymptotic variance θ below; the old code mixed
+    // a non-overlapping estimator with the overlapping θ, mis-sizing z.
+    let mut window: f64 = r[..q].iter().sum();
+    let target = qf * mu;
+    let mut dev = window - target;
+    let mut acc = dev * dev;
+    for t in q..n {
+        window += r[t] - r[t - q];
+        dev = window - target;
+        acc += dev * dev;
     }
-    
-    let mut q_returns = Vec::with_capacity(n_q);
-    for i in 0..n_q {
-        let start = i * lags;  // Non-overlapping windows
-        let mut sum = 0.0;
-        for j in 0..lags {
-            sum += returns[start + j];
-        }
-        q_returns.push(sum);
-    }
-    
-    let mean_q = q_returns.iter().sum::<f64>() / (n_q as f64);
-    let mut var_q = 0.0;
-    for &r in &q_returns {
-        let d = r - mean_q;
-        var_q += d * d;
-    }
-    var_q /= n_q as f64;
-    
-    // Variance ratio
-    // For a random walk, E[Var(q-period returns)] = q × E[Var(1-period returns)]
-    // So VR = Var(q-period) / (q × Var(1-period)) ≈ 1 under the null
-    let vr = var_q / (lags as f64 * var_1);
-    
-    // Asymptotic variance under random walk null
-    let lags_f = lags as f64;
-    let theta = 2.0 * (2.0 * lags_f - 1.0) * (lags_f - 1.0) / (3.0 * lags_f * n_r_f);
-    
-    // Test statistic
+    // m already contains the factor q, so varq is the PER-PERIOD variance of
+    // the q-sums and VR is varq/var1 directly (no further /q).
+    let m = qf * (nf - qf + 1.0) * (1.0 - qf / nf);
+    let varq = acc / m;
+
+    let vr = varq / var1;
+
+    // Homoscedastic asymptotic variance of VR(q) under the random-walk null.
+    let theta = 2.0 * (2.0 * qf - 1.0) * (qf - 1.0) / (3.0 * qf * nf);
     let z = (vr - 1.0) / theta.sqrt();
-    
-    // Two-tailed p-value
+
     use statrs::distribution::{ContinuousCDF, Normal};
     let normal = Normal::new(0.0, 1.0).unwrap();
     let p_val = 2.0 * (1.0 - normal.cdf(z.abs()));
-    
+
     Ok((vr, z, p_val))
 }
 /// Zivot-Andrews test for unit root with structural break
@@ -832,7 +802,10 @@ pub fn zivot_andrews_test(x: PyReadonlyArray1<f64>, max_lag: Option<usize>) -> P
         }
         
         // OLS regression: solve (X'X) β = X'y
-        let x_matrix = DMatrix::from_vec(m, n_regressors, x_mat);
+        // x_mat is built row-major (t*n_regressors + col). from_vec reads
+        // COLUMN-major and would scramble every regressor, silently producing
+        // garbage coefficients (breakpoints/t-stats were noise).
+        let x_matrix = DMatrix::from_row_slice(m, n_regressors, &x_mat);
         let y_vector = DVector::from_vec(y_vec);
         
         let xtx = x_matrix.transpose() * &x_matrix;

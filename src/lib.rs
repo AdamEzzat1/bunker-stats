@@ -1948,18 +1948,20 @@ pub fn rolling_cov_nan_np<'py>(
     let out_len = n - window + 1;
     let mut out = vec![f64::NAN; out_len];
 
-    // init window
+    // init window. NaN pairs are dropped by add_pair; requiring a FULL window
+    // of valid pairs below matches pandas rolling(...).cov's default
+    // min_periods=window (NaN whenever any pair in the window is missing).
     let mut st = RollingPairState::default();
     for i in 0..window {
         st.add_pair(xs[i], ys[i]);
     }
-    out[0] = st.cov();
+    out[0] = if st.count == window { st.cov() } else { f64::NAN };
 
     // slide
     for i in window..n {
         st.remove_pair(xs[i - window], ys[i - window]);
         st.add_pair(xs[i], ys[i]);
-        out[i - window + 1] = st.cov();
+        out[i - window + 1] = if st.count == window { st.cov() } else { f64::NAN };
     }
 
     Ok(PyArray1::from_vec_bound(py, out))
@@ -1986,18 +1988,19 @@ pub fn rolling_corr_nan_np<'py>(
     let out_len = n - window + 1;
     let mut out = vec![f64::NAN; out_len];
 
-    // init window
+    // init window. Full-window requirement mirrors pandas rolling(...).corr
+    // default min_periods=window (see rolling_cov_nan_np).
     let mut st = RollingPairState::default();
     for i in 0..window {
         st.add_pair(xs[i], ys[i]);
     }
-    out[0] = st.corr();
+    out[0] = if st.count == window { st.corr() } else { f64::NAN };
 
     // slide
     for i in window..n {
         st.remove_pair(xs[i - window], ys[i - window]);
         st.add_pair(xs[i], ys[i]);
-        out[i - window + 1] = st.corr();
+        out[i - window + 1] = if st.count == window { st.corr() } else { f64::NAN };
     }
 
     Ok(PyArray1::from_vec_bound(py, out))
