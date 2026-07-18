@@ -12,6 +12,26 @@ Sources:
 - `jackknife.rs` — jackknife mean, delete-d jackknife, influence values,
   jackknife-after-bootstrap.
 
+
+## Using the Python facade
+
+New code should reach these kernels through the `bunker_stats` facade, which
+exposes clean names with keyword arguments. The raw `bunker_stats_rs` names
+documented below remain available and stable; the facade adds ergonomics on
+top of the same kernels:
+
+```python
+import bunker_stats as bs
+
+bs.bootstrap_mean_ci(x, 1000, random_state=42)
+bs.jackknife_mean(x)
+```
+
+Where a statistic has strict and skip-NaN variants, the facade exposes ONE
+name with a `skipna=` keyword; `skipna=True` dispatches to the skip-NaN kernel
+documented below (the twin kernels stay separate in Rust, so there is no
+branch inside the hot loop).
+
 ## Overview
 
 The **bootstrap** approximates the sampling distribution of a statistic by

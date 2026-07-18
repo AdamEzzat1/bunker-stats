@@ -3,7 +3,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from . import bunker_stats_rs
+# Reuse the facade's robustly-imported extension handle: the binary module may
+# live in-package, nested, or top-level depending on how the wheel was built.
+from . import _rs as bunker_stats_rs
 
 
 def demean_style(

@@ -32,6 +32,27 @@ Source layout:
 
 ---
 
+
+## Using the Python facade
+
+New code should reach these kernels through the `bunker_stats` facade, which
+exposes clean names with keyword arguments. The raw `bunker_stats_rs` names
+documented below remain available and stable; the facade adds ergonomics on
+top of the same kernels:
+
+```python
+import bunker_stats as bs
+
+bs.adf_test(x, regression="ct")
+bs.kpss_test(x)
+bs.rolling_autocorr_multi(x, lags=[1, 2, 5], window=60)
+```
+
+Where a statistic has strict and skip-NaN variants, the facade exposes ONE
+name with a `skipna=` keyword; `skipna=True` dispatches to the skip-NaN kernel
+documented below (the twin kernels stay separate in Rust, so there is no
+branch inside the hot loop).
+
 ## Function summary
 
 ### Stationarity and unit-root tests

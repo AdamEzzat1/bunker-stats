@@ -21,6 +21,29 @@ extension names.
 
 ---
 
+
+## Using the Python facade
+
+New code should reach these kernels through the `bunker_stats` facade, which
+exposes clean names with keyword arguments. The raw `bunker_stats_rs` names
+documented below remain available and stable; the facade adds ergonomics on
+top of the same kernels:
+
+```python
+import bunker_stats as bs
+
+bs.cov_matrix(X)                   # numpy.cov(rowvar=False, ddof=1)
+bs.corr_matrix(X, skipna=True)     # pairwise-complete variant
+
+import bunker_stats.pandas as bsp  # optional pandas layer
+C = bsp.corr_df(df)                # labeled DataFrame result
+```
+
+Where a statistic has strict and skip-NaN variants, the facade exposes ONE
+name with a `skipna=` keyword; `skipna=True` dispatches to the skip-NaN kernel
+documented below (the twin kernels stay separate in Rust, so there is no
+branch inside the hot loop).
+
 ## Function summary
 
 | Function | Input shape | Output shape | Missing-data policy |

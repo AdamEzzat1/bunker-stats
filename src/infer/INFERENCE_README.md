@@ -22,6 +22,27 @@ Source layout (`src/infer/`):
 | `effect.rs` | `cohens_d_2samp_np`, `hedges_g_2samp_np2`, `mean_diff_ci_np` |
 | `common.rs` | Shared helpers: `Alternative` parsing, non-finite rejection, Kahan-compensated mean/variance, average ranking, median |
 
+
+## Using the Python facade
+
+New code should reach these kernels through the `bunker_stats` facade, which
+exposes clean names with keyword arguments. The raw `bunker_stats_rs` names
+documented below remain available and stable; the facade adds ergonomics on
+top of the same kernels:
+
+```python
+import bunker_stats as bs
+
+bs.t_test_2samp(x, y)                      # defaults: pooled, two-sided
+bs.t_test_2samp(x, y, equal_var=False)     # Welch's t
+bs.cohens_d_2samp(x, y)                    # pooled=True default
+```
+
+Where a statistic has strict and skip-NaN variants, the facade exposes ONE
+name with a `skipna=` keyword; `skipna=True` dispatches to the skip-NaN kernel
+documented below (the twin kernels stay separate in Rust, so there is no
+branch inside the hot loop).
+
 ## API contract
 
 - **Input type**: every array argument must be a C-contiguous 1-D (or 2-D for

@@ -15,6 +15,27 @@ b.rolling_std_np(x, 3)           # array([1., 1., 1.])
 
 ---
 
+
+## Using the Python facade
+
+New code should reach these kernels through the `bunker_stats` facade, which
+exposes clean names with keyword arguments. The raw `bunker_stats_rs` names
+documented below remain available and stable; the facade adds ergonomics on
+top of the same kernels:
+
+```python
+import bunker_stats as bs
+
+bs.rolling_mean(x, window=20)              # strict: length n-window+1
+bs.rolling_mean(x, window=20, skipna=True) # NaN-aware: length n, min_periods=1
+bs.rolling_cov(x, y, window=50, skipna=True)
+```
+
+Where a statistic has strict and skip-NaN variants, the facade exposes ONE
+name with a `skipna=` keyword; `skipna=True` dispatches to the skip-NaN kernel
+documented below (the twin kernels stay separate in Rust, so there is no
+branch inside the hot loop).
+
 ## Function summary
 
 | Function | One-liner | Output shape |

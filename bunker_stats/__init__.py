@@ -588,6 +588,143 @@ rolling_multi_axis0 = _get_rs("rolling_multi_axis0", "rolling_multi_axis0_np")
 
 
 # ======================================================================================
+# Modern keyword layer (v0.3 API)
+#
+# Design rules:
+#   1. One public name per statistic; NaN handling is a `skipna=` keyword, not a
+#      twin function. The strict and skip-NaN Rust kernels stay separate under
+#      the hood (no branch in the hot loop) — dispatch happens once, here.
+#   2. Options are keyword-only with sensible defaults (`equal_var=True`,
+#      `lower_q=0.05`), so `bs.t_test_2samp(x, y)` just works.
+#   3. Keyword names carry their unit (`lower_q` is a quantile in [0, 1];
+#      `q` in `percentile` is in [0, 100], matching numpy).
+# The *_skipna names remain available and are NOT deprecated; they are the same
+# kernels the `skipna=True` path dispatches to.
+# ======================================================================================
+
+zscore_skipna = _get_rs("zscore_skipna", "zscore_skipna_np")
+
+# Preserve raw kernel bindings before rebinding the public names to wrappers.
+_strict = {
+    "mean": mean, "std": std, "var": var, "median": median, "mad": mad,
+    "zscore": zscore, "iqr": iqr, "trimmed_mean": trimmed_mean,
+    "cov": cov, "corr": corr, "cov_matrix": cov_matrix, "corr_matrix": corr_matrix,
+    "rolling_mean": rolling_mean, "rolling_std": rolling_std,
+    "rolling_zscore": rolling_zscore, "rolling_cov": rolling_cov,
+    "rolling_corr": rolling_corr, "winsorize": winsorize,
+    "t_test_2samp": t_test_2samp, "cohens_d_2samp": cohens_d_2samp,
+    "hedges_g_2samp": hedges_g_2samp,
+}
+_skipna_kernel = {
+    "mean": mean_skipna, "std": std_skipna, "var": var_skipna,
+    "median": median_skipna, "mad": mad_skipna, "zscore": zscore_skipna,
+    "iqr": iqr_skipna, "trimmed_mean": trimmed_mean_skipna,
+    "cov": cov_skipna, "corr": corr_skipna,
+    "cov_matrix": cov_matrix_skipna, "corr_matrix": corr_matrix_skipna,
+    "rolling_cov": rolling_cov_skipna, "rolling_corr": rolling_corr_skipna,
+    "rolling_mean": rolling_mean_skipna, "rolling_std": rolling_std_skipna,
+    "rolling_zscore": rolling_zscore_skipna,
+}
+
+
+def mean(x, *, skipna: bool = False):
+    """Arithmetic mean. `skipna=True` ignores NaNs (numpy.nanmean semantics)."""
+    return _skipna_kernel["mean"](x) if skipna else _strict["mean"](x)
+
+def std(x, *, skipna: bool = False):
+    """Sample standard deviation (ddof=1). `skipna=True` ignores NaNs."""
+    return _skipna_kernel["std"](x) if skipna else _strict["std"](x)
+
+def var(x, *, skipna: bool = False):
+    """Sample variance (ddof=1). `skipna=True` ignores NaNs."""
+    return _skipna_kernel["var"](x) if skipna else _strict["var"](x)
+
+def median(x, *, skipna: bool = False):
+    """Median. `skipna=True` ignores NaNs (numpy.nanmedian semantics)."""
+    return _skipna_kernel["median"](x) if skipna else _strict["median"](x)
+
+def mad(x, *, skipna: bool = False):
+    """Median absolute deviation (unscaled). `skipna=True` ignores NaNs."""
+    return _skipna_kernel["mad"](x) if skipna else _strict["mad"](x)
+
+def zscore(x, *, skipna: bool = False):
+    """Standard scores using the sample std (ddof=1). `skipna=True` ignores NaNs."""
+    return _skipna_kernel["zscore"](x) if skipna else _strict["zscore"](x)
+
+def iqr(x, *, skipna: bool = False):
+    """Interquartile range width (Q3 - Q1). `skipna=True` ignores NaNs."""
+    return _skipna_kernel["iqr"](x) if skipna else _strict["iqr"](x)
+
+def trimmed_mean(x, proportion_to_cut: float = 0.1, *, skipna: bool = False):
+    """Mean after trimming `proportion_to_cut` from each tail (scipy.trim_mean)."""
+    k = _skipna_kernel["trimmed_mean"] if skipna else _strict["trimmed_mean"]
+    return k(x, proportion_to_cut)
+
+def cov(x, y, *, skipna: bool = False):
+    """Sample covariance (ddof=1). `skipna=True` uses pairwise-complete observations."""
+    k = _skipna_kernel["cov"] if skipna else _strict["cov"]
+    return k(x, y)
+
+def corr(x, y, *, skipna: bool = False):
+    """Pearson correlation. `skipna=True` uses pairwise-complete observations."""
+    k = _skipna_kernel["corr"] if skipna else _strict["corr"]
+    return k(x, y)
+
+def cov_matrix(X, *, skipna: bool = False):
+    """Covariance matrix, columns as variables (numpy.cov(rowvar=False, ddof=1))."""
+    k = _skipna_kernel["cov_matrix"] if skipna else _strict["cov_matrix"]
+    return k(X)
+
+def corr_matrix(X, *, skipna: bool = False):
+    """Correlation matrix, columns as variables (numpy.corrcoef(rowvar=False))."""
+    k = _skipna_kernel["corr_matrix"] if skipna else _strict["corr_matrix"]
+    return k(X)
+
+def rolling_mean(x, window: int, *, skipna: bool = False):
+    """Trailing rolling mean. Strict: length n-window+1; `skipna=True`: length n,
+    pandas min_periods=1 semantics."""
+    k = _skipna_kernel["rolling_mean"] if skipna else _strict["rolling_mean"]
+    return k(x, window)
+
+def rolling_std(x, window: int, *, skipna: bool = False):
+    """Trailing rolling sample std (ddof=1). See `rolling_mean` for shape rules."""
+    k = _skipna_kernel["rolling_std"] if skipna else _strict["rolling_std"]
+    return k(x, window)
+
+def rolling_zscore(x, window: int, *, skipna: bool = False):
+    """Rolling standard score within each trailing window."""
+    k = _skipna_kernel["rolling_zscore"] if skipna else _strict["rolling_zscore"]
+    return k(x, window)
+
+def rolling_cov(x, y, window: int, *, skipna: bool = False):
+    """Trailing rolling covariance. `skipna=True` matches pandas
+    rolling(window).cov default semantics (NaN unless the window is complete)."""
+    k = _skipna_kernel["rolling_cov"] if skipna else _strict["rolling_cov"]
+    return k(x, y, window)
+
+def rolling_corr(x, y, window: int, *, skipna: bool = False):
+    """Trailing rolling Pearson correlation. See `rolling_cov` for NaN rules."""
+    k = _skipna_kernel["rolling_corr"] if skipna else _strict["rolling_corr"]
+    return k(x, y, window)
+
+def winsorize(x, *, lower_q: float = 0.05, upper_q: float = 0.95):
+    """Clip tails at the `lower_q` / `upper_q` quantiles (both in [0, 1])."""
+    return _strict["winsorize"](x, lower_q, upper_q)
+
+def t_test_2samp(x, y, *, equal_var: bool = True, alternative: str = "two-sided"):
+    """Two-sample t-test. `equal_var=False` gives Welch's t (scipy semantics)."""
+    return _strict["t_test_2samp"](x, y, equal_var, alternative)
+
+def cohens_d_2samp(x, y, *, pooled: bool = True):
+    """Cohen's d effect size for two samples."""
+    return _strict["cohens_d_2samp"](x, y, pooled)
+
+def hedges_g_2samp(x, y, *, pooled: bool = True):
+    """Hedges' g (small-sample corrected Cohen's d)."""
+    return _strict["hedges_g_2samp"](x, y, pooled)
+
+
+# ======================================================================================
 # Public surface exports (clean names only)
 # ======================================================================================
 __all__ = [

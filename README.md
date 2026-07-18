@@ -90,6 +90,23 @@ passing, 0 compiler warnings**.
   and the crate builds an `rlib` so Rust integration tests and fuzzing can
   link against it.
 
+### Modern facade API (v0.3 layer)
+
+- **One name per statistic; NaN handling is a keyword.** `bs.mean(x, skipna=True)`
+  dispatches to the skip-NaN Rust kernel; the strict and skip-NaN kernels stay
+  separate underneath, so there is no branch in the hot loop. Applies to
+  mean/std/var/median/mad/iqr/zscore/trimmed_mean, cov/corr (scalar, matrix,
+  and rolling), and the rolling reducers.
+- **Keyword defaults everywhere.** `bs.t_test_2samp(x, y)` works bare
+  (pooled, two-sided); options like `equal_var`, `pooled` are keyword-only.
+- **Unit-explicit argument names.** `bs.winsorize(x, lower_q=0.05, upper_q=0.95)`
+  takes quantiles in [0, 1]; `bs.percentile(x, q=95)` keeps numpy's [0, 100]
+  convention — the name tells you the unit.
+- **Optional pandas layer.** `bunker_stats.pandas` provides `cov_df`/`corr_df`
+  (labeled DataFrame results) and Styler helpers (`corr_heatmap`,
+  `zscore_style`, ...). The core package remains numpy-only.
+- All raw `*_np` / `*_skipna` names remain available; nothing breaks.
+
 ---
 
 ## Quick Start
@@ -114,15 +131,29 @@ location, scale = bs.robust_fit(data)   # (3.5, 2.22) vs mean/std (19.17, 38.4)
 signal = np.random.randn(10000)
 smoothed = bs.rolling_median(signal, window=10)
 
-# Statistical inference - comprehensive hypothesis testing
+# NaN handling is a keyword, not a separate function
+noisy = signal.copy(); noisy[::97] = np.nan
+m = bs.mean(noisy, skipna=True)                  # numpy.nanmean semantics
+r = bs.rolling_mean(noisy, window=20, skipna=True)
+
+# Statistical inference - keyword defaults just work
 x = np.random.randn(30)
 y = np.random.randn(25) + 0.5
-result = bs.t_test_2samp(x, y, equal_var=False)  # Welch's t-test
+result = bs.t_test_2samp(x, y)                   # pooled, two-sided defaults
+welch = bs.t_test_2samp(x, y, equal_var=False)  # Welch's t-test
+
+# Quantile arguments carry their unit in the name
+clipped = bs.winsorize(x, lower_q=0.05, upper_q=0.95)
 
 # Matrix operations - fast covariance/correlation
 X = np.random.randn(1000, 10)
 cov = bs.cov_matrix(X)
-corr = bs.corr_matrix(X)
+corr = bs.corr_matrix(X, skipna=True)            # pairwise-complete
+
+# Optional pandas layer: labeled results + Styler visuals
+# import bunker_stats.pandas as bsp
+# C = bsp.corr_df(df)      # DataFrame labeled by column names
+# bsp.corr_heatmap(df)     # pandas Styler heatmap
 
 # Bootstrap confidence intervals
 from bunker_stats.resampling import BootstrapConfig

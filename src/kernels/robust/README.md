@@ -20,6 +20,27 @@ both namespaces.
 
 ---
 
+
+## Using the Python facade
+
+New code should reach these kernels through the `bunker_stats` facade, which
+exposes clean names with keyword arguments. The raw `bunker_stats_rs` names
+documented below remain available and stable; the facade adds ergonomics on
+top of the same kernels:
+
+```python
+import bunker_stats as bs
+
+bs.median(x, skipna=True)          # -> median_skipna kernel
+bs.mad(x)                          # strict: NaN in -> NaN out
+bs.trimmed_mean(x, 0.1, skipna=True)
+```
+
+Where a statistic has strict and skip-NaN variants, the facade exposes ONE
+name with a `skipna=` keyword; `skipna=True` dispatches to the skip-NaN kernel
+documented below (the twin kernels stay separate in Rust, so there is no
+branch inside the hot loop).
+
 ## Module layout
 
 | File | Contents |
