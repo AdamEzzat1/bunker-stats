@@ -294,16 +294,56 @@ fn ks_pvalue_two_sided_finite(n: usize, d: f64) -> f64 {
     (1.0 - cdf).clamp(0.0, 1.0)
 }
 
-/// One-sided asymptotic approximation: P(D_n >= d) ≈ exp(-2 n d^2)
-fn ks_pvalue_asymp_one_sided(n: usize, d: f64) -> f64 {
-    if !d.is_finite() {
+/// Exact one-sided KS survival function (Birnbaum-Tingey / Smirnov):
+///
+///   P(D_n^+ >= d) = d * sum_{j=0}^{floor(n(1-d))} C(n,j) (j/n + d)^(j-1) (1 - d - j/n)^(n-j)
+///
+/// This is what SciPy's `ksone.sf` evaluates for the one-sample one-sided
+/// statistics. Binomial coefficients and powers are combined in log space for
+/// stability at large n.
+fn ks_pvalue_one_sided_exact(n: usize, d: f64) -> f64 {
+    use statrs::function::gamma::ln_gamma;
+
+    if !d.is_finite() || n == 0 {
         return f64::NAN;
     }
     if d <= 0.0 {
         return 1.0;
     }
+    if d >= 1.0 {
+        return 0.0;
+    }
+
     let nf = n as f64;
-    (-2.0 * nf * d * d).exp().clamp(0.0, 1.0)
+    let ln_n_fact = ln_gamma(nf + 1.0);
+    let j_max = (nf * (1.0 - d)).floor() as usize;
+
+    let mut sum = 0.0f64;
+    let mut c = 0.0f64; // Kahan compensation
+    for j in 0..=j_max {
+        let jf = j as f64;
+        let a = jf / nf + d; // > 0
+        let b = 1.0 - d - jf / nf; // >= 0
+        let ln_binom = ln_n_fact - ln_gamma(jf + 1.0) - ln_gamma(nf - jf + 1.0);
+
+        let term = if b == 0.0 {
+            // b^(n-j): zero unless n == j (then b^0 == 1)
+            if j == n {
+                (ln_binom + (jf - 1.0) * a.ln()).exp()
+            } else {
+                0.0
+            }
+        } else {
+            (ln_binom + (jf - 1.0) * a.ln() + (nf - jf) * b.ln()).exp()
+        };
+
+        let y = term - c;
+        let t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
+    }
+
+    (d * sum).clamp(0.0, 1.0)
 }
 
 #[pyfunction]
@@ -357,8 +397,8 @@ pub fn ks_1samp_np(
             (d, ks_pvalue_two_sided_finite(n, d))
         }
         // SciPy: "greater" uses D+; "less" uses D-
-        Alternative::Greater => (d_plus, ks_pvalue_asymp_one_sided(n, d_plus)),
-        Alternative::Less => (d_minus, ks_pvalue_asymp_one_sided(n, d_minus)),
+        Alternative::Greater => (d_plus, ks_pvalue_one_sided_exact(n, d_plus)),
+        Alternative::Less => (d_minus, ks_pvalue_one_sided_exact(n, d_minus)),
     };
 
     let dct = PyDict::new_bound(py);

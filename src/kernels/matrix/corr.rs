@@ -49,7 +49,7 @@ pub fn corr_matrix_from_cov_out(cov: &[f64], p: usize, out: &mut [f64]) {
                 row[j] = if denom == 0.0 || denom.is_nan() {
                     f64::NAN
                 } else {
-                    cov[idx(i, j, p)] / denom
+                    (cov[idx(i, j, p)] / denom).clamp(-1.0, 1.0)
                 };
             }
         });
@@ -74,7 +74,7 @@ pub fn corr_matrix_from_cov_out(cov: &[f64], p: usize, out: &mut [f64]) {
                 let v = if denom == 0.0 || denom.is_nan() {
                     f64::NAN
                 } else {
-                    cov[idx(i, j, p)] / denom
+                    (cov[idx(i, j, p)] / denom).clamp(-1.0, 1.0)
                 };
                 out[idx(i, j, p)] = v;
                 out[idx(j, i, p)] = v;

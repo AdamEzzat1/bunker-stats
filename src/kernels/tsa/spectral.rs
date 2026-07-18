@@ -180,14 +180,14 @@ pub fn welch_psd<'py>(
         .map(|t| 0.5 * (1.0 - (2.0 * PI * t as f64 / nperseg_f).cos()))
         .collect();
     
-    // Window normalization factor
-    let window_norm: f64 = window.iter().map(|w| w * w).sum::<f64>().sqrt();
-    
+    // Window power normalization: sum(w^2)
+    let win_sumsq: f64 = window.iter().map(|w| w * w).sum::<f64>();
+
     // Accumulate PSDs
     let k_max = nperseg / 2;
     let mut psd_sum = vec![0.0; k_max + 1];
     let freqs: Vec<f64> = (0..=k_max).map(|k| k as f64 / nperseg_f).collect();
-    
+
     let mut count = 0;
     for i in 0..n_segments {
         let start = i * step;
@@ -195,34 +195,45 @@ pub fn welch_psd<'py>(
         if end > n {
             break;
         }
-        
+
         let segment = &x_slice[start..end];
-        
+
         // Demean and apply window
         let mean = segment.iter().sum::<f64>() / nperseg_f;
         let mut buffer: Vec<Complex<f64>> = segment.iter()
             .zip(window.iter())
             .map(|(&s, &w)| Complex::new((s - mean) * w, 0.0))
             .collect();
-        
+
         // FFT
         fft.process(&mut buffer);
-        
-        // Accumulate power
-        let scale = 1.0 / (nperseg_f * window_norm * window_norm);
+
+        // Accumulate power with density scaling: |X_k|^2 / (fs * sum(w^2)),
+        // fs = 1. Matches scipy.signal.welch(scaling='density').
+        let scale = 1.0 / win_sumsq;
         for k in 0..=k_max {
             psd_sum[k] += buffer[k].norm_sqr() * scale;
         }
-        
+
         count += 1;
     }
-    
+
     // Average PSDs
     let count_f = count as f64;
     for p in &mut psd_sum {
         *p /= count_f;
     }
-    
+
+    // One-sided spectrum: double every interior bin. DC is never doubled; the
+    // last bin is the Nyquist bin only when nperseg is even, in which case it
+    // is not doubled either (scipy semantics).
+    for k in 1..=k_max {
+        if k == k_max && nperseg % 2 == 0 {
+            continue;
+        }
+        psd_sum[k] *= 2.0;
+    }
+
     Ok((
         PyArray1::from_vec_bound(py, freqs),
         PyArray1::from_vec_bound(py, psd_sum),

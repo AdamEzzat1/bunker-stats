@@ -749,6 +749,10 @@ fn rolling_std_nan_np<'py>(
     }
 
     let mut out = vec![f64::NAN; n];
+    // Shift by a finite constant near the data magnitude: variance is
+    // translation-invariant and the shift prevents catastrophic cancellation
+    // in `sumsq - sum^2/c` on large-offset data (see rolling::engine).
+    let off = first_finite_offset(xs);
     let mut sum = 0.0f64;
     let mut sumsq = 0.0f64;
     let mut cnt = 0usize;
@@ -756,16 +760,18 @@ fn rolling_std_nan_np<'py>(
     for i in 0..n {
         let x_new = xs[i];
         if !x_new.is_nan() {
-            sum += x_new;
-            sumsq += x_new * x_new;
+            let xs_ = x_new - off;
+            sum += xs_;
+            sumsq += xs_ * xs_;
             cnt += 1;
         }
 
         if i >= window {
             let x_old = xs[i - window];
             if !x_old.is_nan() {
-                sum -= x_old;
-                sumsq -= x_old * x_old;
+                let xs_ = x_old - off;
+                sum -= xs_;
+                sumsq -= xs_ * xs_;
                 cnt -= 1;
             }
         }
@@ -794,6 +800,9 @@ fn rolling_zscore_nan_np<'py>(
     }
 
     let mut out = vec![f64::NAN; n];
+    // Offset shift for cancellation safety (see rolling_std_nan_np). The
+    // z-score is invariant under a common shift of the data and the mean.
+    let off = first_finite_offset(xs);
     let mut sum = 0.0f64;
     let mut sumsq = 0.0f64;
     let mut cnt = 0usize;
@@ -801,16 +810,18 @@ fn rolling_zscore_nan_np<'py>(
     for i in 0..n {
         let x_new = xs[i];
         if !x_new.is_nan() {
-            sum += x_new;
-            sumsq += x_new * x_new;
+            let xs_ = x_new - off;
+            sum += xs_;
+            sumsq += xs_ * xs_;
             cnt += 1;
         }
 
         if i >= window {
             let x_old = xs[i - window];
             if !x_old.is_nan() {
-                sum -= x_old;
-                sumsq -= x_old * x_old;
+                let xs_ = x_old - off;
+                sum -= xs_;
+                sumsq -= xs_ * xs_;
                 cnt -= 1;
             }
         }
@@ -823,11 +834,11 @@ fn rolling_zscore_nan_np<'py>(
 
         if cnt >= 2 {
             let c = cnt as f64;
-            let mean = sum / c;
+            let mean_shifted = sum / c;
             let var = (sumsq - (sum * sum) / c) / (c - 1.0);
             let std = var.max(0.0).sqrt();
             out[i] = if std > 0.0 && std.is_finite() {
-                (x - mean) / std
+                ((x - off) - mean_shifted) / std
             } else {
                 f64::NAN
             };
@@ -1234,6 +1245,20 @@ fn demean_with_signs_np<'py>(
 // Covariance / correlation (non-NaN)
 // ======================
 
+/// First finite element (or 0.0). Covariance/correlation are invariant under a
+/// constant shift of each series, so shifting by a value near the data
+/// magnitude keeps the one-pass accumulators from catastrophically cancelling
+/// on large-offset data (same pattern as kernels::rolling::covcorr).
+#[inline]
+fn first_finite_offset(v: &[f64]) -> f64 {
+    for &x in v {
+        if x.is_finite() {
+            return x;
+        }
+    }
+    0.0
+}
+
 fn cov_impl(xs: &[f64], ys: &[f64]) -> f64 {
     let n = xs.len().min(ys.len());
     if n <= 1 {
@@ -1241,6 +1266,7 @@ fn cov_impl(xs: &[f64], ys: &[f64]) -> f64 {
     }
     let xs = &xs[..n];
     let ys = &ys[..n];
+    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
 
     // Strict: if any NaN is present in either series, return NaN (matches prior behavior).
     let mut sum_x = 0.0f64;
@@ -1253,6 +1279,8 @@ fn cov_impl(xs: &[f64], ys: &[f64]) -> f64 {
         if x.is_nan() || y.is_nan() {
             return f64::NAN;
         }
+        let x = x - ox;
+        let y = y - oy;
         sum_x += x;
         sum_y += y;
         sum_xy += x * y;
@@ -1275,6 +1303,7 @@ fn corr_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> 
     if n <= 1 {
         return Ok(f64::NAN);
     }
+    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
 
     // Strict: if any NaN is present in either series, return NaN (matches prior behavior).
     let mut sum_x = 0.0f64;
@@ -1289,6 +1318,8 @@ fn corr_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> 
         if x.is_nan() || y.is_nan() {
             return Ok(f64::NAN);
         }
+        let x = x - ox;
+        let y = y - oy;
         sum_x += x;
         sum_y += y;
         sum_xx += x * x;
@@ -1306,7 +1337,7 @@ fn corr_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> 
     if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
         return Ok(f64::NAN);
     }
-    Ok(cov / (varx * vary).sqrt())
+    Ok((cov / (varx * vary).sqrt()).clamp(-1.0, 1.0))
 }
 
 // ======================
@@ -1689,6 +1720,10 @@ fn rolling_corr_np<'py>(
     }
     let mut out = Vec::with_capacity(n - window + 1);
 
+    // Offset shift (correlation is translation-invariant) to avoid
+    // catastrophic cancellation on large-offset data.
+    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
+
     let mut sum_x = 0.0;
     let mut sum_y = 0.0;
     let mut sum_x2 = 0.0;
@@ -1696,8 +1731,8 @@ fn rolling_corr_np<'py>(
     let mut sum_xy = 0.0;
 
     for i in 0..window {
-        let xi = xs[i];
-        let yi = ys[i];
+        let xi = xs[i] - ox;
+        let yi = ys[i] - oy;
         sum_x += xi;
         sum_y += yi;
         sum_x2 += xi * xi;
@@ -1707,10 +1742,10 @@ fn rolling_corr_np<'py>(
 
     for i in (window - 1)..n {
         if i > window - 1 {
-            let xi_new = xs[i];
-            let yi_new = ys[i];
-            let xi_old = xs[i - window];
-            let yi_old = ys[i - window];
+            let xi_new = xs[i] - ox;
+            let yi_new = ys[i] - oy;
+            let xi_old = xs[i - window] - ox;
+            let yi_old = ys[i - window] - oy;
 
             sum_x += xi_new - xi_old;
             sum_y += yi_new - yi_old;
@@ -1727,7 +1762,11 @@ fn rolling_corr_np<'py>(
         let cov = (sum_xy - w * mx * my) / ((window - 1) as f64);
 
         let denom = (var_x.max(0.0).sqrt()) * (var_y.max(0.0).sqrt());
-        out.push(if denom == 0.0 || denom.is_nan() { f64::NAN } else { cov / denom });
+        out.push(if denom == 0.0 || denom.is_nan() {
+            f64::NAN
+        } else {
+            (cov / denom).clamp(-1.0, 1.0)
+        });
     }
 
     Ok(PyArray1::from_vec_bound(py, out))
@@ -1777,6 +1816,7 @@ pub fn cov_nan_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResul
     }
 
     // Skipna: drop pairs where either value is NaN.
+    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
     let mut count = 0usize;
     let mut sum_x = 0.0f64;
     let mut sum_y = 0.0f64;
@@ -1788,6 +1828,8 @@ pub fn cov_nan_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResul
         if xi.is_nan() || yi.is_nan() {
             continue;
         }
+        let xi = xi - ox;
+        let yi = yi - oy;
         count += 1;
         sum_x += xi;
         sum_y += yi;
@@ -1812,6 +1854,7 @@ pub fn corr_nan_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResu
     }
 
     // Skipna: drop pairs where either value is NaN.
+    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
     let mut count = 0usize;
     let mut sum_x = 0.0f64;
     let mut sum_y = 0.0f64;
@@ -1825,6 +1868,8 @@ pub fn corr_nan_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResu
         if x.is_nan() || y.is_nan() {
             continue;
         }
+        let x = x - ox;
+        let y = y - oy;
         count += 1;
         sum_x += x;
         sum_y += y;
@@ -1847,7 +1892,7 @@ pub fn corr_nan_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResu
     if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
         return Ok(f64::NAN);
     }
-    Ok(cov / (varx * vary).sqrt())
+    Ok((cov / (varx * vary).sqrt()).clamp(-1.0, 1.0))
 }
 // ======================================================================================
 // Rolling skipna pair-state (used for rolling cov/corr/beta/linreg)
@@ -1924,7 +1969,7 @@ impl RollingPairState {
         if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
             return f64::NAN;
         }
-        cov / (varx * vary).sqrt()
+        (cov / (varx * vary).sqrt()).clamp(-1.0, 1.0)
     }
 }
 
@@ -1953,16 +1998,19 @@ pub fn rolling_cov_nan_np<'py>(
     // init window. NaN pairs are dropped by add_pair; requiring a FULL window
     // of valid pairs below matches pandas rolling(...).cov's default
     // min_periods=window (NaN whenever any pair in the window is missing).
+    // Values are shifted by a finite offset for cancellation safety
+    // (covariance is translation-invariant).
+    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
     let mut st = RollingPairState::default();
     for i in 0..window {
-        st.add_pair(xs[i], ys[i]);
+        st.add_pair(xs[i] - ox, ys[i] - oy);
     }
     out[0] = if st.count == window { st.cov() } else { f64::NAN };
 
     // slide
     for i in window..n {
-        st.remove_pair(xs[i - window], ys[i - window]);
-        st.add_pair(xs[i], ys[i]);
+        st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
+        st.add_pair(xs[i] - ox, ys[i] - oy);
         out[i - window + 1] = if st.count == window { st.cov() } else { f64::NAN };
     }
 
@@ -1991,17 +2039,19 @@ pub fn rolling_corr_nan_np<'py>(
     let mut out = vec![f64::NAN; out_len];
 
     // init window. Full-window requirement mirrors pandas rolling(...).corr
-    // default min_periods=window (see rolling_cov_nan_np).
+    // default min_periods=window (see rolling_cov_nan_np). Values are shifted
+    // by a finite offset for cancellation safety.
+    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
     let mut st = RollingPairState::default();
     for i in 0..window {
-        st.add_pair(xs[i], ys[i]);
+        st.add_pair(xs[i] - ox, ys[i] - oy);
     }
     out[0] = if st.count == window { st.corr() } else { f64::NAN };
 
     // slide
     for i in window..n {
-        st.remove_pair(xs[i - window], ys[i - window]);
-        st.add_pair(xs[i], ys[i]);
+        st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
+        st.add_pair(xs[i] - ox, ys[i] - oy);
         out[i - window + 1] = if st.count == window { st.corr() } else { f64::NAN };
     }
 
@@ -2064,16 +2114,19 @@ pub fn rolling_beta_skipna<'py>(
     let out_len = n - window + 1;
     let mut out = vec![f64::NAN; out_len];
 
+    // Slope (cov/var) is translation-invariant, so shifted accumulation is
+    // exact and avoids catastrophic cancellation on large-offset data.
+    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
     let mut st = RollingPairState::default();
     for i in 0..window {
-        st.add_pair(xs[i], ys[i]);
+        st.add_pair(xs[i] - ox, ys[i] - oy);
     }
     let varx0 = st.var_x();
     out[0] = if varx0 <= 0.0 || !varx0.is_finite() { f64::NAN } else { st.cov() / varx0 };
 
     for i in window..n {
-        st.remove_pair(xs[i - window], ys[i - window]);
-        st.add_pair(xs[i], ys[i]);
+        st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
+        st.add_pair(xs[i] - ox, ys[i] - oy);
 
         let varx = st.var_x();
         out[i - window + 1] = if varx <= 0.0 || !varx.is_finite() { f64::NAN } else { st.cov() / varx };
@@ -2107,9 +2160,13 @@ pub fn rolling_linreg_skipna<'py>(
     let mut slope = vec![f64::NAN; out_len];
     let mut intercept = vec![f64::NAN; out_len];
 
+    // Shifted accumulation for cancellation safety. The slope is
+    // translation-invariant; the intercept of the shifted fit is unshifted via
+    // a = a_shifted + oy - b*ox.
+    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
     let mut st = RollingPairState::default();
     for i in 0..window {
-        st.add_pair(xs[i], ys[i]);
+        st.add_pair(xs[i] - ox, ys[i] - oy);
     }
 
     // window 0
@@ -2120,7 +2177,7 @@ pub fn rolling_linreg_skipna<'py>(
         if sxx > 0.0 && sxx.is_finite() {
             let sxy = (st.sum_xy - (st.sum_x * st.sum_y) / c) / denom; // cov_xy
             let b = sxy / sxx;
-            let a = (st.sum_y / c) - b * (st.sum_x / c);
+            let a = (st.sum_y / c) - b * (st.sum_x / c) + oy - b * ox;
             slope[0] = b;
             intercept[0] = a;
         }
@@ -2128,8 +2185,8 @@ pub fn rolling_linreg_skipna<'py>(
 
     // slide
     for i in window..n {
-        st.remove_pair(xs[i - window], ys[i - window]);
-        st.add_pair(xs[i], ys[i]);
+        st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
+        st.add_pair(xs[i] - ox, ys[i] - oy);
 
         let o = i - window + 1;
         if st.count < 2 {
@@ -2144,7 +2201,7 @@ pub fn rolling_linreg_skipna<'py>(
         }
         let sxy = (st.sum_xy - (st.sum_x * st.sum_y) / c) / denom;
         let b = sxy / sxx;
-        let a = (st.sum_y / c) - b * (st.sum_x / c);
+        let a = (st.sum_y / c) - b * (st.sum_x / c) + oy - b * ox;
 
         slope[o] = b;
         intercept[o] = a;
@@ -2160,6 +2217,97 @@ pub fn rolling_linreg_skipna<'py>(
 #[pyfunction]
 fn pad_nan_np<'py>(py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyArray1<f64>>> {
     Ok(PyArray1::from_vec_bound(py, vec![f64::NAN; n]))
+}
+
+// ======================
+// Gaussian KDE
+// ======================
+
+/// Gaussian kernel density estimate evaluated on a regular grid.
+///
+/// Bandwidth defaults to Scott's rule, h = n^(-1/5) * std(x, ddof=1), matching
+/// scipy.stats.gaussian_kde's default for 1-D data. The grid spans
+/// [min - 3h, max + 3h] with `points` samples.
+///
+/// Python signature:
+///     kde_gaussian(x, points=200, bandwidth=None) -> (grid, density)
+#[pyfunction]
+#[pyo3(signature = (x, points=200, bandwidth=None))]
+fn kde_gaussian_np<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<f64>,
+    points: usize,
+    bandwidth: Option<f64>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+    let xs = x.as_slice()?;
+    let n = xs.len();
+
+    if points == 0 {
+        return Err(PyValueError::new_err("points must be >= 1"));
+    }
+    if n == 0 {
+        return Err(PyValueError::new_err("x must have at least 1 element"));
+    }
+    if xs.iter().any(|v| !v.is_finite()) {
+        return Err(PyValueError::new_err("x contains NaN or Inf"));
+    }
+    if let Some(h) = bandwidth {
+        if !(h > 0.0) || !h.is_finite() {
+            return Err(PyValueError::new_err("bandwidth must be a positive finite number"));
+        }
+    }
+
+    let h = match bandwidth {
+        Some(h) => h,
+        None => {
+            let s = std_slice(xs);
+            if !(s > 0.0) || !s.is_finite() {
+                return Err(PyValueError::new_err(
+                    "cannot infer a bandwidth from constant or singleton data; pass bandwidth explicitly",
+                ));
+            }
+            (n as f64).powf(-0.2) * s
+        }
+    };
+
+    let mut mn = xs[0];
+    let mut mx = xs[0];
+    for &v in &xs[1..] {
+        if v < mn {
+            mn = v;
+        }
+        if v > mx {
+            mx = v;
+        }
+    }
+    let lo = mn - 3.0 * h;
+    let hi = mx + 3.0 * h;
+
+    let grid: Vec<f64> = if points == 1 {
+        vec![0.5 * (lo + hi)]
+    } else {
+        let step = (hi - lo) / ((points - 1) as f64);
+        (0..points).map(|i| lo + step * (i as f64)).collect()
+    };
+
+    let inv_h = 1.0 / h;
+    let norm = 1.0 / ((n as f64) * h * (2.0 * std::f64::consts::PI).sqrt());
+    let density: Vec<f64> = grid
+        .iter()
+        .map(|&g| {
+            let mut acc = 0.0f64;
+            for &xi in xs {
+                let z = (g - xi) * inv_h;
+                acc += (-0.5 * z * z).exp();
+            }
+            acc * norm
+        })
+        .collect();
+
+    Ok((
+        PyArray1::from_vec_bound(py, grid),
+        PyArray1::from_vec_bound(py, density),
+    ))
 }
 
 // ======================
@@ -2593,7 +2741,7 @@ m.add_function(wrap_pyfunction!(rolling_linreg_skipna, m)?)?;
 
 
     // KDE
-    //m.add_function(wrap_pyfunction!(kde_gaussian_np, m)?)?;
+    m.add_function(wrap_pyfunction!(kde_gaussian_np, m)?)?;
 
     // ============================================================================
 	// INFERENCE MODULE - OPTIMIZED VERSION
@@ -2694,6 +2842,16 @@ m.add_function(wrap_pyfunction!(rolling_linreg_skipna, m)?)?;
     m.add_function(wrap_pyfunction!(rolling_autocorr, m)?)?;
     m.add_function(wrap_pyfunction!(rolling_correlation, m)?)?;
     m.add_function(wrap_pyfunction!(rolling_autocorr_multi, m)?)?;
+
+    // tsa - O(1) rolling helpers (registered under their kernel names; the
+    // rolling_mean/std/var/zscore variants in the same module stay unregistered
+    // because those names are already taken by the strict kernels above)
+    m.add_function(wrap_pyfunction!(kernels::tsa::rolling::rolling_min, m)?)?;
+    m.add_function(wrap_pyfunction!(kernels::tsa::rolling::rolling_max, m)?)?;
+    m.add_function(wrap_pyfunction!(kernels::tsa::rolling::rolling_range, m)?)?;
+    m.add_function(wrap_pyfunction!(kernels::tsa::rolling::rolling_cv, m)?)?;
+    m.add_function(wrap_pyfunction!(kernels::tsa::rolling::rolling_count_above, m)?)?;
+    m.add_function(wrap_pyfunction!(kernels::tsa::rolling::rolling_pct_above, m)?)?;
     
     // tsa - spectral
     m.add_function(wrap_pyfunction!(periodogram, m)?)?;

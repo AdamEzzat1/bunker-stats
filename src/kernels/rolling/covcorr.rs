@@ -90,7 +90,7 @@ fn corr_from_state(s: &RollingPairState) -> f64 {
     if denom == 0.0 || denom.is_nan() {
         return f64::NAN;
     }
-    cov / denom
+    (cov / denom).clamp(-1.0, 1.0)
 }
 
 /// O(n) rolling sample covariance with pairwise-NaN skipping.

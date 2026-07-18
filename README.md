@@ -23,6 +23,49 @@ License: See LICENSE file
 
 ---
 
+## Release Notes — 0.3.0 consistency changes
+
+A correctness-and-consistency pass. Every change below is pinned by a
+regression test (see `tests/test_hardening_v030.py`).
+
+### Numeric bug fixes (behavior changes)
+
+- **Catastrophic cancellation eliminated in one-pass covariance/correlation
+  kernels.** `cov`/`corr`, `cov_skipna`/`corr_skipna`,
+  `cov_matrix_skipna`/`corr_matrix_skipna`, the NaN-aware rolling
+  `std`/`zscore` paths, and the strict `rolling_cov`/`rolling_corr` kernels
+  now shift data by the first finite value (per series / per column) before
+  accumulating. Second moments are translation-invariant, so results are
+  mathematically identical but no longer lose all precision on large-offset
+  data (e.g. series centered near 1e8 or 1e12). `rolling_beta_skipna` and
+  `rolling_linreg_skipna` use the same shift (the linreg intercept is
+  un-shifted exactly). Verified against two-pass numpy references at offsets
+  1e8 and 1e12 — note that pandas' own one-pass rolling kernels fail this test.
+- **Correlation outputs are clamped to [-1, 1]** across scalar, matrix and
+  rolling correlation kernels; round-off can no longer produce |r| slightly
+  above 1.
+- **`welch_psd` / `bartlett_psd` now produce true density-scaled one-sided
+  spectra**: scale is `1/(fs·Σw²)` with interior bins doubled (the Nyquist bin
+  is not doubled for even `nperseg`). Matches `scipy.signal.welch` to ~1e-15
+  relative. Previously the output was neither 'density' nor 'spectrum' scaled
+  and interior bins were not doubled.
+- **`ks_1samp` one-sided p-values are now exact** (Birnbaum–Tingey / Smirnov
+  formula, evaluated in log space), matching
+  `scipy.stats.ks_1samp(alternative="greater"/"less")`. Previously a rough
+  `exp(-2nD²)` asymptotic was used.
+- **`exp_cdf` uses `-expm1(-λx)`**, keeping full precision for tiny arguments
+  (`exp_cdf(1e-18) == 1e-18` instead of `0.0`).
+
+### Previously unregistered functions now exported
+
+`rolling_min`, `rolling_max`, `rolling_range`, `rolling_cv`,
+`rolling_count_above`, `rolling_pct_above` (O(1) sliding kernels) and
+`kde_gaussian` (Gaussian KDE with Scott's-rule bandwidth, parity with
+`scipy.stats.gaussian_kde`) are now registered in the extension module. Every
+name in the facade's `__all__` now resolves to a callable.
+
+---
+
 ## Release Notes — 0.2.9 Hardening
 
 A full-codebase review and hardening pass. Every fix below is pinned by a

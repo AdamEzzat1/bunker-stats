@@ -239,10 +239,28 @@ pub fn cov_matrix_skipna_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
         return;
     }
 
+    // Per-column translation offsets (first finite value in each column).
+    // Covariance is invariant under a constant shift of each column, and
+    // shifting keeps the one-pass `sum_xy - sum_x*sum_y/m` formula from
+    // catastrophically cancelling on large-offset data.
+    let mut offs = vec![0.0f64; p];
+    for c in 0..p {
+        for r in 0..n {
+            let v = x[r * p + c];
+            if v.is_finite() {
+                offs[c] = v;
+                break;
+            }
+        }
+    }
+    let offs = &offs;
+
     #[cfg(feature = "parallel")]
     {
         out.par_chunks_mut(p).enumerate().for_each(|(i, row)| {
+            let oi = offs[i];
             for j in i..p {
+                let oj = offs[j];
                 let mut m: usize = 0;
                 let mut sum_x = 0.0f64;
                 let mut sum_y = 0.0f64;
@@ -253,6 +271,8 @@ pub fn cov_matrix_skipna_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
                     let xi = x[base + i];
                     let yj = x[base + j];
                     if xi.is_finite() && yj.is_finite() {
+                        let xi = xi - oi;
+                        let yj = yj - oj;
                         m += 1;
                         sum_x += xi;
                         sum_y += yj;
@@ -280,7 +300,9 @@ pub fn cov_matrix_skipna_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
     #[cfg(not(feature = "parallel"))]
     {
         for i in 0..p {
+            let oi = offs[i];
             for j in i..p {
+                let oj = offs[j];
                 let mut m: usize = 0;
                 let mut sum_x = 0.0f64;
                 let mut sum_y = 0.0f64;
@@ -291,6 +313,8 @@ pub fn cov_matrix_skipna_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
                     let xi = x[base + i];
                     let yj = x[base + j];
                     if xi.is_finite() && yj.is_finite() {
+                        let xi = xi - oi;
+                        let yj = yj - oj;
                         m += 1;
                         sum_x += xi;
                         sum_y += yj;

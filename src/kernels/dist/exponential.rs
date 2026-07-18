@@ -78,7 +78,9 @@ pub fn exp_cdf<'py>(
 
     let mut out = vec![0.0_f64; n];
     for (i, &v) in x.iter().enumerate() {
-        out[i] = if v < 0.0 { 0.0 } else { 1.0 - (-lam * v).exp() };
+        // -expm1(-lam*x) keeps full precision for tiny lam*x, where
+        // 1 - exp(-lam*x) would round to 0.
+        out[i] = if v < 0.0 { 0.0 } else { -(-lam * v).exp_m1() };
     }
     Ok(PyArray1::from_vec_bound(py, out))
 }
