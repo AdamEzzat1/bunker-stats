@@ -71,6 +71,10 @@ passing, 0 compiler warnings**.
   convention).
 - **NaN-aware rolling cov/corr** now match pandas `min_periods=window`
   semantics.
+- **`rolling_autocorr_multi`** wrote its output buffer column-major but
+  reshaped it row-major, scrambling the matrix whenever more than one lag was
+  requested (single-lag calls were coincidentally correct). Each column `j`
+  now equals `rolling_autocorr(x, lags[j], window)` exactly.
 
 ### Test coverage & tooling
 
