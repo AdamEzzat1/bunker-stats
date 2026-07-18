@@ -539,6 +539,31 @@ class TestRemaining:
         out = b.rolling_multi_axis0_np(X, w)
         assert all(np.asarray(a).shape == (X.shape[0] - w + 1, X.shape[1]) for a in out)
 
+    def test_rolling_autocorr_multi_row_major(self):
+        # Regression: the multi-lag output buffer was written column-major but
+        # reshaped row-major, scrambling results whenever >1 lag was requested
+        # (single-lag calls coincidentally matched). Verify each column against
+        # a per-window recompute.
+        x = _data(60)
+        w, lags = 12, [1, 2, 3]
+        out = np.asarray(b.rolling_autocorr_multi(x, lags, w))
+        assert out.shape == (len(x) - w + 1, len(lags))
+        for row, start in enumerate(range(len(x) - w + 1)):
+            win = x[start:start + w]
+            d = win - win.mean()
+            denom = np.sum(d * d)
+            for col, lag in enumerate(lags):
+                ref = np.sum(d[lag:] * d[:-lag]) / denom
+                assert np.isclose(out[row, col], ref, atol=1e-12), (row, lag)
+
+    def test_matrix_accepts_fortran_order(self):
+        # Regression: np.asfortranarray input hit an expect() abort in
+        # extract_mat_f64 (to_owned() keeps F-layout, as_slice() -> None).
+        X = RNG.normal(size=(30, 4))
+        XF = np.asfortranarray(X)
+        assert np.allclose(np.asarray(b.cov_matrix_np(XF)), np.asarray(b.cov_matrix_np(X)))
+        assert np.allclose(np.asarray(b.corr_matrix_np(XF)), np.asarray(b.corr_matrix_np(X)))
+
     def test_rolling_zscore_nan_full_length(self):
         # NaN-aware rolling zscore keeps length n (min_periods warm-up -> NaN);
         # semantics of the per-window standardization aren't documented, so pin

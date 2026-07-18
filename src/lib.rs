@@ -1319,16 +1319,18 @@ fn extract_mat_f64<'py>(x: &Bound<'py, PyAny>) -> PyResult<(Vec<f64>, usize, usi
         let arr = x64.as_array();
         let (n_rows, n_cols) = (arr.shape()[0], arr.shape()[1]);
 
-        let owned;
-        let xs: &[f64] = match arr.as_slice() {
-            Some(s) => s,
-            None => {
-                owned = arr.to_owned();
-                owned.as_slice().expect("owned ndarray must be contiguous")
-            }
+        // C-contiguous input: straight copy. Anything else (Fortran-ordered,
+        // sliced/strided views): collect in LOGICAL row-major order via iter().
+        // The previous fallback used to_owned().as_slice().expect(..), but
+        // ndarray's to_owned() preserves Fortran layout for F-contiguous
+        // sources, so as_slice() returned None and the expect() aborted the
+        // interpreter (panic="abort") on np.asfortranarray input.
+        let xs: Vec<f64> = match arr.as_slice() {
+            Some(s) => s.to_vec(),
+            None => arr.iter().copied().collect(),
         };
-        
-        return Ok((xs.to_vec(), n_rows, n_cols));
+
+        return Ok((xs, n_rows, n_cols));
     }
 
     // Accept float32 by upcasting to f64

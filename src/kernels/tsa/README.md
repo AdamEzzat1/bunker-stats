@@ -1,478 +1,657 @@
-# Time Series Analysis Module
+# Time-Series Analysis (TSA) Module
 
-## Overview
+Rust kernels (PyO3/NumPy bindings) for time-series statistics: unit-root and
+stationarity testing, serial-correlation diagnostics, autocorrelation and
+partial-autocorrelation estimation, spectral analysis, and rolling-window
+correlation measures.
 
-The Time Series Analysis (TSA) module is a high-performance Rust implementation with Python bindings providing comprehensive statistical tools for analyzing temporal data. Built for bunker-stats v0.2, this module delivers production-ready implementations of correlation analysis, spectral methods, diagnostic tests, and stationarity detection.
+All functions accept 1-D `numpy.ndarray` of `float64` and are exposed at the
+top level of the package:
 
-## Current Status: v0.2
+```python
+import numpy as np
+import bunker_stats as bs          # Python facade (re-exports everything below)
+# or: import bunker_stats_rs as b  # compiled extension module directly
 
-**Test Results:** 45/47 tests passing (95.7% pass rate)
+stat, pvalue = bs.adf_test(x)
+```
 
-**Test Breakdown:**
-- ✅ **ACF Tests** (4/4) - 100%
-- ✅ **PACF Tests** (5/5) - 100%
-- ✅ **ACF Helper Functions** (3/3) - 100%
-- ✅ **Spectral Analysis** (11/11) - 100%
-- ✅ **Diagnostic Tests** (6/6) - 100%
-- ⚠️ **Stationarity Tests** (7/10)
-  - ✅ `test_adf_stationary`
-  - ✅ `test_adf_random_walk`
-  - ❌ `test_kpss_stationary` (FAILED - stat: 0.1948 vs expected: 0.1797 ±0.009)
-  - ✅ `test_kpss_random_walk`
-  - ❌ `test_variance_ratio_test` (FAILED - VR: 0.571 vs expected: 0.8-1.2)
-  - ✅ `test_integration_order_test`
-  - ✅ `test_trend_stationarity_test`
-  - ✅ `test_seasonal_diff_test`
-  - ✅ `test_seasonal_unit_root_test`
-  - ⚠️ `test_zivot_andrews_test` (HANGS - infinite loop or excessive computation)
-- ✅ **Rolling Operations** (3/5)
-  - ✅ `test_rolling_autocorr`
-  - ✅ `test_rolling_correlation`
-  - ✅ `test_rolling_autocorr_multi`
-  - ⏭️ `test_rolling_min_max` (SKIPPED - not yet integrated)
-  - ⏭️ `test_rolling_range` (SKIPPED - not yet integrated)
-- ✅ **Performance Benchmarks** (3/3) - 100%
-- ✅ **Integration Tests** (3/3) - 100%
+The only function not re-exported by the facade is `kpss_test_debug`, which is
+available on the compiled module `bunker_stats_rs` only.
 
-**Known Issues:**
-- 2 test failures requiring algorithmic corrections
-- 1 test hangs (requires optimization or algorithm redesign)
-- 2 features not yet integrated (rolling min/max operations)
+Source layout:
 
-**v0.3 Roadmap:** 
-- 🎯 Fix KPSS test statistic calculation (8.4% error vs statsmodels)
-- 🎯 Correct variance ratio test implementation
-- 🎯 Optimize Zivot-Andrews test to complete in reasonable time
-- 🎯 Integrate rolling min/max/range operations
-- 🎯 Achieve **100% test pass rate (50/50 tests)**
+| File | Contents |
+|---|---|
+| `stationarity.rs` | ADF, KPSS, Phillips-Perron, variance ratio, Zivot-Andrews, integration-order and seasonal helpers |
+| `diagnostics.rs` | Ljung-Box, Box-Pierce, Breusch-Godfrey, Durbin-Watson, runs test, ACF zero crossing |
+| `acf_pacf.rs` | ACF, ACovF, ACF confidence bands, CCF, four PACF algorithms |
+| `spectral.rs` | Periodogram, Welch/Bartlett PSD, spectral descriptors, band power |
+| `rolling_autocorr.rs` | Rolling autocorrelation and rolling correlation |
+| `rolling.rs` | Work-in-progress rolling statistics — **not registered in the Python API** |
 
 ---
 
-## Features
+## Function summary
 
-### 1. Autocorrelation & Partial Autocorrelation ✅ FULLY TESTED
+### Stationarity and unit-root tests
 
-High-performance correlation structure analysis with multiple algorithmic implementations.
+| Function | Signature | Returns |
+|---|---|---|
+| `adf_test` | `(x, regression="c", max_lag=None)` | `(statistic, pvalue)` |
+| `kpss_test` | `(x, regression="c", max_lag=None)` | `(statistic, pvalue)` |
+| `pp_test` | `(x, regression="c")` | `(statistic, pvalue)` |
+| `variance_ratio_test` | `(x, lags=2)` | `(vr, z_score, pvalue)` |
+| `zivot_andrews_test` | `(x, max_lag=None)` | `(statistic, breakpoint_index, pvalue)` |
+| `trend_stationarity_test` | `(x)` | `(statistic, pvalue, is_stationary)` |
+| `integration_order_test` | `(x)` | `(is_i0, is_i1, adf_level, adf_diff1)` |
+| `seasonal_diff_test` | `(x, period=12)` | `(statistic, pvalue, is_stationary)` |
+| `seasonal_unit_root_test` | `(x, period=12)` | `list[(lag, statistic, pvalue)]` |
+| `kpss_test_debug` | `(x, regression="c", max_lag=None)` | `(statistic, pvalue)` + stderr trace |
 
-#### Core Functions
+### Serial-correlation diagnostics
 
-**`acf(x, nlags=40)`**
-```python
-import bunker_stats as bs
+| Function | Signature | Returns |
+|---|---|---|
+| `ljung_box` | `(x, lags=20)` | `(statistic, pvalue)` |
+| `box_pierce` | `(x, lags=20)` | `(statistic, pvalue)` |
+| `bg_test` | `(resid, max_lag=5)` | `(statistic, pvalue)` |
+| `durbin_watson` | `(x)` | `float` in `[0, 4]` |
+| `runs_test` | `(x)` | `(n_runs, z_score, pvalue)` |
+| `acf_zero_crossing` | `(x, max_lag=100)` | `int` or `None` |
 
-# Autocorrelation function up to 40 lags
-acf_values = bs.acf(data, nlags=40)
-```
-Computes autocorrelation using optimized single-pass demeaning and variance calculation. **Validated against statsmodels with high precision.**
+### Autocorrelation / partial autocorrelation
 
-**`pacf(x, nlags=40)`**
-```python
-# Partial autocorrelation via Levinson-Durbin (O(k²))
-pacf_values = bs.pacf(data, nlags=40)
-```
-Default PACF implementation using Levinson-Durbin recursion, exploiting Toeplitz structure for superior performance over generic matrix solvers. **Validated against statsmodels.**
+| Function | Signature | Returns |
+|---|---|---|
+| `acf` | `(x, nlags=40)` | `ndarray`, length `nlags+1` |
+| `acovf` | `(x, nlags=40)` | `ndarray`, length `nlags+1` |
+| `acf_with_ci` | `(x, nlags=40, alpha=0.05)` | `(acf, lower, upper)` arrays |
+| `ccf` | `(x, y, nlags=40)` | `ndarray`, length `2*nlags+1` |
+| `pacf` | `(x, nlags=40)` | `ndarray`, length `nlags+1` |
+| `pacf_yw` | `(x, nlags=40)` | `ndarray`, length `nlags+1` |
+| `pacf_innovations` | `(x, nlags=40)` | `ndarray`, length `nlags+1` |
+| `pacf_burg` | `(x, nlags=40)` | `ndarray`, length `nlags+1` |
 
-**`pacf_yw(x, nlags=40)`**
-```python
-# Alternative PACF using Yule-Walker equations
-pacf_yw_values = bs.pacf_yw(data, nlags=40)
-```
-Fallback implementation for compatibility and cross-validation. **Tested for consistency with Levinson-Durbin.**
+### Spectral analysis
 
-**`pacf_innovations(x, nlags=40)`**
-```python
-# PACF via innovations algorithm (numerically stable)
-pacf_innov = bs.pacf_innovations(data, nlags=40)
-```
-Numerically stable alternative for ill-conditioned problems. **Validated across multiple algorithms.**
+| Function | Signature | Returns |
+|---|---|---|
+| `periodogram` | `(x)` | `(freqs, power)` arrays |
+| `welch_psd` | `(x, nperseg=256, noverlap=None)` | `(freqs, psd)` arrays |
+| `bartlett_psd` | `(x, nperseg=256)` | `(freqs, psd)` arrays |
+| `cumulative_periodogram` | `(x)` | `(freqs, cumulative_power)` arrays |
+| `dominant_frequency` | `(x)` | `float` |
+| `spectral_entropy` | `(x)` | `float` (nats) |
+| `spectral_peaks` | `(x, n_peaks=5, min_height=0.0)` | `(freqs, powers)` arrays |
+| `spectral_flatness` | `(x)` | `float` in `(0, 1]` |
+| `spectral_centroid` | `(x)` | `float` |
+| `spectral_rolloff` | `(x, percentile=0.85)` | `float` |
+| `band_power` | `(x, freq_low=0.0, freq_high=0.5)` | `float` |
 
-**`pacf_burg(x, nlags=40)`**
-```python
-# PACF via Burg's maximum entropy method
-pacf_burg_values = bs.pacf_burg(data, nlags=40)
-```
-Optimal for short time series; maximum entropy method. **Tested for edge cases and algorithm comparison.**
+### Rolling-window measures
 
-#### Helper Functions ✅ FULLY TESTED
-
-**`acovf(x, nlags=40)`**
-```python
-# Autocovariance function (unnormalized ACF)
-acovf_values = bs.acovf(data, nlags=40)
-```
-
-**`acf_with_ci(x, nlags=40, alpha=0.05)`**
-```python
-# ACF with Bartlett confidence bands
-acf_vals, lower_ci, upper_ci = bs.acf_with_ci(data, nlags=40, alpha=0.05)
-```
-**Confidence intervals validated using Bartlett's formula.**
-
-**`ccf(x, y, nlags=40)`**
-```python
-# Cross-correlation function between two series
-ccf_values = bs.ccf(series1, series2, nlags=40)
-# Returns array of length 2*nlags+1 (negative lags, zero lag, positive lags)
-```
-**Tested for proper normalization and symmetry properties.**
+| Function | Signature | Returns |
+|---|---|---|
+| `rolling_autocorr` | `(x, lag=1, window=50)` | `ndarray`, length `n-window+1` |
+| `rolling_correlation` | `(x, y, window=50)` | `ndarray`, length `n-window+1` |
+| `rolling_autocorr_multi` | `(x, lags, window=50)` | `ndarray`, shape `(n-window+1, len(lags))` — see known issue |
 
 ---
 
-### 2. Spectral Analysis ✅ FULLY TESTED
+## Stationarity and unit-root tests
 
-FFT-accelerated frequency domain analysis with O(n log n) performance.
+Unit-root testing is the standard first step before fitting ARMA-family
+models, running regressions on time series (to avoid spurious regression), or
+choosing a differencing order. ADF/PP take a unit root as the null; KPSS takes
+stationarity as the null, so the two families complement each other.
 
-**`periodogram(x)`**
-```python
-# Power spectral density via FFT
-freqs, power = bs.periodogram(signal)
+### `adf_test(x, regression="c", max_lag=None) -> (statistic, pvalue)`
+
+Augmented Dickey-Fuller test. Fits by OLS
+
 ```
-Automatically selects FFT (n ≥ 64) or DFT (n < 64) for optimal performance. **Numerically validated against `scipy.signal.periodogram(scaling='spectrum', detrend=False)` with high precision.**
-
-**`welch_psd(x, nperseg=256, noverlap=None)`**
-```python
-# Welch's method with overlapping segments
-freqs, psd = bs.welch_psd(signal, nperseg=256, noverlap=128)
-```
-Reduced-variance PSD estimation using windowed segments with Hann tapering. **Tested for correct windowing and segment averaging.**
-
-**`bartlett_psd(x, nperseg=256)`**
-```python
-# Bartlett's method (non-overlapping segments)
-freqs, psd = bs.bartlett_psd(signal, nperseg=256)
+Δy_t = [deterministic] + β·y_{t-1} + Σ_{i=1}^{p} γ_i·Δy_{t-i} + ε_t
 ```
 
-**`dominant_frequency(x)`**
-```python
-# Find dominant frequency component
-dom_freq = bs.dominant_frequency(signal)
-```
-**Validated on synthetic signals with known dominant frequencies.**
+and reports the t-ratio on `β`. Null hypothesis: unit root (non-stationary).
+Small p-value ⇒ reject the unit root.
 
-**`spectral_entropy(x)`**
-```python
-# Spectral entropy (randomness measure)
-entropy = bs.spectral_entropy(signal)
-```
+- `regression`: `"c"` constant (default), `"ct"` constant + linear trend,
+  `"n"`/`"nc"` no deterministic terms. Any other value raises `ValueError`.
+- `max_lag`: number of augmenting lagged differences `p`. `None` or `0` gives
+  the plain Dickey-Fuller regression. Note that the reference implementation in
+  statsmodels selects the lag order by AIC by default; to reproduce a
+  `bunker-stats` result there, pass `maxlag=p, autolag=None`.
 
-**`spectral_peaks(x, n_peaks=5, min_height=0.0)`**
-```python
-# Identify top N spectral peaks
-peak_freqs, peak_powers = bs.spectral_peaks(signal, n_peaks=5, min_height=0.1)
-```
-**Tested for correct peak identification and ranking.**
+P-values come from the MacKinnon (1994) regression-surface approximation, the
+same method used by statsmodels' `mackinnonp`, including its tail behavior:
+statistics outside the tabulated range return exactly `0.0` (far left tail) or
+`1.0` (far right tail).
 
-**`spectral_flatness(x)`**
-```python
-# Flatness measure (1 = white noise, 0 = tonal)
-flatness = bs.spectral_flatness(signal)
-```
+Verified: for fixed lag order, the statistic agrees with
+`statsmodels.tsa.stattools.adfuller(x, maxlag=p, regression=r, autolag=None)`
+to ~1e-13 across `"c"`, `"ct"`, and `"n"`, and p-values agree including the
+extreme tails.
 
-**`spectral_centroid(x)`**
 ```python
-# Center of mass of spectrum
-centroid = bs.spectral_centroid(signal)
+stat, p = bs.adf_test(prices, regression="ct", max_lag=4)
+if p < 0.05:
+    print("unit root rejected: series looks trend-stationary")
 ```
 
-**`spectral_rolloff(x, percentile=0.85)`**
-```python
-# Frequency below which X% of power is contained
-rolloff_freq = bs.spectral_rolloff(signal, percentile=0.85)
+Edge cases: returns `(nan, nan)` when the sample is too short for the
+requested lag order or the design matrix is rank-deficient.
+
+### `kpss_test(x, regression="c", max_lag=None) -> (statistic, pvalue)`
+
+Kwiatkowski-Phillips-Schmidt-Shin test. Null hypothesis: the series is
+(level- or trend-) stationary — the opposite orientation to ADF. The statistic
+is `Σ S_t² / (n² λ̂²)` where `S_t` is the cumulative sum of regression
+residuals and `λ̂²` is a Newey-West long-run variance with Bartlett weights.
+
+- `regression`: `"c"` level stationarity (residuals from demeaning) or `"ct"`
+  trend stationarity (residuals from a linear-trend fit). Other values raise
+  `ValueError`.
+- `max_lag`: HAC bandwidth. When `None` (default), the bandwidth is chosen by
+  the automatic data-dependent rule of Hobijn, Franses & Ooms — identical to
+  statsmodels `kpss(..., nlags="auto")`, which is the statsmodels default.
+
+Verified: the statistic matches `statsmodels.tsa.stattools.kpss` to machine
+precision for both `"c"` and `"ct"` with automatic bandwidth.
+
+P-values are interpolated from the Kwiatkowski et al. (1992) critical-value
+table and therefore **clamped to the interval [0.01, 0.10]**: `0.10` means
+"p ≥ 0.10" and `0.01` means "p ≤ 0.01" (statsmodels reports the same bounds
+with a warning).
+
+Edge cases: `n < 3`, a singular trend fit, or a non-positive long-run variance
+return `(nan, nan)`.
+
+### `pp_test(x, regression="c") -> (statistic, pvalue)`
+
+Phillips-Perron test. Runs the plain Dickey-Fuller regression (no augmenting
+lags) and then corrects the t-ratio non-parametrically for serial correlation
+using a Newey-West (Bartlett-kernel) long-run variance with the Schwert
+`12·(n/100)^{1/4}` bandwidth:
+
+```
+Z_t = sqrt(γ0/λ²)·t  −  (λ² − γ0)·T·SE(β) / (2·λ·s)
 ```
 
-**`band_power(x, freq_low=0.0, freq_high=0.5)`**
+(Hamilton 1994, Prop. 17.6). The corrected statistic `Z_t` is evaluated
+against the Dickey-Fuller distribution via the same MacKinnon p-value surface
+as `adf_test`. Null hypothesis: unit root. Accepts `"c"`, `"ct"`, `"n"`.
+
+Use when serial correlation in `ε_t` is expected but you prefer a
+HAC correction over choosing an ADF lag order.
+
+Edge cases: `(nan, nan)` on short samples, rank-deficient designs, or
+non-positive variance estimates.
+
+### `variance_ratio_test(x, lags=2) -> (vr, z_score, pvalue)`
+
+Lo-MacKinlay variance-ratio test of the random-walk hypothesis.
+
+**Input convention: `x` is the increment (return) series, not the level
+series.** For a price series pass `np.diff(prices)` (or log returns).
+
+The q-period variance uses **overlapping** q-sums with the bias-adjusted
+denominator `m = q(n−q+1)(1−q/n)` (Lo & MacKinlay 1988), consistent with the
+homoscedastic asymptotic variance `θ = 2(2q−1)(q−1)/(3qn)` used for the
+z-score. The p-value is two-sided Normal.
+
+Interpretation under the random-walk null `VR ≈ 1`:
+
+- `VR < 1` — negative serial correlation in increments (mean reversion),
+- `VR > 1` — positive serial correlation (momentum / trending).
+
 ```python
-# Integrate power in frequency band
-bp = bs.band_power(signal, freq_low=0.1, freq_high=0.3)
+vr, z, p = bs.variance_ratio_test(np.diff(np.log(prices)), lags=2)
+```
+
+Edge cases: requires `lags >= 2` and `n >= lags + 2`; otherwise returns
+`(nan, nan, nan)`. A zero-variance increment series also returns NaNs.
+
+### `zivot_andrews_test(x, max_lag=None) -> (statistic, breakpoint_index, pvalue)`
+
+Zivot-Andrews unit-root test allowing a single endogenous structural break,
+Model C (simultaneous shift in level and trend):
+
+```
+Δy_t = μ + β·t + θ·DU_t(τ) + γ·DT_t(τ) + α·y_{t-1} + Σ φ_i·Δy_{t-i} + ε_t
+```
+
+Every candidate breakpoint `τ` in the central 85% of the sample (15% trimming
+from each end) is tried; the reported statistic is the minimum (most negative)
+t-ratio on `α` and `breakpoint_index` is the `τ` that attains it. Null
+hypothesis: unit root with no break.
+
+- `max_lag`: augmenting lag order; default is `min(floor(sqrt(n)), 12)`
+  (at least 1).
+- The p-value is a coarse lookup against Model C critical values
+  (−5.57 / −5.08 / −4.82 at 1% / 5% / 10%) and takes only the discrete values
+  `{0.01, 0.05, 0.10, 0.15}`, where `0.15` means "p > 0.10".
+
+Edge cases: returns `(nan, 0, nan)` for `n < 20` or when the sample cannot
+support the trimming plus lag order; singular candidate regressions are
+skipped.
+
+### `trend_stationarity_test(x) -> (statistic, pvalue, is_stationary)`
+
+Convenience wrapper: `kpss_test(x, "ct")` with the boolean decision
+`is_stationary = pvalue > 0.05` (failing to reject the KPSS null of trend
+stationarity). Inherits the KPSS p-value clamp to [0.01, 0.10].
+
+### `integration_order_test(x) -> (is_i0, is_i1, adf_level, adf_diff1)`
+
+Quick I(0)/I(1) classification via two ADF tests (`regression="c"`, no
+augmenting lags):
+
+- `is_i0 = True` if the ADF p-value on the levels is < 0.05,
+- `is_i1 = True` if the levels test fails but the ADF p-value on the first
+  difference is < 0.05,
+- `adf_level`, `adf_diff1` are the two ADF statistics.
+
+Edge cases: `n < 3` returns `(False, False, nan, nan)`.
+
+### `seasonal_diff_test(x, period=12) -> (statistic, pvalue, is_stationary)`
+
+Applies the seasonal difference `y_t − y_{t−period}` and runs
+`adf_test(·, "c")` on the result. `is_stationary = pvalue < 0.05` (unit root
+rejected after seasonal differencing). Returns `(nan, nan, False)` if
+`n <= period`.
+
+### `seasonal_unit_root_test(x, period=12) -> list[(lag, statistic, pvalue)]`
+
+Screens for unit roots at the regular and seasonal frequencies: an ADF test on
+the levels (entry `lag=1`), plus `seasonal_diff_test` at `period` and at
+`2*period` when the sample allows. Returns an empty list if `n < 2*period`.
+
+### `kpss_test_debug(x, regression="c", max_lag=None)`
+
+Diagnostic variant of `kpss_test` that prints every intermediate quantity
+(residuals, cumulative sums, per-lag autocovariances, bandwidth, statistic) to
+stderr. Exposed on `bunker_stats_rs` only, not via the `bunker_stats` facade.
+
+Note: with `max_lag=None` the debug variant selects its bandwidth with the
+Schwert rule rather than the automatic Hobijn rule used by `kpss_test`, so the
+default-argument statistics of the two functions can differ. Pass an explicit
+`max_lag` to make them identical.
+
+---
+
+## Serial-correlation diagnostics
+
+Standard checks on regression/ARMA residuals: if residuals are serially
+correlated, coefficient standard errors are wrong and the model is
+mis-specified. These tests are also useful directly on returns to detect
+predictability.
+
+### `ljung_box(x, lags=20) -> (statistic, pvalue)`
+
+Ljung-Box portmanteau test. Null hypothesis: no autocorrelation up to `lags`.
+
+```
+Q = n(n+2) Σ_{k=1}^{L} r_k² / (n−k)   ~  χ²(L)
+```
+
+Uses the biased (denominator-`n`) autocorrelation estimator, matching
+statsmodels. `lags` is capped at `n−1`.
+
+Verified: agrees with `statsmodels.stats.diagnostic.acorr_ljungbox` to
+~1e-14 in both statistic and p-value.
+
+Edge cases: empty input, `lags == 0`, or a zero-variance series (including
+any NaN in the input) return `(nan, nan)`.
+
+### `box_pierce(x, lags=20) -> (statistic, pvalue)`
+
+Box-Pierce statistic `Q = n Σ r_k²`, the simpler predecessor of Ljung-Box
+(no small-sample `(n−k)` weighting). Same χ²(L) reference distribution, same
+edge-case behavior. Prefer `ljung_box` for small samples.
+
+### `bg_test(resid, max_lag=5) -> (statistic, pvalue)`
+
+Breusch-Godfrey LM test for serial correlation of order up to `max_lag` in a
+residual series. Runs the auxiliary regression of `e_t` on an intercept and
+`e_{t-1}, …, e_{t-max_lag}` over the full sample with pre-sample lags
+zero-padded (the same convention as statsmodels'
+`acorr_breusch_godfrey`), and reports
+
+```
+LM = n · R²   ~  χ²(max_lag)
+```
+
+Null hypothesis: no serial correlation. Unlike the portmanteau tests, the LM
+test remains valid when the residuals come from a model with lagged dependent
+variables.
+
+Note: this function takes the residual vector directly and regresses on
+lagged residuals only; it does not include the original model's regressors in
+the auxiliary regression, which the full Breusch-Godfrey procedure would.
+
+Edge cases: `max_lag == 0` or `n <= max_lag + 1` returns `(nan, nan)`, as
+does a singular auxiliary regression.
+
+### `durbin_watson(x) -> float`
+
+Durbin-Watson statistic `Σ (x_t − x_{t-1})² / Σ x_t²` on a residual series.
+Range `[0, 4]`; `≈ 2` no first-order autocorrelation, `→ 0` positive,
+`→ 4` negative. The denominator is the raw (not demeaned) sum of squares, so
+pass residuals (mean ≈ 0), not an arbitrary series.
+
+Edge cases: `n < 2` or an all-zero series returns `nan`.
+
+### `runs_test(x) -> (n_runs, z_score, pvalue)`
+
+Wald-Wolfowitz runs test for randomness about the median. Counts runs of
+values above/below the sample median, compares against the expected run count
+under independence with a ±0.5 continuity correction, and reports a two-sided
+Normal p-value. Too few runs ⇒ positive dependence (clustering); too many ⇒
+negative dependence (oscillation).
+
+Values exactly equal to the median are treated as ties and excluded from run
+transitions. NaN comparisons behave like ties, so **NaN inputs are skipped
+rather than causing a crash** (median extraction uses a total ordering).
+
+Edge cases: `n < 2`, or all observations on one side of the median, return
+NaN statistic/p-value.
+
+### `acf_zero_crossing(x, max_lag=100) -> int | None`
+
+First lag `k` at which the autocorrelation function crosses from positive to
+non-positive. A quick decorrelation-length summary (e.g., for choosing block
+lengths in block bootstraps). Returns `None` if no crossing occurs within
+`max_lag` (capped at `n−1`), or if the series has zero variance.
+
+---
+
+## Autocorrelation / partial autocorrelation
+
+The ACF/PACF pair is the classical tool for ARMA order identification: an
+AR(p) process shows a PACF cutoff after lag p; an MA(q) process shows an ACF
+cutoff after lag q.
+
+All estimators use the biased (denominator-`n`) sample moments, matching
+statsmodels defaults. `nlags` is always capped at `n−1`. Empty input yields
+empty arrays. A constant (zero-variance) series yields an all-ones ACF by
+convention.
+
+### `acf(x, nlags=40) -> ndarray`
+
+Sample autocorrelation at lags `0..nlags` (index 0 is always 1.0).
+
+Verified: matches `statsmodels.tsa.stattools.acf(x, nlags, fft=False)` to
+machine precision.
+
+### `acovf(x, nlags=40) -> ndarray`
+
+Sample autocovariance at lags `0..nlags` (unnormalized ACF; index 0 is the
+biased sample variance).
+
+Verified: matches `statsmodels.tsa.stattools.acovf(x, nlag=nlags,
+adjusted=False)` to machine precision.
+
+### `acf_with_ci(x, nlags=40, alpha=0.05) -> (acf, lower, upper)`
+
+ACF with Bartlett-formula confidence bands: the standard error at lag `k` is
+`sqrt((1 + 2 Σ_{j<k} r_j²)/n)`. The Normal critical value is taken from a
+fixed table — 2.576 for `alpha <= 0.01`, 1.96 for `alpha <= 0.05`, 1.645
+otherwise — not computed from `alpha` exactly. Bands at lag 0 are pinned to
+`[1, 1]`.
+
+### `ccf(x, y, nlags=40) -> ndarray`
+
+Cross-correlation between two equal-length series, normalized by the product
+of the population standard deviations. Output has length `2*nlags + 1`;
+index `i` corresponds to lag `ℓ = i − nlags` and holds
+`Corr(x_t, y_{t−ℓ})`:
+
+- a peak at **negative** `ℓ` means `x` leads `y` (`y` echoes `x` after `|ℓ|`
+  steps),
+- a peak at **positive** `ℓ` means `y` leads `x`.
+
+```python
+c = bs.ccf(x, y, nlags=5)          # length 11, center index 5 is lag 0
+lead = np.argmax(c) - 5            # negative => x leads y
+```
+
+Edge cases: empty input or a length mismatch returns an empty array; zero
+variance in either series returns an all-NaN array.
+
+### `pacf(x, nlags=40) -> ndarray`
+
+Partial autocorrelation via the Levinson-Durbin recursion on the sample ACF
+(O(k²) by exploiting the Toeplitz structure, versus O(k³) for a generic
+solve). This is the default and fastest PACF.
+
+Verified: matches `statsmodels.tsa.stattools.pacf(x, method="ywm")` to
+machine precision.
+
+If the innovation variance is exhausted mid-recursion (numerically singular
+problems, e.g. near-perfectly predictable series), remaining lags are NaN.
+
+### `pacf_yw(x, nlags=40) -> ndarray`
+
+Same Yule-Walker quantity computed by explicitly solving the k×k Toeplitz
+system at each lag. Slower than `pacf`; retained for cross-checking. Matches
+`pacf` and statsmodels `"ywm"` to machine precision; singular systems yield
+NaN at the affected lag.
+
+### `pacf_innovations(x, nlags=40) -> ndarray`
+
+PACF via the innovations algorithm — a numerically stable alternative for
+ill-conditioned autocovariance sequences. Remaining lags are NaN after a
+non-positive prediction-error variance.
+
+### `pacf_burg(x, nlags=40) -> ndarray`
+
+Reflection coefficients from Burg's maximum-entropy method on the demeaned
+series; well suited to short series. The sign convention matches the other
+PACF variants here. Note this is a distinct estimator: values differ from the
+Yule-Walker-based PACFs at higher lags, and it is **not** numerically
+identical to statsmodels' `pacf(method="burg")` (a different variant of the
+recursion); agreement is close at low lags but only approximate beyond them.
+
+---
+
+## Spectral analysis
+
+Frequency-domain analysis: locate periodicities/cycles, quantify how "tonal"
+versus noise-like a series is, and measure power in frequency bands. All
+functions assume unit sampling frequency; frequencies are in **cycles per
+sample** on `[0, 0.5]` (a period-`T` cycle appears at frequency `1/T`).
+
+### `periodogram(x) -> (freqs, power)`
+
+One-sided raw periodogram. Uses an FFT for `n >= 64` and a direct DFT below
+that (identical results). No detrending or windowing is applied.
+
+Verified: matches `scipy.signal.periodogram(x, scaling="spectrum",
+detrend=False, window="boxcar")` to ~1e-17, including frequency grid and
+one-sided doubling rules (interior bins doubled; Nyquist handling depends on
+parity of `n`). Because the input is not demeaned, a nonzero mean shows up as
+power at frequency 0.
+
+Output length is `n//2 + 1`; empty input gives empty arrays.
+
+### `welch_psd(x, nperseg=256, noverlap=None) -> (freqs, psd)`
+
+Welch's averaged-periodogram PSD estimate: the series is split into segments
+of length `nperseg` with overlap `noverlap` (default `nperseg // 2`), each
+segment is demeaned, Hann-windowed, transformed, and the per-segment spectra
+are averaged. Averaging trades frequency resolution for a large variance
+reduction relative to the raw periodogram.
+
+Scaling note: the relative spectral shape matches `scipy.signal.welch`, but
+the absolute normalization differs by a constant factor (this implementation
+applies no one-sided interior doubling and includes an extra `1/nperseg`
+factor). Use it for peak location, shape, and ratios rather than absolute
+PSD levels, or calibrate the constant against a known reference.
+
+Fallback: if `n < nperseg`, or the overlap leaves a zero step size, the
+function silently returns the raw periodogram of the full series (with the
+periodogram's scipy-matching scaling).
+
+### `bartlett_psd(x, nperseg=256) -> (freqs, psd)`
+
+Bartlett's method: identical to `welch_psd` with zero overlap
+(non-overlapping segments). Same scaling caveats.
+
+### `cumulative_periodogram(x) -> (freqs, cumulative_power)`
+
+Cumulative sum of periodogram power, normalized to end at 1.0. The basis of
+Kolmogorov-Smirnov-type white-noise tests: for white noise the curve is close
+to the diagonal; sharp jumps reveal concentrated periodic components.
+
+### `dominant_frequency(x) -> float`
+
+Frequency of the largest periodogram bin, excluding the DC (frequency-0)
+component. Returns `nan` when fewer than two bins exist (`n < 2`).
+
+```python
+f = bs.dominant_frequency(signal)   # period estimate: 1/f samples
+```
+
+### `spectral_entropy(x) -> float`
+
+Shannon entropy (natural log, nats) of the periodogram normalized to a
+probability distribution. Low values ⇒ power concentrated at few frequencies
+(strong periodicity); high values ⇒ power spread out (noise-like). The
+maximum possible value is `ln(n//2 + 1)`. Returns `nan` for empty or
+zero-power input.
+
+### `spectral_peaks(x, n_peaks=5, min_height=0.0) -> (freqs, powers)`
+
+Top `n_peaks` local maxima of the periodogram (strictly greater than both
+neighbors, at least `min_height`), sorted by descending power. The DC bin and
+the final bin are never candidates. Returns fewer than `n_peaks` entries (or
+empty arrays) when fewer qualifying peaks exist.
+
+### `spectral_flatness(x) -> float`
+
+Wiener entropy: geometric mean / arithmetic mean of periodogram power.
+Near 1 for white noise, near 0 for tonal signals.
+
+Caveat: bins with power ≤ 1e-10 are excluded before averaging. For a
+noiseless pure sinusoid nearly all off-peak bins fall below this threshold,
+so the ratio is computed over the peak alone and returns ≈ 1 rather than ≈ 0.
+With any realistic noise floor the measure behaves conventionally (e.g. a
+sine in noise scores far below pure noise). Returns `nan` when no bin
+survives the threshold.
+
+### `spectral_centroid(x) -> float`
+
+Power-weighted mean frequency (center of mass of the spectrum). Values near
+0 indicate low-frequency-dominated series; white noise centers near 0.25.
+Returns `nan` for empty or zero-power input.
+
+### `spectral_rolloff(x, percentile=0.85) -> float`
+
+Smallest frequency below which `percentile` of the total power is contained.
+Returns the highest frequency if the threshold is never reached, and `nan`
+for empty or zero-power input.
+
+### `band_power(x, freq_low=0.0, freq_high=0.5) -> float`
+
+Sum of periodogram power over bins with `freq_low <= f <= freq_high`
+(inclusive on both ends; the DC bin is included when `freq_low == 0.0`).
+Since the periodogram uses "spectrum" scaling, band powers over disjoint
+bands sum to the total power. Returns `nan` for empty input.
+
+---
+
+## Rolling-window measures
+
+Windowed second-moment statistics for detecting time variation in dependence
+structure (regime changes, evolving momentum/mean-reversion).
+
+Unlike most of the module, these functions **raise `ValueError`** on invalid
+parameters rather than returning NaN: `window` must satisfy
+`1 <= window <= n`, every lag must be `< window`, and `rolling_correlation`
+requires equal-length inputs.
+
+### `rolling_autocorr(x, lag=1, window=50) -> ndarray`
+
+Lag-`lag` autocorrelation computed within each sliding window. Output length
+is `n - window + 1`; element `i` covers `x[i : i+window]`. Windows with zero
+variance produce NaN.
+
+### `rolling_correlation(x, y, window=50) -> ndarray`
+
+Pearson correlation between `x` and `y` within each sliding window. Output
+length `n - window + 1`; zero-variance windows produce NaN.
+
+### `rolling_autocorr_multi(x, lags, window=50) -> ndarray`
+
+Intended behavior: a 2-D array of shape `(n - window + 1, len(lags))` whose
+column `j` equals `rolling_autocorr(x, lags[j], window)`. `lags` has no
+default and must be provided.
+
+**Known issue (current implementation):** with more than one lag the values
+are written to an internal buffer in column-major order but reinterpreted
+row-major, so the returned matrix is a scrambled reshape — columns do **not**
+correspond to per-lag rolling autocorrelations. Single-lag calls
+(`lags=[k]`) are correct and match `rolling_autocorr` exactly. Until this is
+fixed, call `rolling_autocorr` per lag and stack the results:
+
+```python
+out = np.column_stack([bs.rolling_autocorr(x, k, window) for k in lags])
 ```
 
 ---
 
-### 3. Diagnostic Tests ✅ FULLY TESTED
+## Statistical conventions and reference-implementation parity
 
-Statistical tests for model adequacy and residual analysis.
+- **ACF/ACovF/PACF**: biased (denominator-`n`) moment estimators, matching
+  statsmodels defaults. `acf`, `acovf`, `pacf`, and `pacf_yw` agree with
+  statsmodels to machine precision; `pacf_burg` is a distinct Burg variant
+  with only approximate agreement.
+- **ADF**: MacKinnon (1994) regression-surface p-values with exact 0/1
+  outside the tabulated tau range; statistic matches
+  `adfuller(..., autolag=None)` to ~1e-13 for all three deterministic
+  specifications. No automatic lag selection — `max_lag` is taken literally
+  (`None` ⇒ 0 lags).
+- **KPSS**: automatic bandwidth reproduces statsmodels `nlags="auto"`;
+  statistic matches to machine precision; p-values are table-interpolated and
+  clamped to [0.01, 0.10].
+- **Phillips-Perron**: `Z_t` correction per Hamilton (1994) Prop. 17.6 with
+  Newey-West/Bartlett long-run variance (Schwert bandwidth), evaluated
+  against the Dickey-Fuller distribution.
+- **Ljung-Box**: matches `acorr_ljungbox` to ~1e-14.
+- **Breusch-Godfrey**: full-sample, zero-padded auxiliary regression;
+  `LM = n·R²`, χ²(`max_lag`).
+- **Variance ratio**: Lo-MacKinlay overlapping estimator, bias-adjusted
+  denominator, homoscedastic z; input is the increment series.
+- **Periodogram**: exactly `scipy.signal.periodogram(scaling="spectrum",
+  detrend=False, window="boxcar")`. Welch/Bartlett PSDs match scipy in shape
+  but not in absolute normalization (constant factor).
+- **Frequencies** are cycles per sample (`fs = 1`), range `[0, 0.5]`.
 
-**`ljung_box(x, lags=20)`**
-```python
-# Ljung-Box test for autocorrelation
-statistic, pvalue = bs.ljung_box(residuals, lags=20)
-```
-Tests null hypothesis of no autocorrelation up to specified lag. Uses biased ACF estimator matching statsmodels implementation. **Validated against statsmodels with high numerical precision.**
-
-**`durbin_watson(x)`**
-```python
-# Durbin-Watson statistic for first-order autocorrelation
-dw_stat = bs.durbin_watson(residuals)
-# Returns value in [0, 4]: 2 = no autocorrelation
-```
-**Tested for correct boundary behavior and interpretation.**
-
-**`bg_test(resid, max_lag=5)`**
-```python
-# Breusch-Godfrey LM test for serial correlation
-statistic, pvalue = bs.bg_test(residuals, max_lag=5)
-```
-Lagrange multiplier test for higher-order serial correlation in residuals. **Numerically validated against statsmodels.**
-
-**`box_pierce(x, lags=20)`**
-```python
-# Box-Pierce test (simpler alternative to Ljung-Box)
-statistic, pvalue = bs.box_pierce(residuals, lags=20)
-```
-
-**`runs_test(x)`**
-```python
-# Wald-Wolfowitz runs test for randomness
-n_runs, z_score, pvalue = bs.runs_test(data)
-```
-Tests if values above/below median occur randomly. **Validated for correct continuity correction.**
-
-**`acf_zero_crossing(x, max_lag=100)`**
-```python
-# Find first lag where ACF crosses zero
-crossing_lag = bs.acf_zero_crossing(data, max_lag=100)
-# Returns None if no crossing found
-```
+References: Dickey & Fuller (1979); MacKinnon (1994); Kwiatkowski,
+Phillips, Schmidt & Shin (1992); Hobijn, Franses & Ooms (2004); Phillips &
+Perron (1988); Hamilton (1994); Lo & MacKinlay (1988); Zivot & Andrews
+(1992); Ljung & Box (1978); Box & Pierce (1970); Breusch (1978) / Godfrey
+(1978); Durbin & Watson (1950); Wald & Wolfowitz (1940); Bartlett (1946,
+1950); Durbin (1960); Burg (1975); Welch (1967).
 
 ---
 
-### 4. Rolling Window Operations ✅ CORE FUNCTIONS TESTED
-
-Optimized sliding window computations for local statistics.
-
-**`rolling_autocorr(x, lag=1, window=50)`** ✅
-```python
-# Rolling autocorrelation over sliding window
-rolling_acf = bs.rolling_autocorr(data, lag=1, window=50)
-# Returns array of length n-window+1
-```
-Single-pass optimizations for mean and variance calculations. **Tested and validated.**
-
-**`rolling_correlation(x, y, window=50)`** ✅
-```python
-# Rolling correlation between two series
-rolling_corr = bs.rolling_correlation(series1, series2, window=50)
-```
-**Tested for numerical accuracy.**
-
-**`rolling_autocorr_multi(x, lags=[1,2,3], window=50)`** ✅
-```python
-# Rolling autocorrelation at multiple lags simultaneously
-# Returns 2D array: shape (n-window+1, len(lags))
-rolling_acf_matrix = bs.rolling_autocorr_multi(data, lags=[1,2,3,5,10], window=50)
-```
-**Validated for multi-lag computation.**
-
-**Additional Rolling Functions** (⏭️ Not Yet Integrated):
-- `rolling_min()` - Pending integration
-- `rolling_max()` - Pending integration
-- `rolling_range()` - Pending integration
-
----
-
-### 5. Stationarity Tests ⚠️ PARTIAL VALIDATION
-
-Statistical tests for detecting non-stationarity, unit roots, and structural breaks.
-
-**Production-Ready Functions:**
-
-**`adf_test(x, regression='c', maxlag=None)` ✅**
-```python
-# Augmented Dickey-Fuller test for unit root
-adf_stat, pvalue = bs.adf_test(data, regression='c', maxlag=None)
-```
-**Fully validated on both stationary and random walk processes.**
-
-**`kpss_test(x, regression='c', nlags='auto')` ⚠️**
-```python
-# KPSS stationarity test
-kpss_stat, pvalue = bs.kpss_test(data, regression='c', nlags='auto')
-```
-**Known issue:** Test statistic shows 8.4% deviation from statsmodels (0.1948 vs 0.1797). Successfully identifies random walks but needs calibration for stationary series.
-
-**`variance_ratio_test(x, lags=2)` ⚠️**
-```python
-# Variance ratio test for random walk hypothesis
-vr, z_score, pvalue = bs.variance_ratio_test(data, lags=2)
-```
-**Under active development** - Current implementation returns VR=0.571 for differenced random walk (expected: 0.8-1.2).
-
-**Additional Functions (Validated):**
-- ✅ `integration_order_test()` - Integration order estimation
-- ✅ `trend_stationarity_test()` - Trend stationarity detection
-- ✅ `seasonal_diff_test()` - Seasonal differencing test
-- ✅ `seasonal_unit_root_test()` - Seasonal unit root test
-
-**`zivot_andrews_test(x, ...)` ⚠️**
-```python
-# Structural break detection with Zivot-Andrews test
-```
-**Critical issue:** Test enters infinite loop or requires excessive computation time (>5 minutes). Algorithmic optimization required for v0.3.
-
----
-
-### 6. Performance Benchmarks ✅ FULLY TESTED
-
-The module includes comprehensive performance tests validating:
-- ✅ Periodogram performance across array sizes
-- ✅ PACF algorithm efficiency comparison
-- ✅ Stationarity test computational efficiency
-
----
-
-### 7. Integration Tests ✅ FULLY TESTED
-
-End-to-end workflow validation:
-- ✅ Spectral analysis ↔ ACF consistency
-- ✅ Complete stationarity testing workflow
-- ✅ Diagnostic testing pipeline
-
----
-
-## Performance Characteristics
-
-- **ACF/PACF**: O(k²) via Levinson-Durbin vs O(k³) for naive Yule-Walker
-- **Spectral Analysis**: O(n log n) via FFT vs O(n²) for direct DFT
-- **Rolling Operations**: Single-pass optimizations for mean/variance calculations
-- **Memory Efficient**: Zero-copy operations where possible using NumPy array views
-
----
-
-## Installation
-
-```bash
-# As part of bunker-stats installation
-pip install bunker-stats
-```
-
----
-
-## Testing
-
-Run the comprehensive test suite:
-
-```bash
-# Full test suite (will hang on Zivot-Andrews test)
-pytest tests/test_tsa_comprehensive.py -vv
-
-# Recommended: Skip problematic test
-pytest tests/test_tsa_comprehensive.py -vv --deselect tests/test_tsa_comprehensive.py::TestStationarity::test_zivot_andrews_test
-```
-
-### Current Test Results
-
-**Fully Validated Modules:**
-- ✅ ACF/PACF (9/9 tests, 100%)
-- ✅ Spectral Analysis (11/11 tests, 100%)
-- ✅ Diagnostic Tests (6/6 tests, 100%)
-- ✅ Integration Tests (3/3 tests, 100%)
-- ✅ Performance Benchmarks (3/3 tests, 100%)
-
-**Partially Validated:**
-- ⚠️ Stationarity Tests (7/10, 70%)
-- ⚠️ Rolling Operations (3/5, 60% - 2 features not integrated)
-
-**Overall:** 45/47 confirmed passing (95.7%), with 2 failures and 1 test timeout requiring fixes.
-
----
-
-## Known Issues & v0.3 Goals
-
-### Active Issues
-
-1. **`test_kpss_stationary` (FAILED)**  
-   - **Issue:** Test statistic deviation of 8.4% from statsmodels (0.1948 vs 0.1797 ±0.009)
-   - **Impact:** May incorrectly reject stationarity in edge cases
-   - **Status:** Investigating bandwidth calculation and critical value lookup
-
-2. **`test_variance_ratio_test` (FAILED)**  
-   - **Issue:** Variance ratio = 0.571 for differenced random walk (expected: 0.8-1.2)
-   - **Impact:** Incorrect random walk detection
-   - **Status:** Algorithm implementation under review
-
-3. **`test_zivot_andrews_test` (HANGS)**  
-   - **Issue:** Test never completes; suspected infinite loop or O(n³) complexity issue
-   - **Impact:** Cannot use Zivot-Andrews structural break detection
-   - **Status:** Requires algorithmic redesign or optimization (highest priority)
-
-4. **Rolling min/max/range (NOT INTEGRATED)**  
-   - **Status:** Functions exist but not yet exposed in Python API
-
-### v0.3 Objectives
-
-**Critical Fixes:**
-- 🎯 **Fix KPSS test** - Align with statsmodels implementation (<5% error)
-- 🎯 **Fix variance ratio test** - Correct VR calculation for random walk detection
-- 🎯 **Optimize Zivot-Andrews** - Complete in <10 seconds or implement timeout
-- 🎯 **Integrate rolling min/max** - Expose existing functions
-
-**Success Metrics:**
-- ✅ 50/50 tests passing (100%)
-- ✅ All tests complete in <30 seconds
-- ✅ <5% numerical error vs statsmodels/SciPy
-- ✅ Complete API documentation
-
-**Secondary Goals:**
-- 📊 Add more structural break tests (Perron, Bai-Perron)
-- 📝 Inline code documentation for all stationarity functions
-- ⚡ Performance profiling and optimization guide
-
----
-
-## What Works Right Now
-
-The following features are **production-ready** with comprehensive test validation:
-
-### ✅ Correlation Analysis (100% tested - 9/9)
-All ACF/PACF functions with multiple algorithmic implementations, cross-validated against statsmodels and tested across edge cases.
-
-### ✅ Spectral Methods (100% tested - 11/11)
-Complete FFT-based spectral analysis suite matching SciPy numerical precision across periodogram, Welch, and spectral feature extraction.
-
-### ✅ Diagnostic Tests (100% tested - 6/6)  
-Full suite of residual diagnostic tests (Ljung-Box, Durbin-Watson, Breusch-Godfrey, Box-Pierce, runs test) validated for correctness.
-
-### ✅ Performance & Integration (100% tested - 6/6)
-Comprehensive performance benchmarks and end-to-end workflow validation.
-
-### ⚠️ Rolling Operations (60% tested - 3/5)
-Core rolling autocorrelation functions validated. Min/max/range functions pending integration.
-
-### ⚠️ Basic Stationarity Testing (70% tested - 7/10)
-ADF test fully validated. KPSS needs calibration, variance ratio needs fixing, Zivot-Andrews needs optimization.
-
----
-
-## References
-
-### Implemented Algorithms
-
-- **Levinson-Durbin Recursion**: Durbin, J. (1960). "The fitting of time-series models"
-- **Ljung-Box Test**: Ljung, G. M., & Box, G. E. P. (1978). "On a measure of lack of fit in time series models"
-- **Welch's Method**: Welch, P. (1967). "The use of fast Fourier transform for the estimation of power spectra"
-- **Burg's Algorithm**: Burg, J. P. (1975). "Maximum entropy spectral analysis"
-- **KPSS Test**: Kwiatkowski, D., et al. (1992). "Testing the null hypothesis of stationarity"
-- **Zivot-Andrews Test**: Zivot, E., & Andrews, D. W. K. (1992). "Further evidence on the great crash, the oil-price shock, and the unit-root hypothesis"
-
----
-
-## Contributing
-
-Bug reports and feature requests welcome! Priority areas for v0.3:
-
-**High Priority:**
-- Stationarity test fixes (KPSS calibration, variance ratio implementation)
-- Zivot-Andrews performance optimization or timeout handling
-- Rolling min/max/range integration
-
-**Future Enhancements:**
-- Additional structural break tests (Perron, Bai-Perron)
-- Seasonal decomposition methods (STL, X-13)
-- Cointegration tests (Engle-Granger, Johansen)
-- Online/streaming versions of rolling statistics
-
----
-
-## License
-
-Part of the bunker-stats library. See main repository for licensing information.
+## Edge-case behavior
+
+| Condition | Behavior |
+|---|---|
+| Empty input | ACF/PACF/CCF/spectral array outputs: empty arrays. Scalar tests: NaN results. |
+| Sample too short for the test (e.g. `n < 3` KPSS, `n < 20` Zivot-Andrews, `n <= period` seasonal tests) | NaN statistic and p-value (empty list for `seasonal_unit_root_test`); no exception. |
+| Constant / zero-variance series | `acf` returns all ones; `ljung_box`/`box_pierce`/`durbin_watson` return NaN; `ccf` returns all-NaN; `acf_zero_crossing` returns `None`; zero-variance rolling windows yield NaN entries. |
+| NaN in input | Propagates to NaN outputs for moment-based statistics (no crash). `runs_test` treats NaNs as median ties and skips them. Sorting-based paths use total ordering and cannot abort. |
+| `nlags` / `lags` / `max_lag` larger than the sample supports | Silently capped at `n − 1` (ACF/PACF/diagnostics/KPSS bandwidth). ADF/Zivot-Andrews return NaN if the lag order leaves too few rows. |
+| Invalid `regression` string | `ValueError` (`adf_test`/`pp_test`: `"c"`, `"ct"`, `"n"`/`"nc"`; `kpss_test`: `"c"`, `"ct"`). |
+| Invalid rolling parameters (`window` out of range, `lag >= window`, length mismatch) | `ValueError`. |
+| `variance_ratio_test` with `lags < 2` | `(nan, nan, nan)`. |
+| Rank-deficient / singular regressions | NaN results (ADF, PP, BG); singular breakpoints skipped (Zivot-Andrews); NaN at the affected lag (`pacf_yw`). |
+| KPSS p-value outside table | Clamped: `0.10` ⇒ p ≥ 0.10, `0.01` ⇒ p ≤ 0.01. |
+| ADF statistic outside MacKinnon range | Exact `0.0` / `1.0`, matching statsmodels. |
+| `welch_psd` with `n < nperseg` or zero step | Falls back to the full-series periodogram. |
+| `rolling_autocorr_multi` with multiple lags | Scrambled output (see known issue above); use single-lag calls. |

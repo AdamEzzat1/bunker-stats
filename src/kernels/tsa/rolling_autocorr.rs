@@ -193,13 +193,18 @@ pub fn rolling_autocorr_multi<'py>(
                 numer / denom
             };
             
-            // Store in column-major order (lag_idx varies slower)
-            out[start + lag_idx * out_len] = val;
+            // Store ROW-major: from_shape_vec((out_len, n_lags), ..) below reads
+            // C-order, so the flat index must be row*n_lags + col. The previous
+            // column-major write (start + lag_idx*out_len) scrambled the output
+            // whenever more than one lag was requested (single-lag calls happen
+            // to coincide, which is why they looked correct).
+            out[start * n_lags + lag_idx] = val;
         }
     }
 
     // Convert to 2D array (shape: [out_len, n_lags])
     use numpy::IntoPyArray;
-    let arr = numpy::ndarray::Array2::from_shape_vec((out_len, n_lags), out).unwrap();
+    let arr = numpy::ndarray::Array2::from_shape_vec((out_len, n_lags), out)
+        .map_err(|e| PyValueError::new_err(format!("shape error: {e}")))?;
     Ok(arr.into_pyarray_bound(py))
 }
