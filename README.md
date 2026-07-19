@@ -3,7 +3,7 @@
 **Production-grade statistical computing library combining Rust performance with Python ergonomics**
 
 Version: 0.3.0  
-Status: Production-ready  
+Status: Release candidate  
 License: See LICENSE file
 
 ---
@@ -17,7 +17,7 @@ License: See LICENSE file
 🎯 **Deterministic** - Bit-exact given the same seed: every randomized routine is reproducible, and `random_state=None` behaves as seed 0  
 ⚡ **High-Performance** - 2-5× faster than SciPy/pandas/numpy on its hot paths (rolling windows, robust estimators, bootstrap); see [Performance](#performance-highlights) for measured, per-function numbers  
 🔢 **Numerically Stable** - Kahan summation, Welford's algorithm, careful conditioning  
-🧪 **Thoroughly Tested** - 100% test coverage with comprehensive edge case validation  
+🧪 **Thoroughly Tested** - 53 Rust unit/property tests + 600+ Python tests (numpy/scipy/pandas/statsmodels parity, edge cases, and never-panic properties); ~99% of public functions have a direct reference test  
 🔒 **Type-Safe** - Rust implementation with full input validation  
 📦 **Zero Dependencies** - Core functionality requires only NumPy
 
@@ -254,10 +254,8 @@ corr = bs.corr_matrix(X, skipna=True)            # pairwise-complete
 # C = bsp.corr_df(df)      # DataFrame labeled by column names
 # bsp.corr_heatmap(df)     # pandas Styler heatmap
 
-# Bootstrap confidence intervals
-from bunker_stats.resampling import BootstrapConfig
-config = BootstrapConfig(n_resamples=10000, conf=0.95)
-estimate, lower, upper = config(data)
+# Bootstrap confidence intervals (deterministic given random_state)
+estimate, lower, upper = bs.bootstrap_mean_ci(data, n_resamples=10000, conf=0.95, random_state=0)
 ```
 
 ---
@@ -355,7 +353,7 @@ Flexible rolling window statistics with policy-driven configuration:
 
 ### 5. **Resampling** ✅ Production-Ready
 
-**Status:** 25/25 tests passing, 100% coverage  
+**Status:** Deterministic given `random_state`; CI ordering and determinism tested  
 **Performance:** ~5× faster than a vectorized-numpy bootstrap loop  
 **Documentation:** See [src/kernels/resampling/README.md](./src/kernels/resampling/README.md)
 
@@ -540,23 +538,19 @@ maturin build --release
 
 ## Roadmap
 
-### v0.2.9 (Current - Released January 2026)
-✅ Robust statistics with policy-driven RobustStats class  
-✅ Comprehensive inference module with 15 hypothesis tests  
-✅ Matrix operations with 83 comprehensive tests  
-✅ Rolling windows with fused multi-stat kernels  
-✅ Resampling with ergonomic config objects  
-✅ TSA module at 95.7% completion
+### v0.3.0 (Current)
+✅ NaN inputs no longer abort the interpreter; panic boundaries hardened  
+✅ Numeric correctness pass (cancellation-stable covariance/correlation, exact KS p-values, corrected PSD scaling, MacKinnon ADF/PP p-values)  
+✅ TSA core validated against statsmodels (ADF, KPSS, Ljung-Box, ACF/PACF)  
+✅ API consistency contract (uniform window/NaN/unit rules; see the 0.3.0 release notes)  
+✅ Deterministic resampling (`random_state=None` == seed 0 everywhere)  
+✅ ~99% of public functions covered by direct reference tests
 
-### v0.3.0 (Planned - Q1 2026)
-- **TSA fixes:** 100% test pass rate (50/50 tests)
+### v0.4.0 (Planned)
 - **Multivariate robust stats:** MCD, OGK covariance
 - **Robust regression:** Huber, Theil-Sen, RANSAC
-- **Weighted statistics:** Weighted median, MAD, robust_fit
-- **Additional estimators:** Biweight, Hampel, S/MM estimators
-- **Performance:** Automatic parallelization of the multivariate kernels
-
-### v0.4.0 (Planned - Q2 2026)
+- **Weighted statistics:** weighted median, MAD, robust_fit
+- **BLAS-backed matrix kernels** (current pure-Rust cov/corr are ~0.6× numpy; linking a BLAS would close the gap)
 - Bayesian inference module
 - Model selection criteria (AIC, BIC)
 - Cross-validation utilities

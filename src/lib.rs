@@ -97,7 +97,6 @@ use crate::kernels::tsa::acf_pacf::{
     acf, pacf, pacf_yw, acovf, acf_with_ci, ccf, pacf_innovations, pacf_burg 
 };
 
-use crate::kernels::tsa::stationarity::kpss_test_debug;
 use crate::kernels::tsa::spectral::{ 
     periodogram, welch_psd, cumulative_periodogram, dominant_frequency,
     spectral_entropy, bartlett_psd, spectral_peaks, spectral_flatness,
@@ -2874,7 +2873,6 @@ m.add_function(wrap_pyfunction!(rolling_linreg_skipna, m)?)?;
     // tsa - stationarity
     m.add_function(wrap_pyfunction!(adf_test, m)?)?;
     m.add_function(wrap_pyfunction!(kpss_test, m)?)?;
-	m.add_function(wrap_pyfunction!(kpss_test_debug, m)?)?;
     m.add_function(wrap_pyfunction!(pp_test, m)?)?;
 	m.add_function(wrap_pyfunction!(variance_ratio_test, m)?)?;
 	m.add_function(wrap_pyfunction!(zivot_andrews_test, m)?)?;
