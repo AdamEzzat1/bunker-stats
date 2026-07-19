@@ -2,7 +2,7 @@
 
 **Production-grade statistical computing library combining Rust performance with Python ergonomics**
 
-Version: 0.2.9  
+Version: 0.3.0  
 Status: Production-ready  
 License: See LICENSE file
 
@@ -15,7 +15,7 @@ License: See LICENSE file
 ### Core Principles
 
 🎯 **Deterministic** - Bit-exact given the same seed: every randomized routine is reproducible, and `random_state=None` behaves as seed 0  
-⚡ **High-Performance** - 2-244× faster than SciPy/pandas/statsmodels equivalents  
+⚡ **High-Performance** - 2-5× faster than SciPy/pandas/numpy on its hot paths (rolling windows, robust estimators, bootstrap); see [Performance](#performance-highlights) for measured, per-function numbers  
 🔢 **Numerically Stable** - Kahan summation, Welford's algorithm, careful conditioning  
 🧪 **Thoroughly Tested** - 100% test coverage with comprehensive edge case validation  
 🔒 **Type-Safe** - Rust implementation with full input validation  
@@ -226,7 +226,7 @@ import numpy as np
 data = np.array([1, 2, 3, 4, 5, 100])  # outlier: 100
 location, scale = bs.robust_fit(data)   # (3.5, 2.22) vs mean/std (19.17, 38.4)
 
-# Rolling window operations - 244× faster than pandas
+# Rolling window operations - 2-5× faster than pandas
 signal = np.random.randn(10000)
 smoothed = bs.rolling_median(signal, window=10)
 
@@ -269,7 +269,7 @@ Each module has comprehensive documentation with detailed API references, usage 
 ### 1. **Robust Statistics** ✅ Production-Ready
 
 **Status:** 73/73 tests passing  
-**Performance:** 2-244× faster than SciPy/pandas  
+**Performance:** 2-5× faster than SciPy/pandas on order-statistic estimators (median/MAD/Qn)  
 **Documentation:** See [src/kernels/robust/README.md](./src/kernels/robust/README.md)
 
 Outlier-resistant statistical estimators including:
@@ -313,7 +313,7 @@ Comprehensive statistical hypothesis testing suite:
 ### 3. **Matrix Operations** ✅ Production-Ready
 
 **Status:** 83/83 tests passing  
-**Performance:** ~9,500 ops/sec (100×20 matrices)  
+**Performance:** correctness-first; dense cov/corr are ~0.6× numpy (no BLAS backend) — see Performance Highlights  
 **Documentation:** See [src/kernels/matrix/README.md](./src/kernels/matrix/README.md)
 
 High-performance matrix computations for statistical analysis:
@@ -334,7 +334,7 @@ High-performance matrix computations for statistical analysis:
 ### 4. **Rolling Windows** ✅ Production-Ready
 
 **Status:** 53/53 tests passing  
-**Performance:** 244× faster than pandas for rolling median  
+**Performance:** 2-5× faster than pandas (rolling std/mean); rolling_median is O(n) selection-based  
 **Documentation:** See [src/kernels/rolling/ROLLING_README.md](./src/kernels/rolling/ROLLING_README.md)
 
 Flexible rolling window statistics with policy-driven configuration:
@@ -356,7 +356,7 @@ Flexible rolling window statistics with policy-driven configuration:
 ### 5. **Resampling** ✅ Production-Ready
 
 **Status:** 25/25 tests passing, 100% coverage  
-**Performance:** 10-200× faster than pure Python  
+**Performance:** ~5× faster than a vectorized-numpy bootstrap loop  
 **Documentation:** See [src/kernels/resampling/README.md](./src/kernels/resampling/README.md)
 
 Lightning-fast resampling methods with ergonomic interfaces:
@@ -417,21 +417,40 @@ Order-statistic utilities built on O(n) selection:
 
 ## Performance Highlights
 
-Actual benchmarks vs SciPy/statsmodels/pandas:
+Measured with `timeit` (best of 5) on Windows 11, Python 3.10, numpy 2.2 /
+pandas 2.3 / scipy 1.15 / statsmodels 0.14. `ratio = reference_time /
+bunker_time`, so **> 1× is faster, < 1× is slower**. Numbers are machine- and
+size-dependent; reproduce with `benchmarks/`.
 
-| Operation | Speedup | Notes |
-|-----------|---------|-------|
-| Median | 2.9× | Large arrays (n=1M) |
-| MAD | 4.6× | Large arrays (n=1M) |
-| Rolling Median | 244× | 10-element window |
-| Qn Scale | 124× | Robust scale estimator |
-| robust_fit | 5.2× | Fused median+MAD |
-| Chi-square test | 1.2-1.5× | With edge case handling |
-| Covariance matrix | ~9,500 ops/sec | 100×20 matrices |
+| Operation | Size | vs reference | Ratio |
+|-----------|------|--------------|-------|
+| `rolling_std` (w=50) | n=1e4 | pandas | **5.2×** |
+| `rolling_std` (w=50) | n=1e6 | pandas | **2.6×** |
+| `rolling_mean` (w=50) | n=1e4 / 1e6 | pandas | **3.3× / 2.4×** |
+| `mad` | n=1e6 | numpy | **4.0×** |
+| `median` | n=1e4 / 1e6 | numpy | **3.6× / 2.1×** |
+| `bootstrap_mean_ci` (1000 res.) | n=1e4 | numpy (vectorized) | **4.9×** |
+| `norm_cdf` | n=1e6 | scipy | **2.5×** |
+| `kpss_test` | n=5000 | statsmodels | 1.2× |
+| `percentile` | n=1e6 | numpy | ~1.1× (parity) |
+| `cov_matrix` / `corr_matrix` | 1000×50 | numpy | **0.6×** (slower — see below) |
+| `adf_test` (matched lag count) | n=5000 | statsmodels | **0.15×** (slower — see below) |
 
-**Average cross-function speedups:**
-- Robust stats: 7.5× faster median, 17.3× faster MAD
-- Rolling operations: 239× faster median
+**Where it wins:** streaming/rolling statistics, order-statistic estimators
+(median/MAD/Qn), and bootstrap confidence intervals — the O(n) single-pass and
+selection-based kernels are 2–5× faster than the pandas/numpy equivalents,
+with the largest margins at small-to-medium `n`.
+
+**Where it does not (honest caveats):**
+- **Dense linear algebra** (`cov_matrix`, `corr_matrix`) is ~0.6× numpy. numpy
+  dispatches these to a tuned multithreaded BLAS (OpenBLAS/MKL); the portable
+  pure-Rust kernels here do not link a BLAS, so they trail on large dense
+  products. If matrix throughput is your bottleneck, compute these with numpy.
+- **`adf_test` with an explicit lag count** is slower than statsmodels, whose
+  OLS path is LAPACK-backed. (The headline "hundreds of ×" figures that
+  appeared in earlier drafts compared against statsmodels' *default* automatic
+  lag search, which does substantially more work — an apples-to-oranges
+  comparison that has been removed.)
 
 ---
 
@@ -535,7 +554,7 @@ maturin build --release
 - **Robust regression:** Huber, Theil-Sen, RANSAC
 - **Weighted statistics:** Weighted median, MAD, robust_fit
 - **Additional estimators:** Biweight, Hampel, S/MM estimators
-- **Performance:** Automatic parallelization, 5-10× multivariate speedups
+- **Performance:** Automatic parallelization of the multivariate kernels
 
 ### v0.4.0 (Planned - Q2 2026)
 - Bayesian inference module
