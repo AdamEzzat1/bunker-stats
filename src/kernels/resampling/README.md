@@ -96,9 +96,9 @@ building-block routine; for inference use `bootstrap_mean_ci` or
 - **Returns** a scalar; `NaN` if `len(x) == 0` or `n_resamples == 0`.
 - Each resample uses an independent RNG derived from
   `mix_seed(random_state or 0, resample_index)`, so individual resample means
-  are exactly reproducible. The final aggregation is a parallel floating-point
-  sum when the `parallel` cargo feature is enabled — see
-  [Determinism & seeding](#determinism--seeding).
+  are exactly reproducible. The per-resample means are collected in index
+  order and averaged with a serial sum, so the result is bit-identical across
+  thread counts — see [Determinism & seeding](#determinism--seeding).
 
 ### `bootstrap_mean_ci`
 
@@ -289,10 +289,10 @@ wrapping), so replicates form a stationary series. Less sensitive to the exact
 choice of `block_len` than fixed-block schemes; a good default when the
 dependence length is uncertain.
 
-**Note on seeding.** Unlike the i.i.d. bootstrap family, these three functions
-draw from OS entropy when `random_state=None` — repeated calls give different
-intervals. Pass an explicit `random_state` for reproducibility. See
-[Determinism & seeding](#determinism--seeding).
+**Note on seeding.** These three functions use a single sequential RNG stream
+(not per-resample mixing), seeded with `random_state.unwrap_or(0)`:
+`random_state=None` equals `random_state=0` and repeated calls are
+bit-identical. See [Determinism & seeding](#determinism--seeding).
 
 ---
 
@@ -417,15 +417,17 @@ or that a few observations dominate the SE. It costs roughly `n` full
 bootstraps — keep `n_resamples` modest (100–500).
 
 - Requires `n >= 3`; returns NaN for `n <= 2` or `n_resamples == 0`.
-- When `random_state=None`, this function uses fixed default seed
-  `0xBADC0FFEE` (not 0), so `None` is deterministic but does **not** equal
-  `random_state=0`.
+- Follows the shared seeding policy: `random_state=None` equals
+  `random_state=0` (bit-identical results).
 
 ---
 
 ## Determinism & seeding
 
-All randomized kernels use the PCG64 generator (`rand_pcg::Pcg64`).
+All randomized kernels use the PCG64 generator (`rand_pcg::Pcg64`) and one
+seeding policy: **`random_state=None` means seed 0.** For every resampler in
+this module, `random_state=None` and `random_state=0` return bit-identical
+results, and repeated calls (seeded or not) are bit-identical.
 
 **Per-resample seed mixing (i.i.d. bootstrap family, permutation tests,
 JAB).** Each resample b gets its own generator seeded with
@@ -435,44 +437,27 @@ arithmetic; golden-ratio multiply for avalanche). Consequences:
 - Resample b's draw sequence depends only on `(base_seed, b)` — never on
   thread scheduling or on other resamples. Results are identical whether the
   crate is built with or without the `parallel` (rayon) feature, and across
-  thread counts, up to the aggregation caveat below.
-- `random_state=None` defaults to base seed **0** for `bootstrap_mean`,
-  `bootstrap_mean_ci`, `bootstrap_ci`, `bootstrap_corr`, `bootstrap_se`,
-  `bootstrap_var`, `bootstrap_t_ci_mean`, `bootstrap_bca_ci`,
-  `bayesian_bootstrap_ci`, `permutation_corr_test`, and
-  `permutation_mean_diff_test`. Two identical calls return bit-identical
-  results, and `random_state=None` equals `random_state=0` (verified
-  empirically).
-- `jackknife_after_bootstrap_se_mean` also defaults to a fixed seed when
-  `random_state=None`, but that seed is `0xBADC0FFEE`, so `None` and `0` give
-  different (each individually reproducible) results.
+  thread counts.
+- This covers `bootstrap_mean`, `bootstrap_mean_ci`, `bootstrap_ci`,
+  `bootstrap_corr`, `bootstrap_se`, `bootstrap_var`, `bootstrap_t_ci_mean`,
+  `bootstrap_bca_ci`, `bayesian_bootstrap_ci`, `permutation_corr_test`,
+  `permutation_mean_diff_test`, and `jackknife_after_bootstrap_se_mean`.
 
-**Block bootstraps use entropy when unseeded.** The three block bootstraps
-(`moving_block_bootstrap_mean_ci`, `circular_block_bootstrap_mean_ci`,
-`stationary_bootstrap_mean_ci`) construct their RNG as
-`Pcg64::from_entropy()` when `random_state=None` — repeated unseeded calls
-return **different** intervals (verified empirically; only the point estimate,
-the sample mean, is stable). They also use a single sequential RNG stream
-rather than per-resample mixing. **Recommendation: always pass an explicit
-`random_state` to the block bootstraps when reproducibility matters.** With a
-seed, repeated calls are bit-identical.
+**Block bootstraps** (`moving_block_bootstrap_mean_ci`,
+`circular_block_bootstrap_mean_ci`, `stationary_bootstrap_mean_ci`) use a
+single sequential PCG64 stream seeded with `random_state.unwrap_or(0)` — the
+same None-means-0 policy. (Before 0.3.0 they drew entropy when unseeded;
+unseeded calls are now reproducible.)
 
-**Parallel aggregation caveat.** With the `parallel` cargo feature, resamples
-are evaluated with rayon. Most functions collect per-resample statistics into
-a vector (rayon's indexed `collect` preserves order) and reduce sequentially,
-so their output does not depend on thread count. Two exceptions:
-
-- `bootstrap_mean` reduces with a **parallel floating-point sum**
-  (`into_par_iter().map(...).sum()`), whose association order is not fixed by
-  rayon; the last-ulp rounding of the final average can in principle differ
-  across thread counts or work-stealing schedules. Each per-resample mean is
-  still exact and seed-derived; only the final summation order varies.
-- The permutation tests reduce with a parallel **integer** sum of extreme
-  counts, which is exact regardless of order — no reproducibility impact.
+**Parallel aggregation.** With the `parallel` cargo feature, resamples are
+evaluated with rayon. Every function collects per-resample statistics into a
+vector (rayon's indexed `collect` preserves order) and reduces sequentially —
+including `bootstrap_mean`, which as of 0.3.0 performs its final average as a
+serial sum — or reduces with an exact integer sum (permutation tests). Output
+therefore does not depend on thread count or work-stealing schedule.
 
 Without the `parallel` feature, all iteration is sequential
-(`IntoParIterCompat` maps `into_par_iter()` to `into_iter()`) and results are
-fully deterministic given the seeds above.
+(`IntoParIterCompat` maps `into_par_iter()` to `into_iter()`).
 
 ## Edge cases
 

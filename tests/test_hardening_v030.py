@@ -558,3 +558,77 @@ class TestZeroVarianceSemantics:
         assert np.isnan(mean)
         assert np.isnan(var)
         assert n == 0
+
+
+# ======================================================================
+# Tier 2: determinism — one seeding policy (None == seed 0, bit-exact)
+# ======================================================================
+
+def _flatten(v):
+    if isinstance(v, tuple):
+        out = []
+        for item in v:
+            out.extend(_flatten(item))
+        return out
+    return [float(v)]
+
+
+class TestResamplerDeterminism:
+    RNG = np.random.default_rng(99)
+    X = RNG.normal(size=60)
+    Y = RNG.normal(size=60)
+
+    # All 15 randomized resamplers, called once with random_state=None and
+    # once with random_state=0 — results must be bit-identical.
+    RESAMPLERS = [
+        ("bootstrap_mean", lambda x, y, rs: b.bootstrap_mean(x, 200, random_state=rs)),
+        ("bootstrap_mean_ci", lambda x, y, rs: b.bootstrap_mean_ci(x, 200, random_state=rs)),
+        ("bootstrap_ci", lambda x, y, rs: b.bootstrap_ci(x, n_resamples=200, random_state=rs)),
+        ("bootstrap_corr", lambda x, y, rs: b.bootstrap_corr(x, y, 200, random_state=rs)),
+        ("bootstrap_se", lambda x, y, rs: b.bootstrap_se(x, n_resamples=200, random_state=rs)),
+        ("bootstrap_var", lambda x, y, rs: b.bootstrap_var(x, n_resamples=200, random_state=rs)),
+        ("bootstrap_t_ci_mean", lambda x, y, rs: b.bootstrap_t_ci_mean(x, n_resamples=100, random_state=rs)),
+        ("bootstrap_bca_ci", lambda x, y, rs: b.bootstrap_bca_ci(x, n_resamples=200, random_state=rs)),
+        ("bayesian_bootstrap_ci", lambda x, y, rs: b.bayesian_bootstrap_ci(x, n_resamples=200, random_state=rs)),
+        ("moving_block_bootstrap_mean_ci", lambda x, y, rs: b.moving_block_bootstrap_mean_ci(x, 5, n_resamples=200, random_state=rs)),
+        ("circular_block_bootstrap_mean_ci", lambda x, y, rs: b.circular_block_bootstrap_mean_ci(x, 5, n_resamples=200, random_state=rs)),
+        ("stationary_bootstrap_mean_ci", lambda x, y, rs: b.stationary_bootstrap_mean_ci(x, 5, n_resamples=200, random_state=rs)),
+        ("permutation_corr_test", lambda x, y, rs: b.permutation_corr_test(x, y, n_permutations=200, random_state=rs)),
+        ("permutation_mean_diff_test", lambda x, y, rs: b.permutation_mean_diff_test(x, y, n_permutations=200, random_state=rs)),
+        ("jackknife_after_bootstrap_se_mean", lambda x, y, rs: b.jackknife_after_bootstrap_se_mean(x, n_resamples=50, random_state=rs)),
+    ]
+
+    @pytest.mark.parametrize("name,fn", RESAMPLERS, ids=[n for n, _ in RESAMPLERS])
+    def test_none_equals_seed_zero_bit_identical(self, name, fn):
+        got_none = _flatten(fn(self.X, self.Y, None))
+        got_zero = _flatten(fn(self.X, self.Y, 0))
+        assert got_none == got_zero, f"{name}: None != seed 0"
+
+    @pytest.mark.parametrize("name,fn", RESAMPLERS, ids=[n for n, _ in RESAMPLERS])
+    def test_repeated_unseeded_calls_bit_identical(self, name, fn):
+        first = _flatten(fn(self.X, self.Y, None))
+        second = _flatten(fn(self.X, self.Y, None))
+        assert first == second, f"{name}: unseeded calls differ"
+
+    def test_bootstrap_mean_invariant_to_thread_count(self):
+        """The serial final sum makes bootstrap_mean bit-identical across
+        rayon thread counts (RAYON_NUM_THREADS is read at pool creation, so
+        each configuration runs in its own subprocess)."""
+        import os
+        import subprocess
+        import sys
+
+        code = (
+            "import numpy as np, bunker_stats_rs as b;"
+            "x = np.random.default_rng(99).normal(size=60);"
+            "print(repr(b.bootstrap_mean(x, 5000, random_state=None)))"
+        )
+        results = []
+        for threads in ("1", "4"):
+            env = dict(os.environ, RAYON_NUM_THREADS=threads)
+            out = subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True, text=True, env=env, check=True,
+            )
+            results.append(out.stdout.strip())
+        assert results[0] == results[1], f"thread-count dependent: {results}"

@@ -233,7 +233,8 @@ pub fn jackknife_after_bootstrap_se_mean(
         return Ok(f64::NAN);
     }
 
-    let base_seed = random_state.unwrap_or(0xBADC0FFEEu64);
+    // Same seeding policy as the rest of the resamplers: None == seed 0.
+    let base_seed = random_state.unwrap_or(0);
 
     // OPTIMIZED: Thread-local buffer reuse for massive speedup
     let se_loo: Vec<f64> = (0..n)

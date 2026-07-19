@@ -14,7 +14,7 @@ License: See LICENSE file
 
 ### Core Principles
 
-🎯 **Deterministic** - Same input always produces identical output (bit-exact reproducibility)  
+🎯 **Deterministic** - Bit-exact given the same seed: every randomized routine is reproducible, and `random_state=None` behaves as seed 0  
 ⚡ **High-Performance** - 2-244× faster than SciPy/pandas/statsmodels equivalents  
 🔢 **Numerically Stable** - Kahan summation, Welford's algorithm, careful conditioning  
 🧪 **Thoroughly Tested** - 100% test coverage with comprehensive edge case validation  
@@ -105,6 +105,20 @@ deliberate behavior change:
   coefficients with |value| > 1.
 - **`welford([])` returns `(nan, nan, 0)`** — the mean of no observations is
   NaN, not 0.0.
+
+### Determinism
+
+- **`random_state=None` now means seed 0 for every randomized routine.** The
+  three block bootstraps (`moving_block_bootstrap_mean_ci`,
+  `circular_block_bootstrap_mean_ci`, `stationary_bootstrap_mean_ci`)
+  previously drew OS entropy when unseeded, and
+  `jackknife_after_bootstrap_se_mean` used a different fixed default seed.
+  All 15 resamplers now return bit-identical results for `None` vs `0` and
+  across repeated calls.
+- **`bootstrap_mean` is bit-identical across thread counts**: per-resample
+  means are collected in index order and averaged with a serial sum, removing
+  the last parallel floating-point reduction whose rounding could depend on
+  rayon's work-stealing schedule.
 
 ---
 
@@ -424,7 +438,7 @@ Actual benchmarks vs SciPy/statsmodels/pandas:
 ## Design Philosophy
 
 ### 1. **Determinism First**
-Every operation produces identical results across runs, platforms, and library versions. No randomness without explicit seeding, no floating-point non-determinism.
+Results are bit-exact given the same seed. Deterministic kernels produce identical results across runs and thread counts; every randomized routine takes a `random_state`, and leaving it as `None` uses seed 0 rather than entropy, so even "unseeded" calls are reproducible.
 
 ### 2. **Edge Cases Matter**
 Production data has empty arrays, NaN values, zero variance, and extreme values. All functions handle these gracefully with clear, documented behavior.

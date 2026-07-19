@@ -47,10 +47,15 @@ pub fn bootstrap_mean(
 
     let base_seed = random_state.unwrap_or(0);
 
-    let sum: f64 = (0..n_resamples)
+    // Collect per-resample means in index order, then reduce with a SERIAL
+    // floating-point sum: a rayon parallel `.sum::<f64>()` has an
+    // unspecified association order, so its last-ulp rounding could differ
+    // across thread counts. The indexed collect below preserves order, and
+    // the sequential reduction makes the result bit-exact regardless of
+    // parallelism.
+    let boots: Vec<f64> = (0..n_resamples)
         .into_par_iter()
         .map(|b| {
-            // OPTIMIZED: Better RNG mixing
             let seed = mix_seed(base_seed, b as u64);
             let mut rng = Pcg64::seed_from_u64(seed);
             let mut sum = 0.0;
@@ -60,8 +65,9 @@ pub fn bootstrap_mean(
             }
             sum / (n as f64)
         })
-        .sum();
+        .collect();
 
+    let sum: f64 = boots.iter().sum();
     Ok(sum / (n_resamples as f64))
 }
 
@@ -1166,10 +1172,9 @@ pub fn moving_block_bootstrap_mean_ci(
     }
     let theta_hat = x.iter().copied().sum::<f64>() / (n as f64);
 
-    let mut rng: Pcg64 = match random_state {
-        Some(seed) => Pcg64::seed_from_u64(seed),
-        None => Pcg64::from_entropy(),
-    };
+    // One seeding policy for every resampler: random_state=None means seed 0,
+    // so unseeded calls are reproducible and None == Some(0) bit-exactly.
+    let mut rng: Pcg64 = Pcg64::seed_from_u64(random_state.unwrap_or(0));
 
     let mut boots = vec![0.0_f64; n_resamples];
     let num_blocks = (n + block_len - 1) / block_len;
@@ -1212,10 +1217,9 @@ pub fn circular_block_bootstrap_mean_ci(
     }
     let theta_hat = x.iter().copied().sum::<f64>() / (n as f64);
 
-    let mut rng: Pcg64 = match random_state {
-        Some(seed) => Pcg64::seed_from_u64(seed),
-        None => Pcg64::from_entropy(),
-    };
+    // One seeding policy for every resampler: random_state=None means seed 0,
+    // so unseeded calls are reproducible and None == Some(0) bit-exactly.
+    let mut rng: Pcg64 = Pcg64::seed_from_u64(random_state.unwrap_or(0));
 
     let mut boots = vec![0.0_f64; n_resamples];
     let num_blocks = (n + block_len - 1) / block_len;
@@ -1260,10 +1264,9 @@ pub fn stationary_bootstrap_mean_ci(
     let theta_hat = x.iter().copied().sum::<f64>() / (n as f64);
 
     let p = (1.0 / (block_len as f64)).clamp(1e-12, 1.0);
-    let mut rng: Pcg64 = match random_state {
-        Some(seed) => Pcg64::seed_from_u64(seed),
-        None => Pcg64::from_entropy(),
-    };
+    // One seeding policy for every resampler: random_state=None means seed 0,
+    // so unseeded calls are reproducible and None == Some(0) bit-exactly.
+    let mut rng: Pcg64 = Pcg64::seed_from_u64(random_state.unwrap_or(0));
 
     let mut boots = vec![0.0_f64; n_resamples];
 
