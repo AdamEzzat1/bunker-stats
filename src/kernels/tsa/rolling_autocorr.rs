@@ -21,15 +21,18 @@ pub fn rolling_autocorr<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if n == 0 || window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
     }
     if lag >= window {
         return Err(PyValueError::new_err(
             "lag must be smaller than window",
         ));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
     let out_len = n - window + 1;
@@ -90,11 +93,12 @@ pub fn rolling_correlation<'py>(
     if n != y_data.len() {
         return Err(PyValueError::new_err("x and y must have same length"));
     }
-    
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
     let out_len = n - window + 1;
@@ -149,12 +153,10 @@ pub fn rolling_autocorr_multi<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
     }
-    
+
     // Validate all lags
     for &lag in &lags {
         if lag >= window {
@@ -162,6 +164,12 @@ pub fn rolling_autocorr_multi<'py>(
                 format!("all lags must be smaller than window, got lag={}", lag)
             ));
         }
+    }
+
+    if window > n {
+        use numpy::IntoPyArray;
+        let arr = numpy::ndarray::Array2::<f64>::zeros((0, lags.len()));
+        return Ok(arr.into_pyarray_bound(py));
     }
 
     let out_len = n - window + 1;

@@ -22,8 +22,17 @@ pub fn acf_raw(x: &[f64], max_lag: usize) -> Vec<f64> {
     }
     var /= n as f64;
     
-    if var <= 0.0 {
-        return vec![1.0; max_lag + 1];
+    // Constant input must be detected exactly (all elements equal): the mean
+    // of n identical values carries round-off, so `var` computed above can be
+    // a tiny positive number whose autocovariances then cancel into a fake
+    // near-unity ACF. Zero-variance (constant) input: the lag-0
+    // autocorrelation is 1 by convention, but every lag >= 1 is 0/0 and
+    // therefore undefined. Matches statsmodels.tsa.stattools.acf.
+    let is_constant = x.iter().all(|&v| v == x[0]);
+    if var <= 0.0 || is_constant {
+        let mut out = vec![f64::NAN; max_lag + 1];
+        out[0] = 1.0;
+        return out;
     }
 
     let mut acf = vec![0.0_f64; max_lag + 1];
@@ -101,7 +110,14 @@ fn pacf_levinson_durbin(x: &[f64], max_lag: usize) -> Vec<f64> {
     let mut pacf = vec![0.0_f64; max_lag + 1];
     pacf[0] = 1.0;
     
-    if max_lag == 0 || r[1].is_nan() {
+    if max_lag == 0 {
+        return pacf;
+    }
+    if r[1].is_nan() {
+        // Constant input: partial autocorrelations at lags >= 1 are undefined.
+        for v in pacf.iter_mut().skip(1) {
+            *v = f64::NAN;
+        }
         return pacf;
     }
     
@@ -430,9 +446,13 @@ pub fn pacf_innovations<'py>(
         }
         v[n_iter] = var_update;
         
-        // PACF is the last theta coefficient
-        pacf[n_iter] = theta[n_iter - 1][n_iter - 1];
-        
+        // PACF is the last theta coefficient. A partial autocorrelation is
+        // bounded by 1 in magnitude; values outside [-1, 1] signal numerical
+        // breakdown of the innovations recursion, so report NaN rather than
+        // an impossible coefficient.
+        let coef = theta[n_iter - 1][n_iter - 1];
+        pacf[n_iter] = if coef.abs() > 1.0 { f64::NAN } else { coef };
+
         if v[n_iter] <= 0.0 || !v[n_iter].is_finite() {
             for i in (n_iter + 1)..=max_lag {
                 pacf[i] = f64::NAN;
@@ -465,10 +485,19 @@ pub fn pacf_burg<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![1.0]));
     }
 
+    // Constant input: partial autocorrelations at lags >= 1 are undefined
+    // (see acf_raw). Exact all-equal check, since demeaned residues of a
+    // constant series are round-off noise, not signal.
+    if x.iter().all(|&v| v == x[0]) {
+        let mut pacf = vec![f64::NAN; max_lag + 1];
+        pacf[0] = 1.0;
+        return Ok(PyArray1::from_vec_bound(py, pacf));
+    }
+
     // Demean
     let mean = x.iter().sum::<f64>() / (n as f64);
     let x_centered: Vec<f64> = x.iter().map(|&v| v - mean).collect();
-    
+
     let mut pacf = vec![0.0_f64; max_lag + 1];
     pacf[0] = 1.0;
     

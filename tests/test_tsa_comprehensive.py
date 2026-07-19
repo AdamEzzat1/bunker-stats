@@ -169,10 +169,12 @@ class TestACF:
         result = bs.acf(np.array([]), nlags=10)
         assert len(result) == 0
         
-        # Constant series (zero variance)
+        # Constant series (zero variance): lag 0 is 1 by convention, all
+        # further lags are 0/0 and therefore NaN (v0.3, statsmodels parity)
         result = bs.acf(np.ones(50), nlags=10)
         assert len(result) == 11
-        assert all(r == 1.0 for r in result)
+        assert result[0] == 1.0
+        assert np.all(np.isnan(np.asarray(result)[1:]))
         
         # Single value
         result = bs.acf(np.array([1.0]), nlags=5)

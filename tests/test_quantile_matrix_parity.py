@@ -18,7 +18,7 @@ def _np_percentile_clamped(x: np.ndarray, q: float) -> float:
 
 
 @pytest.mark.parametrize("n", [1, 2, 10, 101])
-@pytest.mark.parametrize("q", [-10.0, 0.0, 50.0, 100.0, 120.0])
+@pytest.mark.parametrize("q", [0.0, 25.0, 50.0, 100.0])
 def test_percentile_np_matches_numpy_random(n, q):
     rng = np.random.default_rng(0)
     x = rng.normal(size=n).astype(np.float64)
@@ -52,6 +52,14 @@ def test_percentile_np_nan_propagates():
     assert np.isnan(got)
 
 
+@pytest.mark.parametrize("q", [-10.0, 120.0])
+def test_percentile_np_out_of_range_raises(q):
+    # v0.3: q outside [0, 100] raises instead of silently clamping
+    x = np.arange(10.0)
+    with pytest.raises(ValueError):
+        bs.percentile_np(x, q)
+
+
 def test_iqr_np_matches_numpy():
     rng = np.random.default_rng(1)
     x = rng.normal(size=257).astype(np.float64)
@@ -75,13 +83,14 @@ def test_iqr_np_nan_propagates():
     assert np.isnan(iqr)
 
 
+# v0.3: winsorize takes quantile fractions in [0, 1] only; percent-style and
+# out-of-range arguments raise ValueError (see the ValueError test below).
 @pytest.mark.parametrize(
     "lower_q, upper_q",
     [
-        (0.0, 100.0),
-        (5.0, 95.0),
-        (-10.0, 120.0),  # clamp behavior should be fine
-        (25.0, 75.0),
+        (0.0, 1.0),
+        (0.05, 0.95),
+        (0.25, 0.75),
     ],
 )
 def test_winsorize_np_matches_numpy_bounds(lower_q, upper_q):
@@ -90,8 +99,8 @@ def test_winsorize_np_matches_numpy_bounds(lower_q, upper_q):
 
     out = np.asarray(bs.winsorize_np(x, lower_q, upper_q), dtype=np.float64)
 
-    lo = _np_percentile_clamped(x, lower_q)
-    hi = _np_percentile_clamped(x, upper_q)
+    lo = _np_percentile_clamped(x, lower_q * 100.0)
+    hi = _np_percentile_clamped(x, upper_q * 100.0)
 
     # Output must be clamped into [lo, hi]
     assert out.min() >= lo - 1e-12
@@ -108,6 +117,21 @@ def test_winsorize_np_matches_numpy_bounds(lower_q, upper_q):
     # Values already inside range remain unchanged
     mid = (~below) & (~above)
     assert np.allclose(out[mid], x[mid], rtol=0, atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "lower_q, upper_q",
+    [
+        (5.0, 95.0),      # percent units no longer accepted
+        (-10.0, 120.0),   # out of range
+        (0.9, 0.1),       # inverted
+        (0.5, 0.5),       # equal
+    ],
+)
+def test_winsorize_np_rejects_non_fraction_arguments(lower_q, upper_q):
+    x = np.arange(10.0)
+    with pytest.raises(ValueError):
+        bs.winsorize_np(x, lower_q, upper_q)
 
 
 def test_cov_matrix_np_matches_numpy():

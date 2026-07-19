@@ -64,6 +64,48 @@ regression test (see `tests/test_hardening_v030.py`).
 `scipy.stats.gaussian_kde`) are now registered in the extension module. Every
 name in the facade's `__all__` now resolves to a callable.
 
+### API consistency changes
+
+One shared edge/validation contract across the library. Each item below is a
+deliberate behavior change:
+
+- **Rolling edge rule** (strict, truncated-output kernels): `window < 1` now
+  raises `ValueError` everywhere (several kernels silently returned an empty
+  array); `window > len(x)` now returns an **empty array** everywhere
+  (`rolling_cov`, `rolling_corr`, `rolling_autocorr`, `rolling_correlation`,
+  `rolling_autocorr_multi`, `rolling_min/max/range/cv/count_above/pct_above`
+  previously raised). Exception: `rolling_median` intentionally keeps its
+  pandas-like full-length output (length n, NaN head).
+- **Facade rolling wrappers validate `window` as an integer >= 1**, so a
+  negative window raises `ValueError` instead of `OverflowError`.
+- **`winsorize` accepts quantile fractions in [0, 1] only** with
+  `0 <= lower_q < upper_q <= 1`; the old dual-unit auto-detection (which made
+  `1.0` ambiguous and silently clamped out-of-range arguments) now raises
+  `ValueError`. **`winsorized_mean` (facade) uses the same fraction units**,
+  validating and converting to the kernel's percentile units; the raw
+  `winsorized_mean_np` binding keeps percentile units for backwards
+  compatibility.
+- **`percentile` raises `ValueError` for q outside [0, 100]** (previously
+  silently clamped).
+- **`trimmed_mean` / `trimmed_mean_skipna` raise `ValueError` for
+  `proportion_to_cut` outside [0, 0.5)** (previously returned NaN).
+- **`ewma` requires `0 < alpha <= 1`**, raising `ValueError` otherwise.
+- **`quantile_bins` requires `n_bins >= 1`**; the facade also rejects negative
+  `n_bins` with `ValueError` (previously `OverflowError` or empty output).
+- **Outlier detectors have keyword defaults**: `iqr_outliers(x, k=1.5)`,
+  `zscore_outliers(x, threshold=3.0)`.
+- **`alternative` is validated** against `{"two-sided", "less", "greater"}` in
+  the t-tests, `mann_whitney_u`, and the facade `t_test_2samp` wrapper
+  (`ValueError` otherwise).
+- **`cov` / `corr` raise `ValueError` on length mismatch** (previously the
+  longer input was silently truncated).
+- **`acf`/`pacf` (all methods) on constant input return 1.0 at lag 0 and NaN
+  at lags >= 1** (statsmodels semantics; previously reported spurious
+  autocorrelation). `pacf_innovations` reports NaN instead of impossible
+  coefficients with |value| > 1.
+- **`welford([])` returns `(nan, nan, 0)`** — the mean of no observations is
+  NaN, not 0.0.
+
 ---
 
 ## Release Notes — 0.2.9 Hardening

@@ -604,6 +604,33 @@ rolling_multi_axis0 = _get_rs("rolling_multi_axis0", "rolling_multi_axis0_np")
 
 zscore_skipna = _get_rs("zscore_skipna", "zscore_skipna_np")
 
+
+def _check_window(window) -> int:
+    """Validate an integer window argument at the facade boundary.
+
+    Converts index-like values (Python ints, numpy integer scalars) and raises
+    ValueError for window < 1 — including negative values, which would
+    otherwise surface as OverflowError from the Rust usize conversion.
+    """
+    import operator
+
+    w = operator.index(window)
+    if w < 1:
+        raise ValueError("window must be >= 1")
+    return w
+
+
+_VALID_ALTERNATIVES = ("two-sided", "less", "greater")
+
+
+def _check_alternative(alternative: str) -> str:
+    if alternative not in _VALID_ALTERNATIVES:
+        raise ValueError(
+            f"alternative must be one of {list(_VALID_ALTERNATIVES)}, got {alternative!r}"
+        )
+    return alternative
+
+
 # Preserve raw kernel bindings before rebinding the public names to wrappers.
 _strict = {
     "mean": mean, "std": std, "var": var, "median": median, "mad": mad,
@@ -683,27 +710,32 @@ def corr_matrix(X, *, skipna: bool = False):
 def rolling_mean(x, window: int, *, skipna: bool = False):
     """Trailing rolling mean. Strict: length n-window+1; `skipna=True`: length n,
     pandas min_periods=1 semantics."""
+    window = _check_window(window)
     k = _skipna_kernel["rolling_mean"] if skipna else _strict["rolling_mean"]
     return k(x, window)
 
 def rolling_std(x, window: int, *, skipna: bool = False):
     """Trailing rolling sample std (ddof=1). See `rolling_mean` for shape rules."""
+    window = _check_window(window)
     k = _skipna_kernel["rolling_std"] if skipna else _strict["rolling_std"]
     return k(x, window)
 
 def rolling_zscore(x, window: int, *, skipna: bool = False):
     """Rolling standard score within each trailing window."""
+    window = _check_window(window)
     k = _skipna_kernel["rolling_zscore"] if skipna else _strict["rolling_zscore"]
     return k(x, window)
 
 def rolling_cov(x, y, window: int, *, skipna: bool = False):
     """Trailing rolling covariance. `skipna=True` matches pandas
     rolling(window).cov default semantics (NaN unless the window is complete)."""
+    window = _check_window(window)
     k = _skipna_kernel["rolling_cov"] if skipna else _strict["rolling_cov"]
     return k(x, y, window)
 
 def rolling_corr(x, y, window: int, *, skipna: bool = False):
     """Trailing rolling Pearson correlation. See `rolling_cov` for NaN rules."""
+    window = _check_window(window)
     k = _skipna_kernel["rolling_corr"] if skipna else _strict["rolling_corr"]
     return k(x, y, window)
 
@@ -711,9 +743,35 @@ def winsorize(x, *, lower_q: float = 0.05, upper_q: float = 0.95):
     """Clip tails at the `lower_q` / `upper_q` quantiles (both in [0, 1])."""
     return _strict["winsorize"](x, lower_q, upper_q)
 
+_winsorized_mean_kernel = winsorized_mean
+
+def winsorized_mean(x, lower_q: float = 0.05, upper_q: float = 0.95):
+    """Winsorized mean with tail bounds given as quantile fractions in [0, 1].
+
+    The underlying kernel works in percentile units [0, 100]; this wrapper
+    validates fraction inputs and converts, so `winsorize` and
+    `winsorized_mean` share one unit convention.
+    """
+    if not (0.0 <= lower_q < upper_q <= 1.0):
+        raise ValueError(
+            "winsorized_mean quantiles must satisfy 0 <= lower_q < upper_q <= 1"
+        )
+    return _winsorized_mean_kernel(x, lower_q * 100.0, upper_q * 100.0)
+
+_quantile_bins_kernel = quantile_bins
+
+def quantile_bins(x, n_bins: int):
+    """Assign each value to one of `n_bins` quantile bins (n_bins >= 1)."""
+    import operator
+
+    n = operator.index(n_bins)
+    if n < 1:
+        raise ValueError("n_bins must be >= 1")
+    return _quantile_bins_kernel(x, n)
+
 def t_test_2samp(x, y, *, equal_var: bool = True, alternative: str = "two-sided"):
     """Two-sample t-test. `equal_var=False` gives Welch's t (scipy semantics)."""
-    return _strict["t_test_2samp"](x, y, equal_var, alternative)
+    return _strict["t_test_2samp"](x, y, equal_var, _check_alternative(alternative))
 
 def cohens_d_2samp(x, y, *, pooled: bool = True):
     """Cohen's d effect size for two samples."""

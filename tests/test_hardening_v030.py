@@ -334,3 +334,227 @@ class TestExpCdfTinyArgument:
         got = np.asarray(b.exp_cdf(x, lam=0.7))
         want = scipy_stats.expon.cdf(x, scale=1.0 / 0.7)
         np.testing.assert_allclose(got, want, rtol=1e-13)
+
+
+# ======================================================================
+# Tier 1a: rolling edge rules — window < 1 raises, window > n is empty
+# ======================================================================
+
+class TestRollingEdgeRules:
+    X = np.arange(10.0)
+
+    @pytest.mark.parametrize("fn", [
+        lambda x: b.rolling_mean_np(x, 0),
+        lambda x: b.rolling_std_np(x, 0),
+        lambda x: b.rolling_var_np(x, 0),
+        lambda x: b.rolling_mean_std_np(x, 0),
+        lambda x: b.rolling_zscore_np(x, 0),
+        lambda x: b.rolling_cov_np(x, x, 0),
+        lambda x: b.rolling_corr_np(x, x, 0),
+        lambda x: b.rolling_mean_nan_np(x, 0),
+        lambda x: b.rolling_std_nan_np(x, 0),
+        lambda x: b.rolling_zscore_nan_np(x, 0),
+        lambda x: b.rolling_cov_nan_np(x, x, 0),
+        lambda x: b.rolling_corr_nan_np(x, x, 0),
+        lambda x: b.rolling_correlation(x, x, window=0),
+        lambda x: b.rolling_min(x, window=0),
+        lambda x: b.rolling_max(x, window=0),
+        lambda x: b.rolling_range(x, window=0),
+        lambda x: b.rolling_cv(x, window=0),
+        lambda x: b.rolling_count_above(x, threshold=0.0, window=0),
+        lambda x: b.rolling_pct_above(x, threshold=0.0, window=0),
+        lambda x: b.rolling_mean_axis0_np(x.reshape(5, 2), 0),
+    ])
+    def test_window_zero_raises(self, fn):
+        with pytest.raises(ValueError):
+            fn(self.X)
+
+    @pytest.mark.parametrize("fn", [
+        lambda x: b.rolling_mean_np(x, 11),
+        lambda x: b.rolling_std_np(x, 11),
+        lambda x: b.rolling_cov_np(x, x, 11),
+        lambda x: b.rolling_corr_np(x, x, 11),
+        lambda x: b.rolling_correlation(x, x, window=11),
+        lambda x: b.rolling_autocorr(x, lag=1, window=11),
+        lambda x: b.rolling_min(x, window=11),
+        lambda x: b.rolling_max(x, window=11),
+        lambda x: b.rolling_range(x, window=11),
+        lambda x: b.rolling_cv(x, window=11),
+        lambda x: b.rolling_count_above(x, threshold=0.0, window=11),
+        lambda x: b.rolling_pct_above(x, threshold=0.0, window=11),
+    ])
+    def test_window_larger_than_n_is_empty(self, fn):
+        out = np.asarray(fn(self.X))
+        assert out.size == 0
+
+    def test_rolling_autocorr_multi_window_larger_than_n(self):
+        out = np.asarray(b.rolling_autocorr_multi(self.X, lags=[1, 2], window=11))
+        assert out.shape == (0, 2)
+
+    def test_facade_negative_window_is_value_error(self):
+        for call in (
+            lambda: bs.rolling_mean(self.X, -3),
+            lambda: bs.rolling_std(self.X, -3),
+            lambda: bs.rolling_zscore(self.X, 0),
+            lambda: bs.rolling_cov(self.X, self.X, -1),
+            lambda: bs.rolling_corr(self.X, self.X, -1),
+        ):
+            with pytest.raises(ValueError):
+                call()
+
+    def test_rolling_median_keeps_length_n(self):
+        # Intentional exception to the truncated-shape rule: rolling_median is
+        # pandas-like and returns a full-length array.
+        out = np.asarray(b.rolling_median(self.X, 3))
+        assert out.shape == self.X.shape
+
+
+# ======================================================================
+# Tier 1b: unit and range validation
+# ======================================================================
+
+class TestUnitRangeValidation:
+    X = np.arange(20.0)
+
+    def test_winsorize_fraction_units(self):
+        out = np.asarray(b.winsorize_np(self.X, 0.1, 0.9))
+        lo = np.percentile(self.X, 10.0)
+        hi = np.percentile(self.X, 90.0)
+        assert out.min() == pytest.approx(lo)
+        assert out.max() == pytest.approx(hi)
+
+    @pytest.mark.parametrize("lo,hi", [(5.0, 95.0), (-0.1, 0.9), (0.9, 0.1), (0.4, 0.4)])
+    def test_winsorize_rejects_bad_bounds(self, lo, hi):
+        with pytest.raises(ValueError):
+            b.winsorize_np(self.X, lo, hi)
+
+    def test_winsorized_mean_facade_uses_fractions(self):
+        data = np.array([1.0, 2.0, 3.0, 4.0, 100.0])
+        got = bs.winsorized_mean(data, 0.1, 0.9)
+        want = b.winsorized_mean_np(data, 10.0, 90.0)  # raw kernel: percent units
+        assert got == pytest.approx(want)
+        with pytest.raises(ValueError):
+            bs.winsorized_mean(data, 10.0, 90.0)
+
+    @pytest.mark.parametrize("q", [-1.0, 100.5, np.nan])
+    def test_percentile_out_of_range_raises(self, q):
+        with pytest.raises(ValueError):
+            b.percentile_np(self.X, q)
+
+    @pytest.mark.parametrize("cut", [0.5, 0.7, -0.1, np.nan])
+    def test_trimmed_mean_bad_cut_raises(self, cut):
+        with pytest.raises(ValueError):
+            b.trimmed_mean_np(self.X, cut)
+        with pytest.raises(ValueError):
+            b.trimmed_mean_skipna_np(self.X, cut)
+
+    @pytest.mark.parametrize("alpha", [0.0, -0.5, 1.5, np.nan])
+    def test_ewma_bad_alpha_raises(self, alpha):
+        with pytest.raises(ValueError):
+            b.ewma_np(self.X, alpha)
+
+    def test_ewma_alpha_one_ok(self):
+        np.testing.assert_allclose(np.asarray(b.ewma_np(self.X, 1.0)), self.X)
+
+    def test_quantile_bins_zero_raises(self):
+        with pytest.raises(ValueError):
+            b.quantile_bins_np(self.X, 0)
+        with pytest.raises(ValueError):
+            bs.quantile_bins(self.X, 0)
+        with pytest.raises(ValueError):
+            bs.quantile_bins(self.X, -4)
+
+
+# ======================================================================
+# Tier 1c: outlier detector keyword defaults
+# ======================================================================
+
+class TestOutlierDefaults:
+    def test_iqr_outliers_default_k(self):
+        x = np.concatenate([np.random.default_rng(0).normal(size=50), [100.0]])
+        got = np.asarray(bs.iqr_outliers(x))
+        want = np.asarray(bs.iqr_outliers(x, 1.5))
+        np.testing.assert_array_equal(got, want)
+        assert got[-1]
+
+    def test_zscore_outliers_default_threshold(self):
+        x = np.concatenate([np.random.default_rng(1).normal(size=200), [50.0]])
+        got = np.asarray(bs.zscore_outliers(x))
+        want = np.asarray(bs.zscore_outliers(x, 3.0))
+        np.testing.assert_array_equal(got, want)
+        assert got[-1]
+
+
+# ======================================================================
+# Tier 1d: alternative validation
+# ======================================================================
+
+class TestAlternativeValidation:
+    def test_bad_alternative_raises_value_error(self):
+        x = np.random.default_rng(2).normal(size=30)
+        y = np.random.default_rng(3).normal(size=30)
+        with pytest.raises(ValueError):
+            b.t_test_1samp_np(x, 0.0, "bogus")
+        with pytest.raises(ValueError):
+            b.t_test_2samp_np(x, y, True, "bogus")
+        with pytest.raises(ValueError):
+            b.mann_whitney_u_np(x, y, "bogus")
+        with pytest.raises(ValueError):
+            bs.t_test_2samp(x, y, alternative="bogus")
+
+
+# ======================================================================
+# Tier 1e: cov/corr length mismatch
+# ======================================================================
+
+class TestLengthMismatch:
+    def test_cov_corr_length_mismatch_raises(self):
+        x = np.arange(10.0)
+        y = np.arange(8.0)
+        with pytest.raises(ValueError):
+            b.cov_np(x, y)
+        with pytest.raises(ValueError):
+            b.corr_np(x, y)
+        with pytest.raises(ValueError):
+            bs.cov(x, y)
+        with pytest.raises(ValueError):
+            bs.corr(x, y)
+
+
+# ======================================================================
+# Tier 1f: zero-variance and empty-input semantics
+# ======================================================================
+
+class TestZeroVarianceSemantics:
+    def test_acf_constant_is_nan_beyond_lag0(self):
+        x = np.full(50, 3.14)
+        out = np.asarray(b.acf(x, nlags=5))
+        assert out[0] == 1.0
+        assert np.all(np.isnan(out[1:]))
+
+    def test_pacf_constant_is_nan_beyond_lag0(self):
+        x = np.full(50, 3.14)
+        for fn in (b.pacf, b.pacf_yw, b.pacf_innovations, b.pacf_burg):
+            out = np.asarray(fn(x, nlags=5))
+            assert out[0] == 1.0, fn
+            assert np.all(np.isnan(out[1:])), fn
+
+    def test_pacf_innovations_never_exceeds_one(self):
+        rng = np.random.default_rng(5)
+        # near-unit-root series stress the innovations recursion
+        x = np.cumsum(rng.normal(size=200))
+        out = np.asarray(b.pacf_innovations(x, nlags=30))
+        finite = out[np.isfinite(out)]
+        assert np.all(np.abs(finite) <= 1.0 + 1e-12)
+
+    def test_welford_empty_returns_nan_mean(self):
+        mean, var, n = b.welford_np(np.array([], dtype=np.float64))
+        assert np.isnan(mean)
+        assert np.isnan(var)
+        assert n == 0
+
+    def test_welford_all_nan_returns_nan_mean(self):
+        mean, var, n = b.welford_np(np.array([np.nan, np.nan]))
+        assert np.isnan(mean)
+        assert np.isnan(var)
+        assert n == 0

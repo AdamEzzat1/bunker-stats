@@ -24,10 +24,13 @@ pub fn rolling_mean<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
     let out_len = n - window + 1;
@@ -60,10 +63,13 @@ pub fn rolling_sum<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
     let out_len = n - window + 1;
@@ -98,10 +104,13 @@ pub fn rolling_var<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
     
     if ddof >= window {
@@ -160,10 +169,13 @@ pub fn rolling_std<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
     
     if ddof >= window {
@@ -222,10 +234,13 @@ pub fn rolling_min<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
     let out_len = n - window + 1;
@@ -288,10 +303,13 @@ pub fn rolling_max<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
     let out_len = n - window + 1;
@@ -351,10 +369,13 @@ pub fn rolling_range<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
     let out_len = n - window + 1;
@@ -446,10 +467,13 @@ pub fn rolling_count_above<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
     let out_len = n - window + 1;
@@ -487,10 +511,13 @@ pub fn rolling_pct_above<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
     let out_len = n - window + 1;
@@ -530,10 +557,13 @@ pub fn rolling_zscore<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
     let out_len = n - window + 1;
@@ -594,10 +624,13 @@ pub fn rolling_cv<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
     let out_len = n - window + 1;

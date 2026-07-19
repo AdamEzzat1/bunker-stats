@@ -318,6 +318,11 @@ fn std_nan_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
 
 #[pyfunction]
 fn percentile_np(a: PyReadonlyArray1<f64>, q: f64) -> PyResult<f64> {
+    if !(0.0..=100.0).contains(&q) {
+        return Err(PyValueError::new_err(
+            "q must be in the range [0, 100] (numpy.percentile semantics)",
+        ));
+    }
     Ok(percentile_slice_k(a.as_slice()?, q))
 }
 
@@ -342,11 +347,23 @@ fn mad_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
     Ok(mad_slice_k(a.as_slice()?))
 }
 
+/// Validate a trim/cut proportion: must be finite and in [0, 0.5).
+#[inline]
+fn check_proportion_to_cut(p: f64) -> PyResult<()> {
+    if !p.is_finite() || p < 0.0 || p >= 0.5 {
+        return Err(PyValueError::new_err(
+            "proportion_to_cut must be in the range [0, 0.5)",
+        ));
+    }
+    Ok(())
+}
+
 #[pyfunction]
 fn trimmed_mean_np(
     a: PyReadonlyArray1<f64>,
     proportion_to_cut: f64,
 ) -> PyResult<f64> {
+    check_proportion_to_cut(proportion_to_cut)?;
     Ok(trimmed_mean_slice_k(a.as_slice()?, proportion_to_cut))
 }
 
@@ -418,6 +435,7 @@ fn mad_skipna_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
 
 #[pyfunction]
 fn trimmed_mean_skipna_np(a: PyReadonlyArray1<f64>, proportion_to_cut: f64) -> PyResult<f64> {
+    check_proportion_to_cut(proportion_to_cut)?;
     Ok(trimmed_mean_slice_skipna_k(a.as_slice()?, proportion_to_cut))
 }
 
@@ -628,12 +646,23 @@ fn mean_over_last_axis_dyn_np<'py>(
 // ======================
 
 
+/// Shared edge rule for strict rolling kernels (v0.3 contract):
+/// window < 1 is a caller error; window > n yields an empty result.
+#[inline]
+fn check_window_ge1(window: usize) -> PyResult<()> {
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    Ok(())
+}
+
 #[pyfunction]
 fn rolling_mean_std_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
     window: usize,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+    check_window_ge1(window)?;
     let xs = a.as_slice()?;
     let (means, stds) = rolling_mean_std_vec(xs, window);
     Ok((PyArray1::from_vec_bound(py, means), PyArray1::from_vec_bound(py, stds)))
@@ -645,6 +674,7 @@ fn rolling_mean_np<'py>(
     a: PyReadonlyArray1<f64>,
     window: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    check_window_ge1(window)?;
     let xs = a.as_slice()?;
     let (means, _stds) = rolling_mean_std_vec(xs, window);
     Ok(PyArray1::from_vec_bound(py, means))
@@ -656,6 +686,7 @@ fn rolling_std_np<'py>(
     a: PyReadonlyArray1<f64>,
     window: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    check_window_ge1(window)?;
     let xs = a.as_slice()?;
     let (_means, stds) = rolling_mean_std_vec(xs, window);
     Ok(PyArray1::from_vec_bound(py, stds))
@@ -667,6 +698,7 @@ fn rolling_var_np<'py>(
     a: PyReadonlyArray1<f64>,
     window: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    check_window_ge1(window)?;
     let xs = a.as_slice()?;
 
 // single rolling pass (engine)
@@ -685,6 +717,7 @@ fn rolling_zscore_np<'py>(
     a: PyReadonlyArray1<f64>,
     window: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    check_window_ge1(window)?;
     let xs = a.as_slice()?;
 
     // single rolling pass
@@ -702,9 +735,10 @@ fn rolling_mean_nan_np<'py>(
     a: PyReadonlyArray1<f64>,
     window: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    check_window_ge1(window)?;
     let xs = a.as_slice()?;
     let n = xs.len();
-    if window == 0 || n == 0 {
+    if n == 0 {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
@@ -742,9 +776,10 @@ fn rolling_std_nan_np<'py>(
     a: PyReadonlyArray1<f64>,
     window: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    check_window_ge1(window)?;
     let xs = a.as_slice()?;
     let n = xs.len();
-    if window == 0 || n == 0 {
+    if n == 0 {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
@@ -793,9 +828,10 @@ fn rolling_zscore_nan_np<'py>(
     a: PyReadonlyArray1<f64>,
     window: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    check_window_ge1(window)?;
     let xs = a.as_slice()?;
     let n = xs.len();
-    if window == 0 || n == 0 {
+    if n == 0 {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
@@ -857,6 +893,9 @@ fn ewma_np<'py>(
     a: PyReadonlyArray1<f64>,
     alpha: f64,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    if !alpha.is_finite() || alpha <= 0.0 || alpha > 1.0 {
+        return Err(PyValueError::new_err("alpha must satisfy 0 < alpha <= 1"));
+    }
     let xs = a.as_slice()?;
     let n = xs.len();
     if n == 0 {
@@ -888,9 +927,10 @@ fn rolling_mean_std_axis0_np<'py>(
     x: PyReadonlyArray2<f64>,
     window: usize,
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<f64>>)> {
+    check_window_ge1(window)?;
     let a = x.as_array();
     let (n_rows, n_cols) = a.dim();
-    if window == 0 || window > n_rows {
+    if window > n_rows {
         let empty = PyArray2::zeros_bound(py, (0, n_cols), false);
         return Ok((empty.clone(), empty));
     }
@@ -909,9 +949,10 @@ fn rolling_mean_axis0_np<'py>(
     x: PyReadonlyArray2<f64>,
     window: usize,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    check_window_ge1(window)?;
     let a = x.as_array();
     let (n_rows, n_cols) = a.dim();
-    if window == 0 || window > n_rows {
+    if window > n_rows {
         return Ok(PyArray2::zeros_bound(py, (0, n_cols), false));
     }
     let flat = a.as_slice().ok_or_else(|| PyValueError::new_err("array must be contiguous"))?;
@@ -928,9 +969,10 @@ fn rolling_std_axis0_np<'py>(
     x: PyReadonlyArray2<f64>,
     window: usize,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    check_window_ge1(window)?;
     let a = x.as_array();
     let (n_rows, n_cols) = a.dim();
-    if window == 0 || window > n_rows {
+    if window > n_rows {
         return Ok(PyArray2::zeros_bound(py, (0, n_cols), false));
     }
     let flat = a.as_slice().ok_or_else(|| PyValueError::new_err("array must be contiguous"))?;
@@ -945,7 +987,7 @@ fn rolling_std_axis0_np<'py>(
 // Outliers & scaling
 // ======================
 
-#[pyfunction]
+#[pyfunction(signature = (a, k=1.5))]
 fn iqr_outliers_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
@@ -962,7 +1004,7 @@ fn iqr_outliers_np<'py>(
     Ok(PyArray1::from_vec_bound(py, mask))
 }
 
-#[pyfunction]
+#[pyfunction(signature = (a, threshold=3.0))]
 fn zscore_outliers_np<'py>(
     py: Python<'py>,
     a: PyReadonlyArray1<f64>,
@@ -1034,11 +1076,9 @@ fn robust_scale_np<'py>(
     Ok((PyArray1::from_vec_bound(py, scaled), med, mad))
 }
 
-// Quantile-based winsorize (kept)
-// NOTE: API accepts quantiles in [0,1] (pytest uses 0.05, 0.95)
-// We convert to percentile in [0,100] for percentile_slice_k.
-// Quantile-based winsorize (API accepts quantiles in [0,1] like 0.05, 0.95;
-// also accepts percent in [0,100] like 5, 95)
+// Quantile-based winsorize. v0.3 contract: quantile fractions in [0, 1] only
+// (0.05, 0.95). Percent-style arguments (5, 95) are rejected — the previous
+// dual-unit auto-detection made 1.0 ambiguous.
 #[pyfunction]
 fn winsorize_np<'py>(
     py: Python<'py>,
@@ -1046,6 +1086,11 @@ fn winsorize_np<'py>(
     lower_q: f64,
     upper_q: f64,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    if !(0.0..=1.0).contains(&lower_q) || !(0.0..=1.0).contains(&upper_q) || lower_q >= upper_q {
+        return Err(PyValueError::new_err(
+            "winsorize quantiles must satisfy 0 <= lower_q < upper_q <= 1",
+        ));
+    }
     let xs = a.as_slice()?;
     if xs.is_empty() {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
@@ -1190,9 +1235,12 @@ fn quantile_bins_np<'py>(
     a: PyReadonlyArray1<f64>,
     n_bins: usize,
 ) -> PyResult<Bound<'py, PyArray1<i64>>> {
+    if n_bins == 0 {
+        return Err(PyValueError::new_err("n_bins must be >= 1"));
+    }
     let xs = a.as_slice()?;
     let n = xs.len();
-    if n == 0 || n_bins == 0 {
+    if n == 0 {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
@@ -1292,13 +1340,25 @@ fn cov_impl(xs: &[f64], ys: &[f64]) -> f64 {
 
 #[pyfunction]
 fn cov_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(cov_impl(x.as_slice()?, y.as_slice()?))
+    let xs = x.as_slice()?;
+    let ys = y.as_slice()?;
+    if xs.len() != ys.len() {
+        return Err(PyValueError::new_err(
+            "x and y must have the same length",
+        ));
+    }
+    Ok(cov_impl(xs, ys))
 }
 
 #[pyfunction]
 fn corr_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
     let xs = x.as_slice()?;
     let ys = y.as_slice()?;
+    if xs.len() != ys.len() {
+        return Err(PyValueError::new_err(
+            "x and y must have the same length",
+        ));
+    }
     let n = xs.len().min(ys.len());
     if n <= 1 {
         return Ok(f64::NAN);
@@ -1686,11 +1746,9 @@ fn rolling_cov_np<'py>(
     if xs.len() != ys.len() {
         return Err(PyValueError::new_err("x and y must have the same length"));
     }
-    if window == 0 {
-        return Err(PyValueError::new_err("window must be >= 1"));
-    }
+    check_window_ge1(window)?;
     if window > xs.len() {
-        return Err(PyValueError::new_err("window must be <= len(x)"));
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
     let out = rolling_cov_vec(xs, ys, window);
@@ -1712,11 +1770,9 @@ fn rolling_corr_np<'py>(
         return Err(PyValueError::new_err("x and y must have the same length"));
     }
     let n = xs.len();
-    if window == 0 {
-        return Err(PyValueError::new_err("window must be >= 1"));
-    }
+    check_window_ge1(window)?;
     if window > n {
-        return Err(PyValueError::new_err("window must be <= len(x)"));
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
     let mut out = Vec::with_capacity(n - window + 1);
 
@@ -1795,6 +1851,10 @@ pub fn welford_np(a: PyReadonlyArray1<f64>) -> PyResult<(f64, f64, usize)> {
         m2 += delta * delta2;
     }
 
+    if n == 0 {
+        // No valid observations: the mean is undefined, not 0.0.
+        return Ok((f64::NAN, f64::NAN, 0));
+    }
     if n < 2 {
         return Ok((mean, f64::NAN, n));
     }
@@ -1988,7 +2048,8 @@ pub fn rolling_cov_nan_np<'py>(
     if ys.len() != n {
         return Err(PyValueError::new_err("length mismatch"));
     }
-    if window == 0 || window > n {
+    check_window_ge1(window)?;
+    if window > n {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
@@ -2031,7 +2092,8 @@ pub fn rolling_corr_nan_np<'py>(
     if ys.len() != n {
         return Err(PyValueError::new_err("length mismatch"));
     }
-    if window == 0 || window > n {
+    check_window_ge1(window)?;
+    if window > n {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
@@ -2107,7 +2169,8 @@ pub fn rolling_beta_skipna<'py>(
     if ys.len() != n {
         return Err(PyValueError::new_err("length mismatch"));
     }
-    if window == 0 || window > n {
+    check_window_ge1(window)?;
+    if window > n {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
@@ -2149,7 +2212,8 @@ pub fn rolling_linreg_skipna<'py>(
     if ys.len() != n {
         return Err(PyValueError::new_err("length mismatch"));
     }
-    if window == 0 || window > n {
+    check_window_ge1(window)?;
+    if window > n {
         return Ok((
             PyArray1::from_vec_bound(py, vec![]),
             PyArray1::from_vec_bound(py, vec![]),
