@@ -33,7 +33,9 @@ Cargo.lock
 # Build / Distribution
 ############################################
 build/
-dist/
+# Anchored to repo root so it does NOT match the tracked Rust module
+# src/kernels/dist/ (an unanchored `dist/` matched that directory).
+/dist/
 wheelhouse/
 *.whl
 
