@@ -38,8 +38,13 @@ struct RollingState {
     // Translation offset (the first finite value added). Variance is
     // shift-invariant, so accumulating sum/sumsq on `x - offset` avoids
     // catastrophic cancellation in `sumsq - n*mean^2` for large-offset data.
-    // mean/min/max add the offset back on read; variance/std need no adjustment.
+    // min/max add the offset back on read; variance/std need no adjustment.
     offset: f64,
+    // Raw (unshifted) Kahan sum, used only for the mean. Deriving the mean from
+    // the shifted sum as `sum/n + offset` loses precision when |offset| is huge
+    // relative to the true mean (e.g. [1e10, 1, -1e10, 1, 1] -> 0.6); the raw
+    // sum stays small under Kahan compensation and gives the exact mean.
+    sum_raw: KahanState,
 }
 
 impl RollingState {
@@ -52,6 +57,7 @@ impl RollingState {
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             offset: 0.0,
+            sum_raw: KahanState::default(),
         }
     }
     
@@ -75,6 +81,7 @@ impl RollingState {
         self.valid_count += 1;
         self.sum.add(xs);
         self.sumsq.add(xs * xs);
+        self.sum_raw.add(x);
         if xs < self.min {
             self.min = xs;
         }
@@ -89,7 +96,8 @@ impl RollingState {
         if !self.is_valid(min_periods, nan_policy) {
             return f64::NAN;
         }
-        self.sum.value() / self.valid_count as f64 + self.offset
+        // Raw sum keeps the mean exact regardless of the offset magnitude.
+        self.sum_raw.value() / self.valid_count as f64
     }
     
     /// Compute sample variance (ddof=1).
@@ -288,10 +296,11 @@ fn rolling_multi_trailing_propagate(
     
     let mut sum = KahanState::default();
     let mut sumsq = KahanState::default();
+    let mut sum_raw = KahanState::default();
     let mut min_val = f64::INFINITY;
     let mut max_val = f64::NEG_INFINITY;
     let mut has_nan = false;
-    
+
     // Per-window translation offset for numerical stability of the variance
     // (see write_stats). NaN windows output all-NaN, so the offset is only
     // consulted for finite windows where xs[start] is finite.
@@ -305,6 +314,7 @@ fn rolling_multi_trailing_propagate(
         let xv = x - off0;
         sum.add(xv);
         sumsq.add(xv * xv);
+        sum_raw.add(x);
         if xv < min_val {
             min_val = xv;
         }
@@ -315,7 +325,7 @@ fn rolling_multi_trailing_propagate(
 
     // First output
     write_stats(
-        0, &sum, &sumsq, window, min_val, max_val, has_nan, off0, mask,
+        0, &sum, &sumsq, &sum_raw, window, min_val, max_val, has_nan, off0, mask,
         out_mean, out_std, out_var, out_count, out_min, out_max,
     );
 
@@ -324,6 +334,7 @@ fn rolling_multi_trailing_propagate(
         // Recalculate sum, sumsq, min, max, and NaN check for current window
         sum = KahanState::default();
         sumsq = KahanState::default();
+        sum_raw = KahanState::default();
         min_val = f64::INFINITY;
         max_val = f64::NEG_INFINITY;
         has_nan = false;
@@ -336,6 +347,7 @@ fn rolling_multi_trailing_propagate(
             let xv = x - offk;
             sum.add(xv);
             sumsq.add(xv * xv);
+            sum_raw.add(x);
             if xv < min_val {
                 min_val = xv;
             }
@@ -345,7 +357,7 @@ fn rolling_multi_trailing_propagate(
         }
 
         write_stats(
-            k, &sum, &sumsq, window, min_val, max_val, has_nan, offk, mask,
+            k, &sum, &sumsq, &sum_raw, window, min_val, max_val, has_nan, offk, mask,
             out_mean, out_std, out_var, out_count, out_min, out_max,
         );
     }
@@ -466,6 +478,7 @@ fn write_stats(
     k: usize,
     sum: &KahanState,
     sumsq: &KahanState,
+    sum_raw: &KahanState,
     window: usize,
     min_val: f64,
     max_val: f64,
@@ -507,7 +520,9 @@ fn write_stats(
         let mean_shifted = sum.value() / n;
 
         if mask.has_mean() {
-            out_mean[k] = mean_shifted + offset;
+            // Mean from the raw sum (exact at any offset); the shifted mean is
+            // only used for the variance formula below.
+            out_mean[k] = sum_raw.value() / n;
         }
         if mask.has_var() || mask.has_std() {
             let var = (sumsq.value() - n * mean_shifted * mean_shifted) / (n - 1.0);

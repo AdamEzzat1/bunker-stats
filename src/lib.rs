@@ -2836,7 +2836,20 @@ m.add_function(wrap_pyfunction!(rolling_linreg_skipna, m)?)?;
 	// NEW: Variance tests
 	m.add_function(wrap_pyfunction!(infer::variance_tests::f_test_var_np, m)?)?;
 	m.add_function(wrap_pyfunction!(infer::variance_tests::bartlett_test_np, m)?)?;
-	
+
+	// v0.3.1: additional inference functions
+	m.add_function(wrap_pyfunction!(infer::paired::t_test_paired_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::p_adjust::p_adjust_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::proportion::proportion_ztest_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::proportion::two_proportions_ztest_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::corr_ci::corr_ci_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::var_ci::var_ci_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::odds_ratio::odds_ratio_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::effect_nonparam::rank_biserial_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::effect_nonparam::cliffs_delta_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::effect_nonparam::anova_effect_sizes_np, m)?)?;
+	m.add_function(wrap_pyfunction!(infer::effect_nonparam::normality_summary_np, m)?)?;
+
 	    // ----------------------
     // sandboxstats payload
     // ----------------------

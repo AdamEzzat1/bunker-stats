@@ -281,6 +281,19 @@ spearman_corr_test = _get_rs("spearman_corr_test", "spearman_corr_test_np")
 f_test_var = _get_rs("f_test_var", "f_test_var_np")
 bartlett_test = _get_rs("bartlett_test", "bartlett_test_np")
 
+# v0.3.1: additional inference functions
+t_test_paired = _get_rs("t_test_paired", "t_test_paired_np")
+p_adjust = _get_rs("p_adjust", "p_adjust_np")
+proportion_ztest = _get_rs("proportion_ztest", "proportion_ztest_np")
+two_proportions_ztest = _get_rs("two_proportions_ztest", "two_proportions_ztest_np")
+corr_ci = _get_rs("corr_ci", "corr_ci_np")
+var_ci = _get_rs("var_ci", "var_ci_np")
+odds_ratio = _get_rs("odds_ratio", "odds_ratio_np")
+rank_biserial = _get_rs("rank_biserial", "rank_biserial_np")
+cliffs_delta = _get_rs("cliffs_delta", "cliffs_delta_np")
+anova_effect_sizes = _get_rs("anova_effect_sizes", "anova_effect_sizes_np")
+normality_summary = _get_rs("normality_summary", "normality_summary_np")
+
 # prefer new name, fallback to older wheels
 hedges_g_2samp = _get_rs("hedges_g_2samp", "hedges_g_2samp_2", "hedges_g_2samp_np", "hedges_g_2samp_np2")
 
@@ -855,6 +868,11 @@ __all__ = [
     
     # Inference - NEW: Variance tests
     "f_test_var", "bartlett_test",
+
+    # Inference - v0.3.1: additional functions
+    "t_test_paired", "p_adjust", "proportion_ztest", "two_proportions_ztest",
+    "corr_ci", "var_ci", "odds_ratio",
+    "rank_biserial", "cliffs_delta", "anova_effect_sizes", "normality_summary",
 
 
     # utilities

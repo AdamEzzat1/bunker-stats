@@ -30,16 +30,26 @@ pub(crate) fn rolling_mean_std_vec(xs: &[f64], window: usize) -> (Vec<f64>, Vec<
     let mut sum_c = 0.0f64;
     let mut sumsq = 0.0f64;
     let mut sumsq_c = 0.0f64;
+    // Separate Kahan sum over RAW (unshifted) values, used only for the mean.
+    // Deriving the mean from the shifted sum as `sum/w + off` loses precision
+    // when |off| is huge relative to the true mean: the division result is
+    // O(off) and adding `off` back cancels. Example: [1e10, 1, -1e10, 1, 1] has
+    // mean 0.6, but `sum/w + off` rounds to ~0.6 ± 4e-7 at the 1e10 scale. The
+    // raw sum stays O(spread) under Kahan compensation and stays exact.
+    let mut sum_raw = 0.0f64;
+    let mut sum_raw_c = 0.0f64;
 
     for &x in &xs[..window] {
         let xs_ = x - off;
         kahan_add(&mut sum, &mut sum_c, xs_);
         kahan_add(&mut sumsq, &mut sumsq_c, xs_ * xs_);
+        kahan_add(&mut sum_raw, &mut sum_raw_c, x);
     }
 
-    let mut push_stats = |sum: f64, sumsq: f64| {
-        // `sum`/`sumsq` are over shifted values; add `off` back for the mean.
-        let mean = sum / window as f64 + off;
+    let mut push_stats = |sum_raw: f64, sum: f64, sumsq: f64| {
+        // Mean from the raw sum (accurate at any offset); variance from the
+        // shifted moments (translation-invariant and cancellation-safe).
+        let mean = sum_raw / window as f64;
         // Sample variance (ddof=1). Clamp only genuine tiny-negative FP noise;
         // preserve NaN (e.g. a NaN in the window) rather than masking it to 0.
         let var = (sumsq - (sum * sum) / window as f64) / ((window - 1) as f64);
@@ -48,7 +58,7 @@ pub(crate) fn rolling_mean_std_vec(xs: &[f64], window: usize) -> (Vec<f64>, Vec<
         stds.push(std);
     };
 
-    push_stats(sum, sumsq);
+    push_stats(sum_raw, sum, sumsq);
 
     for i in window..n {
         let x_new = xs[i] - off;
@@ -59,7 +69,10 @@ pub(crate) fn rolling_mean_std_vec(xs: &[f64], window: usize) -> (Vec<f64>, Vec<
         kahan_add(&mut sumsq, &mut sumsq_c, x_new * x_new);
         kahan_add(&mut sumsq, &mut sumsq_c, -(x_old * x_old));
 
-        push_stats(sum, sumsq);
+        kahan_add(&mut sum_raw, &mut sum_raw_c, xs[i]);
+        kahan_add(&mut sum_raw, &mut sum_raw_c, -xs[i - window]);
+
+        push_stats(sum_raw, sum, sumsq);
     }
 
     (means, stds)
