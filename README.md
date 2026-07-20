@@ -422,6 +422,93 @@ Order-statistic utilities built on O(n) selection:
 
 ---
 
+## Rich Results (opt-in result objects)
+
+Hypothesis tests return a plain `dict` by default. Pass **`rich=True`** to get a
+result object instead — tuple-unpackable, indexable, and carrying a bit of
+extra metadata (sample sizes, the chosen `alternative`, and cheap effect
+sizes / CIs computed from the same kernels). This mirrors the result-object
+style already used by the time-series tests.
+
+```python
+import bunker_stats as bs
+
+# Default: unchanged dict return
+bs.t_test_2samp(x, y)
+# -> {'statistic': ..., 'pvalue': ..., 'df': ..., 'mean_x': ..., ...}
+
+# Opt in to a rich result
+res = bs.t_test_2samp(x, y, equal_var=False, rich=True)
+
+stat, pval = res            # tuple unpacking (statistic, pvalue)
+res[0], res[1]              # indexing
+res.pvalue, res.df          # named access
+res.effect_size            # Cohen's d, computed from the same inputs
+res.n1, res.n2, res.equal_var
+res.is_significant(0.05)   # -> bool
+res.to_dict()              # JSON-friendly dict of populated fields
+print(res.conclusion(alpha=0.01))
+print(res.info())          # multi-line human summary
+```
+
+```text
+>>> print(res.info())
+t-Test
+============================================================
+Statistic:          -2.145318
+P-value:            0.033987
+Test:               two-sample
+Alternative:        two-sided
+df:                 118
+Mean x / y:         0.0512 / 0.4231
+Equal variance:     False
+Cohen's d:          -0.394
+n1 / n2:            60 / 70
+
+Conclusion: Reject H0 (the two means are equal) at alpha=0.05 (p=0.034)
+```
+
+### Which tests support `rich=True`
+
+| Function(s) | Result type | Notable extra fields |
+|-------------|-------------|----------------------|
+| `t_test_1samp`, `t_test_2samp`, `t_test_paired` | `TTestResult` | `effect_size` (Cohen's d, 2-sample), `n1`/`n2`, `equal_var` |
+| `chi2_gof`, `chi2_independence` | `ChiSquareResult` | `dof`, `observed`, `test_type` |
+| `mann_whitney_u` | `MannWhitneyResult` | `rank_biserial`, `n1`/`n2` |
+| `ks_1samp` | `KSResult` | `distribution`, `n` |
+| `f_test_oneway` | `ANOVAResult` | `eta_squared`, `omega_squared`, `n_groups`/`n_total` |
+| `pearson_corr_test`, `spearman_corr_test` | `CorrelationTestResult` | `r`, `ci_low`/`ci_high` (Pearson) |
+| `jarque_bera`, `anderson_darling` | `NormalityResult` | `skewness`, `kurtosis`, `critical_value_5pct` |
+
+The result classes are exported from both the root package and
+`bunker_stats.infer` (for `isinstance` checks and type hints):
+
+```python
+from bunker_stats.infer import TTestResult, NormalityResult
+isinstance(bs.t_test_2samp(x, y, rich=True), TTestResult)   # True
+```
+
+### Protocol shared by every rich result
+
+| Member | Behaviour |
+|--------|-----------|
+| `for v in res` / `a, b = res` | Yields the primary fields — `(statistic, pvalue)`, except `CorrelationTestResult` yields `(r, pvalue)`. |
+| `res[i]` | Integer/slice indexing over those same primary fields. |
+| `res.to_dict(array=False)` | All *populated* fields (None omitted). NumPy scalars become Python scalars; arrays become lists unless `array=True`. |
+| `res.info()` | Multi-line summary: statistic, p-value, test-specific detail, and a conclusion line. ASCII-only, so it prints on any console. |
+| `res.conclusion(alpha=0.05)` | One-line verdict at the given significance level. |
+| `res.is_significant(alpha=0.05)` | `bool`; `False` when the p-value is missing/NaN. |
+
+Two behaviours worth noting:
+
+- **Backward compatibility is absolute.** The `rich` keyword is the *only* thing
+  the facade intercepts; every other argument is forwarded untouched, so the
+  default (`rich=False`) return is byte-for-byte what it always was — including
+  the deprecated `*_np` aliases.
+- **Anderson-Darling has no p-value.** `NormalityResult.pvalue` is `None` for
+  `anderson_darling`; its `conclusion()` / `is_normal()` fall back to the 5%
+  critical value (A\* > 0.787 rejects normality).
+
 ## Notebook UX (optional pandas layer)
 
 `bunker_stats.notebook` is the ergonomic bridge between the Rust kernels and

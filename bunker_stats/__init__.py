@@ -308,6 +308,30 @@ pad_nan = _get_rs("pad_nan", "pad_nan_np")
 
 
 # ======================================================================================
+# Rich result objects (opt-in) — bunker_stats.infer.* via rich=True
+# ======================================================================================
+# The hypothesis tests above return plain dicts by default. Re-bind each to a thin
+# facade that ALSO accepts `rich=True`, returning a rich result object (tuple-
+# unpackable, with .to_dict() / .info() / .conclusion()). The facade forwards every
+# other argument untouched, so the default dict return is byte-for-byte unchanged.
+#
+# NOTE: the actual re-binding happens further down (see `_apply_rich_inference`),
+# AFTER the hand-written "modern facade" defs (e.g. `def t_test_2samp`) so that we
+# wrap the final public callables rather than the raw kernels they shadow.
+from bunker_stats.infer.facade import wrap_inference as _wrap_inference
+
+from bunker_stats.infer import (  # noqa: E402  (result classes for direct use)
+    TTestResult,
+    ChiSquareResult,
+    MannWhitneyResult,
+    KSResult,
+    ANOVAResult,
+    CorrelationTestResult,
+    NormalityResult,
+)
+
+
+# ======================================================================================
 # Backward-compatible aliases (deprecated) — NOT part of the "surface API"
 # ======================================================================================
 mean_np = _deprecated_alias("mean", "mean_np", mean)
@@ -795,6 +819,26 @@ def hedges_g_2samp(x, y, *, pooled: bool = True):
     return _strict["hedges_g_2samp"](x, y, pooled)
 
 
+# Apply the opt-in `rich=True` wrappers now that every public inference callable
+# (raw kernels AND the modern facades above, e.g. `t_test_2samp`) is in its final
+# form. Wrapping here means the facade wraps the real public function, not a raw
+# kernel it shadows.
+globals().update(_wrap_inference({
+    "t_test_1samp": t_test_1samp,
+    "t_test_2samp": t_test_2samp,
+    "t_test_paired": t_test_paired,
+    "chi2_gof": chi2_gof,
+    "chi2_independence": chi2_independence,
+    "mann_whitney_u": mann_whitney_u,
+    "ks_1samp": ks_1samp,
+    "f_test_oneway": f_test_oneway,
+    "pearson_corr_test": pearson_corr_test,
+    "spearman_corr_test": spearman_corr_test,
+    "jarque_bera": jarque_bera,
+    "anderson_darling": anderson_darling,
+}))
+
+
 # ======================================================================================
 # Public surface exports (clean names only)
 # ======================================================================================
@@ -873,6 +917,10 @@ __all__ = [
     "t_test_paired", "p_adjust", "proportion_ztest", "two_proportions_ztest",
     "corr_ci", "var_ci", "odds_ratio",
     "rank_biserial", "cliffs_delta", "anova_effect_sizes", "normality_summary",
+
+    # Inference - rich result objects (returned via rich=True)
+    "TTestResult", "ChiSquareResult", "MannWhitneyResult", "KSResult",
+    "ANOVAResult", "CorrelationTestResult", "NormalityResult",
 
 
     # utilities
