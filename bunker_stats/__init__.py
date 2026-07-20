@@ -920,3 +920,32 @@ __all__ = [
     "unif_pdf", "unif_logpdf", "unif_cdf", "unif_sf", "unif_logsf", "unif_cumhazard", "unif_ppf",
 
 ]
+
+# ======================================================================================
+# Optional notebook / reporting layer  (pandas-backed, lazily imported)
+# ======================================================================================
+# `bunker_stats.notebook` is the ergonomic pandas/Jupyter bridge. pandas is NOT a
+# runtime dependency of bunker-stats, so the submodule is resolved through PEP 562
+# `__getattr__` rather than imported at package import time. This keeps
+# `import bunker_stats` numpy-only while still allowing `bs.notebook.robust_summary(df)`
+# after `pip install "bunker-stats-rs[notebook]"`.
+#
+# Deliberately NOT added to __all__: this facade's __all__ is a list of callables
+# (enforced by tests/test_hardening_v030.py) and drives `from bunker_stats import *`.
+# The submodules stay reachable via attribute access and are advertised in __dir__
+# so tab-completion still finds them.
+_LAZY_SUBMODULES = ("notebook", "pandas", "pandas_helpers")
+
+
+def __getattr__(name):
+    if name in _LAZY_SUBMODULES:
+        import importlib
+
+        module = importlib.import_module(f"{__name__}.{name}")
+        globals()[name] = module  # cache so subsequent lookups skip __getattr__
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY_SUBMODULES))

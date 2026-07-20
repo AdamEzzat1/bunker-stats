@@ -13,7 +13,8 @@ authors = [
     { name = "Adam Ezzat", email = "adamezzat24@gmail.com" }
 ]
 
-# Runtime Python deps used by the extension / Python helpers
+# Runtime Python deps used by the extension / Python helpers.
+# Deliberately numpy-only: `import bunker_stats` must not require pandas.
 dependencies = [
     "numpy>=1.22"
 ]
@@ -39,6 +40,32 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Utilities"
+]
+
+# -------------------------------
+# Optional extras
+# -------------------------------
+# NOTE: this sub-table must stay AFTER every plain `[project]` key above --
+# in TOML a table header terminates the preceding table, so placing it earlier
+# would swallow `classifiers` into optional-dependencies.
+#
+# `notebook` powers bunker_stats.notebook -- the pandas/Jupyter reporting layer:
+#   pandas     -- DataFrame inputs and the *_report / *_columns return types
+#   jinja2     -- pandas ships Styler as an *optional* feature; `df.style` raises
+#                 AttributeError without it, so every *_style helper needs it
+#   matplotlib -- required by Styler.background_gradient, used by corr_heatmap
+#
+#   pip install "bunker-stats-rs[notebook]"
+#
+# `pandas` is the minimal extra: reports and column transforms only, no Stylers.
+[project.optional-dependencies]
+pandas = [
+    "pandas>=1.3",
+]
+notebook = [
+    "pandas>=1.3",
+    "jinja2>=3.0",
+    "matplotlib>=3.4",
 ]
 
 [project.urls]

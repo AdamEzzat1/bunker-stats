@@ -214,7 +214,14 @@ passing, 0 compiler warnings**.
 
 ```bash
 pip install bunker-stats
+
+# ...plus the optional pandas/Jupyter reporting layer (see "Notebook UX" below)
+pip install "bunker-stats[notebook]"
 ```
+
+The core package depends only on **numpy**. `pandas`, `jinja2` and `matplotlib`
+arrive with the `[notebook]` extra and are needed solely by
+`bunker_stats.notebook`.
 
 ### Basic Usage
 
@@ -249,10 +256,10 @@ X = np.random.randn(1000, 10)
 cov = bs.cov_matrix(X)
 corr = bs.corr_matrix(X, skipna=True)            # pairwise-complete
 
-# Optional pandas layer: labeled results + Styler visuals
-# import bunker_stats.pandas as bsp
-# C = bsp.corr_df(df)      # DataFrame labeled by column names
-# bsp.corr_heatmap(df)     # pandas Styler heatmap
+# Optional notebook layer (pip install "bunker-stats[notebook]")
+# from bunker_stats.notebook import robust_summary, outlier_style
+# robust_summary(df)          # DataFrame: median, MAD, IQR, Qn, skew, kurtosis...
+# outlier_style(df)           # Styler: highlights outliers across all columns
 
 # Bootstrap confidence intervals (deterministic given random_state)
 estimate, lower, upper = bs.bootstrap_mean_ci(data, n_resamples=10000, conf=0.95, random_state=0)
@@ -412,6 +419,110 @@ Order-statistic utilities built on O(n) selection:
 - **Empirical distributions:** ECDF and quantile binning
 
 ---
+
+---
+
+## Notebook UX (optional pandas layer)
+
+`bunker_stats.notebook` is the ergonomic bridge between the Rust kernels and
+pandas/Jupyter. Every helper is a thin, validated wrapper — the numbers always
+come from the same kernels the core API uses.
+
+```bash
+pip install "bunker-stats[notebook]"
+```
+
+`import bunker_stats` stays **numpy-only**: pandas is never imported at package
+import time, and even `import bunker_stats.notebook` succeeds without pandas
+installed. The import happens lazily on the first call, and a missing install
+raises a clear `ImportError` naming the command above.
+
+### Naming convention
+
+| Suffix        | Returns                                                  |
+|---------------|----------------------------------------------------------|
+| `*_report`    | `pandas.DataFrame` of results (usually one row per column) |
+| `*_style` / `style_*` | `pandas.io.formats.style.Styler`                 |
+| `*_columns`   | `pandas.DataFrame` copy with added/transformed columns    |
+
+### Quick tour
+
+```python
+import bunker_stats as bs
+from bunker_stats.notebook import (
+    robust_summary, describe_fast, outlier_report, outlier_style,
+    normality_report, correlation_report, corr_heatmap, missingness_report,
+    scale_columns, winsorize_columns, rolling_report, bootstrap_ci_report,
+    style_significance, style_effect_size,
+)
+
+# --- Profiling ---------------------------------------------------------
+robust_summary(df)                 # count, mean, std, median, MAD, IQR, Qn,
+                                   # trimmed mean, skew, kurtosis
+describe_fast(df)                  # a faster, richer df.describe().T
+missingness_report(df)             # NaN vs +/-inf vs finite, per column
+
+# --- Outliers ----------------------------------------------------------
+outlier_report(df, method="iqr", k=1.5)             # counts, %, bounds
+outlier_report(df, method="robust_zscore")          # median/MAD fences
+outlier_style(df)                                   # highlight across columns
+
+# --- Distribution & association ----------------------------------------
+normality_report(df)                                # Jarque-Bera + A-D
+correlation_report(df, method="spearman")           # square matrix
+correlation_report(df, pvalues=True)                # long form with p-values
+corr_heatmap(df)                                    # gradient Styler
+
+# --- Transforms --------------------------------------------------------
+scale_columns(df, method="robust")                  # adds *_robust columns
+scale_columns(df, method="zscore", replace=True)    # overwrite in place
+winsorize_columns(df, lower_q=0.05, upper_q=0.95)   # adds *_winsor columns
+
+# --- Time series & uncertainty -----------------------------------------
+rolling_report(df, "price", window=20, stats=("mean", "std"))
+bootstrap_ci_report(df, stat="median", n_resamples=5000, random_state=0)
+
+# --- Styling result tables ---------------------------------------------
+style_significance(results, pvalue_column="pvalue", alpha=0.05)
+style_effect_size(results, "cohens_d", thresholds=(0.2, 0.5, 0.8))
+```
+
+Helpers are also reachable lazily off the package (`bs.notebook.robust_summary(df)`)
+and re-exported from `bunker_stats.pandas` alongside `cov_df` / `corr_df`.
+
+### NaN and infinity policy
+
+The Rust kernels are *strict*: one NaN anywhere poisons the whole result. That
+is right for a numerics library and wrong for exploratory analysis, so this
+layer makes the choice explicit rather than inheriting it:
+
+| Helper family | Behaviour with NaN / ±inf |
+|---------------|---------------------------|
+| `*_report`, `robust_summary`, `describe_fast` | Dropped **per column** before the kernel runs; the count appears in `n_missing`. A column with no finite values yields an all-NaN row, not an exception. |
+| `correlation_report`, `corr_heatmap` | Dropped **pairwise** — each pair uses rows where both columns are finite. `n` per pair is reported when `pvalues=True`. |
+| `*_columns` | The transform is fit on finite values only, then results are scattered back into their original positions. Non-finite in ⇒ NaN out; **row alignment is always preserved**. |
+| `*_style`, `style_*` | Never raise; NaN cells simply receive no background color. |
+| `missingness_report` | The exception — it *counts* rather than drops, and separates NaN from ±inf. |
+
+Two behaviours worth calling out explicitly:
+
+- **Anderson-Darling has no p-value.** The kernel returns the A\* statistic
+  only (its critical values need table interpolation), so `normality_report`
+  reports `ad_statistic` for reference and bases the `normal` / `conclusion`
+  verdict solely on the Jarque-Bera p-value. As a rule of thumb A\* > 0.787
+  rejects normality at α = 0.05.
+- **`rolling_report(..., nan_policy="ignore")` does nothing on its own.** With
+  the default `min_periods == window`, a window containing a NaN still fails
+  the count check. To actually skip NaNs, pass `min_periods` below `window`:
+  `rolling_report(df, "x", 5, min_periods=3, nan_policy="ignore")`.
+
+### Backwards compatibility
+
+The original five helpers (`demean_style`, `zscore_style`, `iqr_outlier_style`,
+`corr_heatmap`, `robust_scale_column`) keep working from
+`bunker_stats.pandas_helpers`, which is now a shim over the notebook layer.
+They gained dtype validation and NaN safety; `iqr_outlier_style` is now a thin
+wrapper over the multi-column `outlier_style`.
 
 ## Performance Highlights
 
