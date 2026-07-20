@@ -306,10 +306,39 @@ class Rolling:
         """
         if not stats:
             raise ValueError("At least one statistic must be specified")
-        
+
         results = self._compute(*stats)
         return dict(zip(stats, results))
-    
+
+    def result(self, *stats: str) -> "RollingResult":
+        """Compute statistics and wrap them in a rich :class:`RollingResult`.
+
+        Like :meth:`aggregate`, but returns a result object that carries the
+        window configuration and offers ``.to_frame()`` / ``.plot()`` / ``.info()``
+        and dict-like access by statistic name. Defaults to
+        ``("mean", "std", "min", "max")`` when no statistics are given.
+
+        Examples
+        --------
+        >>> r = Rolling(x, window=5)                 # doctest: +SKIP
+        >>> res = r.result("mean", "std")
+        >>> res["mean"]; res.to_frame(); print(res.info())
+        """
+        from .types import RollingResult
+
+        if not stats:
+            stats = ("mean", "std", "min", "max")
+        table = self.aggregate(*stats)
+        return RollingResult(
+            table=table,
+            window=self.config.window,
+            stats=tuple(stats),
+            min_periods=self.config.min_periods,
+            alignment=self.config.alignment,
+            nan_policy=self.config.nan_policy,
+            axis=self.axis,
+        )
+
     @classmethod
     def trailing(
         cls,

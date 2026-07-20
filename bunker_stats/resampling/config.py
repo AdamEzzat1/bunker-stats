@@ -16,6 +16,9 @@ from typing import Literal, Optional, Tuple, Union
 import numpy as np
 import warnings
 
+# Shared rich-result protocol (tuple unpacking, indexing, to_dict, info).
+from .._result import HypothesisResult, RichResult
+
 # Import the Rust extension (same pattern as main __init__.py)
 try:
     from bunker_stats import _rs
@@ -1100,13 +1103,18 @@ def bootstrap(
     conf: float = 0.95,
     random_state: Optional[int] = None,
     nan_policy: Literal["propagate", "omit"] = "propagate",
-) -> Tuple[float, float, float]:
+    rich: bool = False,
+) -> Union[Tuple[float, float, float], "BootstrapResult"]:
     """
     Bootstrap confidence interval (convenience wrapper).
-    
+
     Equivalent to: BootstrapConfig(...).run(x)
-    
+
     See BootstrapConfig for parameter documentation.
+
+    By default returns the ``(estimate, ci_lower, ci_upper)`` tuple. Pass
+    ``rich=True`` for a :class:`BootstrapResult` (tuple-unpackable, with
+    ``.to_dict()`` / ``.info()`` and the run configuration attached).
     """
     config = BootstrapConfig(
         n_resamples=n_resamples,
@@ -1115,7 +1123,14 @@ def bootstrap(
         random_state=random_state,
         nan_policy=nan_policy,
     )
-    return config.run(x)
+    estimate, ci_lower, ci_upper = config.run(x)
+    if not rich:
+        return (estimate, ci_lower, ci_upper)
+    return BootstrapResult(
+        estimate=estimate, ci_lower=ci_lower, ci_upper=ci_upper,
+        method="percentile", n_resamples=n_resamples,
+        random_state=random_state, confidence_level=conf,
+    )
 
 
 def bootstrap_corr(
@@ -1150,17 +1165,22 @@ def permutation_test(
     alternative: Literal["two-sided", "greater", "less"] = "two-sided",
     random_state: Optional[int] = None,
     nan_policy: Literal["propagate", "omit"] = "propagate",
-) -> Tuple[float, float]:
+    rich: bool = False,
+) -> Union[Tuple[float, float], "PermutationTestResult"]:
     """
     Permutation test (convenience wrapper).
-    
+
     Parameters
     ----------
     test : {"corr", "mean_diff"}
         Which test to run:
         - "corr": correlation test (paired data)
         - "mean_diff": mean difference test (independent samples)
-    
+    rich : bool, default False
+        When True, return a :class:`PermutationTestResult` (tuple-unpackable,
+        with ``.conclusion()`` / ``.to_dict()`` / ``.info()``) instead of the
+        ``(statistic, pvalue)`` tuple.
+
     See PermutationConfig for other parameter documentation.
     """
     config = PermutationConfig(
@@ -1169,15 +1189,22 @@ def permutation_test(
         random_state=random_state,
         nan_policy=nan_policy,
     )
-    
+
     if test == "corr":
-        return config.run_corr(x, y)
+        statistic, pvalue = config.run_corr(x, y)
     elif test == "mean_diff":
-        return config.run_mean_diff(x, y)
+        statistic, pvalue = config.run_mean_diff(x, y)
     else:
         raise ValueError(
             f"permutation_test: test must be 'corr' or 'mean_diff', got '{test}'."
         )
+
+    if not rich:
+        return (statistic, pvalue)
+    return PermutationTestResult(
+        statistic=statistic, pvalue=pvalue, method=test,
+        n_permutations=n_permutations, random_state=random_state,
+    )
 
 
 def jackknife(
@@ -2712,7 +2739,7 @@ def multipletests(
 # ======================================================================================
 
 @dataclass
-class BootstrapResult:
+class BootstrapResult(RichResult):
     """
     Result from bootstrap confidence interval estimation with optional metadata.
     
@@ -2814,11 +2841,19 @@ class BootstrapResult:
     # Method-specific metadata
     bca_acceleration: Optional[float] = None
     bca_bias_correction: Optional[float] = None
-    
+
+    # Rich-result protocol: unpack as (estimate, ci_lower, ci_upper).
+    _fields = ("estimate", "ci_lower", "ci_upper")
+    _title = "Bootstrap Result"
+
+    def info(self) -> str:
+        """Multi-line human summary (alias of :meth:`summary`)."""
+        return self.summary()
+
     def summary(self) -> str:
         """
         Return formatted summary string.
-        
+
         Returns
         -------
         str
@@ -2949,7 +2984,7 @@ class BayesianBootstrapSEResult:
 
 
 @dataclass
-class PermutationTestResult:
+class PermutationTestResult(HypothesisResult):
     """
     Result from permutation test with optional null distribution.
     
@@ -3015,7 +3050,15 @@ class PermutationTestResult:
     n_permutations: Optional[int] = None
     random_state: Optional[int] = None
     exact: Optional[bool] = None
-    
+
+    # Rich-result protocol: unpack as (statistic, pvalue); conclusion() inherited.
+    _title = "Permutation Test"
+    _h0 = "H0 (no group difference)"
+
+    def info(self) -> str:
+        """Multi-line human summary (alias of :meth:`summary`)."""
+        return self.summary()
+
     def summary(self) -> str:
         """Return formatted summary"""
         lines = [

@@ -29,7 +29,7 @@ from typing import Any, Iterator
 
 import numpy as np
 
-__all__ = ["RichResult", "HypothesisResult", "rich_facade"]
+__all__ = ["RichResult", "HypothesisResult", "ArrayResult", "rich_facade"]
 
 
 def _pyify(value: Any, *, array: bool) -> Any:
@@ -156,6 +156,45 @@ class HypothesisResult(RichResult):
         return "\n".join(lines)
 
 
+class ArrayResult(RichResult):
+    """A :class:`RichResult` whose primary payload is an array.
+
+    For results like a correlation matrix or an outlier mask, tuple-unpacking a
+    handful of scalars makes no sense — the natural ergonomics are *array-like*.
+    Subclasses set ``_array_field`` (the dataclass field holding the ndarray) and
+    this base makes the object behave like that array for the common operations
+    while still offering ``to_dict()`` / ``info()`` and any metadata fields.
+
+    Notably ``np.asarray(result)`` returns the payload with no copy, so a result
+    object drops straight into NumPy code.
+    """
+
+    _array_field: str = ""
+
+    def _payload(self) -> np.ndarray:
+        return np.asarray(getattr(self, self._array_field))
+
+    def __array__(self, dtype=None):
+        arr = self._payload()
+        return arr.astype(dtype) if dtype is not None else arr
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._payload())
+
+    def __len__(self) -> int:
+        return len(self._payload())
+
+    def __getitem__(self, index):
+        return self._payload()[index]
+
+    @property
+    def shape(self):
+        return self._payload().shape
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(shape={self.shape}, {self._array_field}=...)"
+
+
 def _fmt_scalar(value: Any) -> str:
     """Compact display for a scalar/array field in repr and info()."""
     if isinstance(value, np.generic):
@@ -169,12 +208,12 @@ def _fmt_scalar(value: Any) -> str:
     return str(value)
 
 
-def rich_facade(raw, builder, *, name=None, doc_note=True):
+def rich_facade(raw, builder, *, name=None, doc_note=True, builder_kwargs=()):
     """Wrap a raw (dict/tuple-returning) function with an opt-in ``rich`` flag.
 
     The returned wrapper forwards **every** positional and keyword argument to
     ``raw`` unchanged, so the default call is byte-for-byte backward compatible.
-    Only the ``rich`` keyword is intercepted:
+    Only ``rich`` (and any names in ``builder_kwargs``) are intercepted:
 
     * ``rich=False`` (default) -> return exactly what ``raw`` returns.
     * ``rich=True``            -> return ``builder(raw_result, args, kwargs)``.
@@ -185,18 +224,25 @@ def rich_facade(raw, builder, *, name=None, doc_note=True):
         The underlying function (e.g. a Rust binding) returning a dict/tuple.
     builder : callable
         ``builder(raw_result, args, kwargs) -> RichResult``. Receives the raw
-        result plus the original call's positional/keyword args so it can add
-        input-derived metadata (sample sizes, chosen alternative, ...).
+        result plus the original call's positional/keyword args (with any
+        ``builder_kwargs`` folded in) so it can add input-derived metadata.
     name : str, optional
         ``__name__`` for the wrapper; defaults to ``raw``'s name.
+    builder_kwargs : iterable of str
+        Keyword names that are meant for ``builder`` only and must NOT be passed
+        to ``raw`` (e.g. ``columns`` for a matrix result). They are popped from
+        the call, take effect only with ``rich=True``, and are handed to the
+        builder via its ``kwargs`` argument.
     """
     fn_name = name or getattr(raw, "__name__", "wrapped")
+    _builder_only = set(builder_kwargs)
 
     def wrapper(*args, rich: bool = False, **kwargs):
+        extra = {k: kwargs.pop(k) for k in list(kwargs) if k in _builder_only}
         result = raw(*args, **kwargs)
         if not rich:
             return result
-        return builder(result, args, kwargs)
+        return builder(result, args, {**kwargs, **extra})
 
     wrapper.__name__ = fn_name
     wrapper.__qualname__ = fn_name

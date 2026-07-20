@@ -488,6 +488,47 @@ from bunker_stats.infer import TTestResult, NormalityResult
 isinstance(bs.t_test_2samp(x, y, rich=True), TTestResult)   # True
 ```
 
+### Beyond inference
+
+The same `rich=True` opt-in extends to other modules. Matrix and outlier
+results are **array-like** — `np.asarray(result)` returns the payload with no
+copy, so they drop straight into NumPy code — while still carrying metadata and
+conversions.
+
+| Function / method | Result type | Highlights |
+|-------------------|-------------|------------|
+| `corr_matrix(X, rich=True, columns=...)` | `CorrelationMatrixResult` | array-like; `.to_frame()`, `.style_heatmap()`, `n_obs` |
+| `cov_matrix(X, rich=True)` | `CovarianceMatrixResult` | array-like; `ddof`, `.to_frame()` |
+| `robust_fit(x, rich=True)` | `RobustFitResult` | unpacks `location, scale`; `.zscores(x)` |
+| `iqr_outliers(x, rich=True)`, `zscore_outliers(x, rich=True)` | `OutlierResult` | array-like mask; `.indices()`, bounds, counts |
+| `Rolling(x, w).result(*stats)` | `RollingResult` | dict-like by stat; `.to_frame()`, `.plot()` |
+| `bootstrap(x, rich=True)` | `BootstrapResult` | unpacks `estimate, ci_lower, ci_upper` |
+| `permutation_test(x, y, rich=True)` | `PermutationTestResult` | unpacks `statistic, pvalue`; `.conclusion()` |
+
+```python
+# Array-like matrix result
+C = bs.corr_matrix(X, rich=True, columns=["a", "b", "c"])
+np.asarray(C)          # the raw matrix, no copy
+C.to_frame()           # labeled DataFrame
+C.style_heatmap()      # Styler (needs matplotlib)
+
+# Robust fit unpacks like a tuple, but carries more
+loc, scale = bs.robust_fit(x, rich=True)
+
+# Outlier mask behaves like the boolean array it wraps
+out = bs.iqr_outliers(x, rich=True)
+x[out]                 # boolean-index with the result directly
+out.indices()          # positions flagged, plus out.lower_bound / out.upper_bound
+
+# Rolling result is dict-like over the statistics
+r = bs.Rolling(x, window=20).result("mean", "std")
+r["mean"]; r.to_frame(); print(r.info())
+```
+
+These result classes are exported from the root package and their submodules
+(`bunker_stats.matrix`, `bunker_stats.robust`, `bunker_stats.rolling`,
+`bunker_stats.resampling`).
+
 ### Protocol shared by every rich result
 
 | Member | Behaviour |

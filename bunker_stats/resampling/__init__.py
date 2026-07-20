@@ -68,7 +68,11 @@ from .config import (
     BonferroniConfig,
     HolmConfig,
     FDRConfig,
-    
+
+    # Rich result objects (shared protocol: unpacking, to_dict, info, conclusion)
+    BootstrapResult,
+    PermutationTestResult,
+
     # Convenience functions
     bootstrap,
     bootstrap_corr,
@@ -110,7 +114,11 @@ __all__ = [
     "BonferroniConfig",
     "HolmConfig",
     "FDRConfig",
-    
+
+    # Rich result objects
+    "BootstrapResult",
+    "PermutationTestResult",
+
     # Convenience functions
     "bootstrap",
     "bootstrap_corr",

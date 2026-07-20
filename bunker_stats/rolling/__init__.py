@@ -5,6 +5,7 @@ for computing rolling window statistics with flexible configuration.
 """
 
 from .rolling_class import Rolling, RollingConfig
+from .types import RollingResult
 
 # Low-level wrapper functions that call Rust extension directly
 from bunker_stats_rs import rolling_multi_np, rolling_multi_axis0_np
@@ -137,6 +138,7 @@ def rolling_multi_axis0(
 __all__ = [
     "Rolling",
     "RollingConfig",
+    "RollingResult",
     "rolling_multi",
     "rolling_multi_axis0",
 ]

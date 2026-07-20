@@ -563,19 +563,25 @@ try:
         BootstrapCorrConfig,
         PermutationConfig,
         JackknifeConfig,
-        
+
+        # Rich result objects
+        BootstrapResult,
+        PermutationTestResult,
+
         # Convenience functions
         bootstrap,
         bootstrap_corr,
         permutation_test,
         jackknife,
     )
-    
+
     _resampling_config_exports = [
         "BootstrapConfig",
         "BootstrapCorrConfig",
         "PermutationConfig",
         "JackknifeConfig",
+        "BootstrapResult",
+        "PermutationTestResult",
         "bootstrap",
         "bootstrap_corr",
         "permutation_test",
@@ -598,18 +604,22 @@ try:
     from bunker_stats.rolling import (
         # Config dataclasses
         RollingConfig,
-        
+
         # Main user-facing class
         Rolling,
-        
+
+        # Rich result object
+        RollingResult,
+
         # Type hints
         Alignment,
         NanPolicy,
     )
-    
+
     _rolling_config_exports = [
         "Rolling",
         "RollingConfig",
+        "RollingResult",
         "Alignment",
         "NanPolicy",
     ]
@@ -838,6 +848,30 @@ globals().update(_wrap_inference({
     "anderson_darling": anderson_darling,
 }))
 
+# Matrix (corr_matrix / cov_matrix) and robust (robust_fit / *_outliers) rich
+# wrappers, applied after their modern facades are defined, same as inference.
+from bunker_stats.matrix.facade import wrap_matrix as _wrap_matrix
+from bunker_stats.robust.facade import wrap_robust as _wrap_robust
+
+globals().update(_wrap_matrix({
+    "corr_matrix": corr_matrix,
+    "cov_matrix": cov_matrix,
+}))
+globals().update(_wrap_robust({
+    "robust_fit": robust_fit,
+    "iqr_outliers": iqr_outliers,
+    "zscore_outliers": zscore_outliers,
+}))
+
+from bunker_stats.matrix import (  # noqa: E402
+    CorrelationMatrixResult,
+    CovarianceMatrixResult,
+)
+from bunker_stats.robust import (  # noqa: E402
+    RobustFitResult,
+    OutlierResult,
+)
+
 
 # ======================================================================================
 # Public surface exports (clean names only)
@@ -918,9 +952,12 @@ __all__ = [
     "corr_ci", "var_ci", "odds_ratio",
     "rank_biserial", "cliffs_delta", "anova_effect_sizes", "normality_summary",
 
-    # Inference - rich result objects (returned via rich=True)
+    # Rich result objects (returned via rich=True, or from Rolling.result())
     "TTestResult", "ChiSquareResult", "MannWhitneyResult", "KSResult",
     "ANOVAResult", "CorrelationTestResult", "NormalityResult",
+    "CorrelationMatrixResult", "CovarianceMatrixResult",
+    "RobustFitResult", "OutlierResult",
+    "RollingResult",
 
 
     # utilities
