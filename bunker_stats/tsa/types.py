@@ -304,11 +304,53 @@ class ZivotAndrewsResult:
         
         return result
     
+    def plot_breakpoint_scan_plotly(self):
+        """Test statistic vs breakpoint location as a Plotly Figure.
+
+        Interactive counterpart of :meth:`plot_breakpoint_scan` (which is kept
+        matplotlib-based for backward compatibility). Requires metadata and the
+        ``notebook`` extra; returns the Figure without calling ``.show()``.
+        """
+        if self.stat_at_each_bp is None:
+            raise ValueError("Metadata not available. Use metadata=True when calling test.")
+
+        from .._plotly import require_go
+
+        go = require_go()
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=np.asarray(self.tested_breakpoints),
+                y=np.asarray(self.stat_at_each_bp),
+                mode="lines",
+                name="ADF statistic",
+                hovertemplate="breakpoint %{x}: stat %{y:.4f}<extra></extra>",
+            )
+        )
+        fig.add_vline(
+            x=float(self.breakpoint),
+            line_dash="dash",
+            line_color="red",
+            annotation_text=f"detected break (t={self.breakpoint})",
+        )
+        fig.add_hline(
+            y=float(self.stat),
+            line_dash="dot",
+            line_color="green",
+            annotation_text=f"min stat = {self.stat:.3f}",
+        )
+        fig.update_layout(
+            title="Zivot-Andrews Breakpoint Scan",
+            xaxis_title="Breakpoint Location",
+            yaxis_title="Test Statistic",
+        )
+        return fig
+
     def plot_breakpoint_scan(self, ax=None):
         """Plot test statistic vs breakpoint location."""
         if self.stat_at_each_bp is None:
             raise ValueError("Metadata not available. Use metadata=True when calling test.")
-        
+
         import matplotlib.pyplot as plt
         
         if ax is None:

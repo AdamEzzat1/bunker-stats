@@ -550,6 +550,20 @@ Two behaviours worth noting:
   `anderson_darling`; its `conclusion()` / `is_normal()` fall back to the 5%
   critical value (A\* > 0.787 rejects normality).
 
+### Misuse-prevention warnings
+
+Rich results carry a `warnings` list flagging conditions that make the numbers
+easy to over-trust — small samples, non-computable p-values, approximate
+p-values, zero-variance/all-NaN columns, low bootstrap resample counts.
+Warnings appear in `.info()` output and in `.to_dict()["warnings"]`; a clean
+result has an empty list:
+
+```python
+r = bs.t_test_2samp(x[:5], y[:6], rich=True)
+r.warnings
+# ['small sample (min n = 5): asymptotic p-values are unreliable']
+```
+
 ## Notebook UX (optional pandas layer)
 
 `bunker_stats.notebook` is the ergonomic bridge between the Rust kernels and
@@ -617,6 +631,38 @@ style_effect_size(results, "cohens_d", thresholds=(0.2, 0.5, 0.8))
 
 Helpers are also reachable lazily off the package (`bs.notebook.robust_summary(df)`)
 and re-exported from `bunker_stats.pandas` alongside `cov_df` / `corr_df`.
+
+### Report objects and interactive Plotly figures
+
+Every `*_report` helper also takes **`rich=True`**, returning a report object
+instead of a bare DataFrame — same numbers (`report.data`), plus `meta`
+(method, parameters, NaN policy, seeds), misuse-prevention `warnings`, a stable
+`to_dict()` schema (`{"title", "data", "meta", "warnings"}`), `.style()`,
+`.info()`, and interactive **Plotly** figure methods:
+
+```python
+from bunker_stats import notebook as nb
+
+rep = nb.outlier_report(df, rich=True)
+rep.plot_counts()          # plotly Figure: outlier counts, hover shows % + method
+
+corr = nb.correlation_report(df, rich=True)
+corr.plot_heatmap()        # plotly Figure: hover shows pair + r; NaN cells = gaps
+
+ci = nb.bootstrap_ci_report(df, n_resamples=5000, random_state=0, rich=True)
+ci.plot_intervals()        # plotly Figure: estimates with CI error bars
+
+# Result objects grew Plotly methods too:
+bs.Rolling(x, window=20).result("mean", "std").plot()   # one trace per stat
+za.plot_breakpoint_scan_plotly()                        # Zivot-Andrews scan
+boot_result.plot_distribution()                         # needs retained draws
+```
+
+Figure methods return `plotly.graph_objects.Figure` — they never call
+`.show()`, and every figure serializes via `fig.to_json()` / `fig.to_html()`.
+Plotly ships with the `notebook` extra; calling a plot method without it raises
+`Install with pip install bunker-stats-rs[notebook] to use Plotly
+visualizations.` Everything else on a report object works without Plotly.
 
 ### NaN and infinity policy
 

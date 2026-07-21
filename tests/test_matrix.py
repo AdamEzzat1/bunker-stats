@@ -15,6 +15,7 @@ Run with: pytest test_matrix.py -v
 For coverage: pytest test_matrix.py -v --cov=bunker_stats_rs --cov-report=html
 """
 
+import importlib.util
 import pytest
 import numpy as np
 from scipy import stats
@@ -882,14 +883,17 @@ class TestShapeAndTypes:
 # PERFORMANCE REGRESSION TESTS
 # ==============================================================================
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("pytest_benchmark") is None,
+    reason="pytest-benchmark plugin not installed (pip install pytest-benchmark)",
+)
 class TestPerformanceRegression:
     """Tests to catch performance regressions"""
-    
+
     def test_medium_matrix_timing(self, medium_matrix, benchmark):
         """Benchmark medium matrix covariance"""
-        if 'benchmark' in dir():
-            result = benchmark(bsr.cov_matrix_np, medium_matrix)
-            assert result.shape == (20, 20)
+        result = benchmark(bsr.cov_matrix_np, medium_matrix)
+        assert result.shape == (20, 20)
     
     def test_parallel_gives_same_result(self, large_matrix):
         """Parallel and sequential should give identical results"""

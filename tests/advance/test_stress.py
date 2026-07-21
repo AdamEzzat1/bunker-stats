@@ -424,10 +424,22 @@ class TestEdgeCaseStress:
         elapsed = time.perf_counter() - start
         
         print(f"\n100K×10 with 50% NaNs, window=100: {elapsed:.3f}s")
-        
+
         assert result.shape == (99_901, 10)
-        # Some results may be NaN if window contains all NaNs
-        assert np.sum(np.isfinite(result)) > 0
+        # Strict kernel contract: ANY NaN in a window propagates. With 50% NaN
+        # and window=100, P(a NaN-free window) ~ 0.5^100 ~ 0, so an all-NaN
+        # result is the CORRECT strict output, not a failure.
+        assert np.all(np.isnan(result)), "strict kernel should propagate NaN here"
+
+        # The NaN-aware path is what makes 50%-NaN data usable: nan_policy
+        # 'ignore' with min_periods=1 must produce finite results.
+        (mean_ignore,) = bs.rolling_multi_axis0(
+            data, window=100, min_periods=1, nan_policy="ignore", stats=["mean"]
+        )
+        mean_ignore = np.asarray(mean_ignore)
+        finite_frac = np.mean(np.isfinite(mean_ignore))
+        print(f"nan_policy='ignore' finite fraction: {finite_frac:.3f}")
+        assert finite_frac > 0.99
     
     @pytest.mark.slow
     def test_bootstrap_constant_data(self):
@@ -501,14 +513,19 @@ class TestNumericalStabilityStress:
         
         print(f"\n1M elements (base 1e12), variance: {elapsed:.3f}s")
         
-        # Variance of [0, 1, 2, ..., n-1] is (n^2 - 1) / 12
+        # bs.var is the SAMPLE variance (ddof=1). For [0, 1, ..., n-1] the
+        # population variance is (n^2 - 1)/12; the ddof=1 value is that times
+        # n/(n-1), i.e. n(n+1)/12. The old expectation used the population
+        # formula, which differs by exactly n/(n-1) - 1 = 1e-6 at n=1e6 —
+        # that was the entire "precision failure". The kernel itself is
+        # accurate to ~3e-12 on this ill-conditioned input (numpy matches).
         n = len(x)
-        expected_var = (n**2 - 1) / 12
-        
+        expected_var = n * (n + 1) / 12
+
         # Should match to high precision
         rel_error = abs(variance - expected_var) / expected_var
         print(f"Relative error: {rel_error:.2e}")
-        
+
         assert rel_error < 1e-10
 
 

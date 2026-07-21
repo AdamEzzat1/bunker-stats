@@ -200,6 +200,64 @@ def _build_anderson_darling(d, args, kwargs) -> NormalityResult:
 
 
 # ----------------------------------------------------------------------
+# Misuse-prevention warnings, attached to every rich result post-build.
+# ----------------------------------------------------------------------
+
+def _annotate_warnings(r):
+    """Attach data-quality warnings a careful statistician would flag.
+
+    Central so every ``rich=True`` test gets the same standards: small
+    samples, non-computable p-values, and approximate-p caveats. Warnings
+    surface in ``.info()`` and ``.to_dict()['warnings']``.
+    """
+    import math
+
+    ns = [
+        v
+        for v in (
+            getattr(r, "n1", None),
+            getattr(r, "n2", None),
+            getattr(r, "n", None),
+        )
+        if isinstance(v, int)
+    ]
+    if ns and min(ns) < 8:
+        r.add_warning(
+            f"small sample (min n = {min(ns)}): asymptotic p-values are unreliable"
+        )
+
+    p = getattr(r, "pvalue", None)
+    if isinstance(p, float) and math.isnan(p):
+        r.add_warning("p-value could not be computed for this input")
+
+    if isinstance(r, NormalityResult):
+        if r.method == "jarque_bera" and isinstance(r.n, int) and r.n < 20:
+            r.add_warning(
+                "Jarque-Bera is asymptotic; results are unreliable below n ~ 20"
+            )
+        if r.method == "anderson_darling":
+            r.add_warning(
+                "no exact p-value; verdict compares A* to the 5% critical "
+                "value (approximate)"
+            )
+
+    if isinstance(r, MannWhitneyResult):
+        if ns and min(ns) < 10:
+            r.add_warning(
+                "normal-approximation p-value; exact tables are recommended "
+                "for n < 10"
+            )
+    return r
+
+
+def _with_warnings(builder):
+    def wrapped(d, args, kwargs):
+        return _annotate_warnings(builder(d, args, kwargs))
+
+    return wrapped
+
+
+# ----------------------------------------------------------------------
 # name -> builder. The root package wraps each raw kernel with these.
 # ----------------------------------------------------------------------
 _BUILDERS = {
@@ -230,5 +288,5 @@ def wrap_inference(raw_funcs: dict):
         raw = raw_funcs.get(name)
         if raw is None:
             continue
-        wrapped[name] = rich_facade(raw, builder, name=name)
+        wrapped[name] = rich_facade(raw, _with_warnings(builder), name=name)
     return wrapped

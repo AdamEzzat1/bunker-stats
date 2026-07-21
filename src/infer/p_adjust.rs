@@ -162,4 +162,89 @@ mod tests {
         let adj = bonferroni(&pvals);
         assert_eq!(adj[2], 1.0); // 0.8 * 3 = 2.4 => clamped to 1.0
     }
+
+    // ------------------------------------------------------------------
+    // Property tests: invariants every p-adjustment method must satisfy
+    // for ANY valid input, not just hand-picked examples.
+    // ------------------------------------------------------------------
+    use proptest::prelude::*;
+
+    fn adjust(method: &str, pvals: &[f64]) -> Vec<f64> {
+        match method {
+            "bonferroni" => bonferroni(pvals),
+            "holm" => holm(pvals),
+            "bh" => benjamini_hochberg(pvals),
+            _ => unreachable!(),
+        }
+    }
+
+    proptest! {
+        /// Adjusted p-values stay inside [0, 1] and preserve length.
+        #[test]
+        fn prop_padjust_bounds_and_length(
+            pvals in proptest::collection::vec(0.0f64..=1.0, 1..64),
+            method in prop_oneof!["bonferroni", "holm", "bh"],
+        ) {
+            let adj = adjust(&method, &pvals);
+            prop_assert_eq!(adj.len(), pvals.len());
+            for &a in &adj {
+                prop_assert!((0.0..=1.0).contains(&a), "out of bounds: {}", a);
+            }
+        }
+
+        /// Order preservation: a smaller raw p never gets a LARGER adjusted p
+        /// than a bigger raw p (monotonicity of every step-up/step-down method).
+        #[test]
+        fn prop_padjust_monotone(
+            pvals in proptest::collection::vec(0.0f64..=1.0, 2..48),
+            method in prop_oneof!["bonferroni", "holm", "bh"],
+        ) {
+            let adj = adjust(&method, &pvals);
+            for i in 0..pvals.len() {
+                for j in 0..pvals.len() {
+                    if pvals[i] < pvals[j] {
+                        prop_assert!(
+                            adj[i] <= adj[j] + 1e-12,
+                            "p[{}]={} < p[{}]={} but adj {} > adj {}",
+                            i, pvals[i], j, pvals[j], adj[i], adj[j]
+                        );
+                    }
+                }
+            }
+        }
+
+        /// Adjustment never DECREASES a p-value (all three are conservative).
+        #[test]
+        fn prop_padjust_never_decreases(
+            pvals in proptest::collection::vec(0.0f64..=1.0, 1..48),
+            method in prop_oneof!["bonferroni", "holm", "bh"],
+        ) {
+            let adj = adjust(&method, &pvals);
+            for (raw, a) in pvals.iter().zip(&adj) {
+                prop_assert!(a + 1e-12 >= *raw, "adjusted {} < raw {}", a, raw);
+            }
+        }
+    }
+
+    /// Bolero fuzz: arbitrary byte-derived p-vectors (clamped into [0,1])
+    /// through every method — no panics, valid lengths, bounded outputs.
+    /// Run under `cargo test` (bounded random) or cargo-bolero for real fuzzing.
+    #[test]
+    fn fuzz_padjust_no_panic() {
+        bolero::check!()
+            .with_type::<(u8, Vec<f64>)>()
+            .for_each(|(sel, raw)| {
+                let pvals: Vec<f64> = raw
+                    .iter()
+                    .map(|x| if x.is_finite() { x.abs() % 1.0 } else { 0.5 })
+                    .collect();
+                if pvals.is_empty() {
+                    return;
+                }
+                let method = ["bonferroni", "holm", "bh"][(*sel as usize) % 3];
+                let adj = adjust(method, &pvals);
+                assert_eq!(adj.len(), pvals.len());
+                assert!(adj.iter().all(|a| (0.0..=1.0).contains(a)));
+            });
+    }
 }

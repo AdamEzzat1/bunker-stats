@@ -964,7 +964,10 @@ __all__ = [
     "pad_nan",
     
     # NEW: resampling (bootstrap & jackknife) - flat functions
-    "bootstrap_mean", "bootstrap_mean_ci", "bootstrap_ci", "bootstrap_corr",
+    # NOTE: "bootstrap_corr" is intentionally NOT listed here — the resampling
+    # config layer rebinds that name and exports it via
+    # _resampling_config_exports; listing it twice duplicated __all__.
+    "bootstrap_mean", "bootstrap_mean_ci", "bootstrap_ci",
     "jackknife_mean", "jackknife_mean_ci",
     "permutation_test_corr", "permutation_mean_diff_test",
     

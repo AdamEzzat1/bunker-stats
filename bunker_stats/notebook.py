@@ -73,6 +73,12 @@ __all__ = [
     "demean_style",
     "zscore_style",
     "iqr_outlier_style",
+    # --- report objects (returned by *_report(..., rich=True)) -------------
+    "NotebookReport",
+    "SummaryReport",
+    "OutlierReport",
+    "CorrelationReport",
+    "BootstrapCIReport",
 ]
 
 _INSTALL_HINT = (
@@ -220,7 +226,7 @@ def _check_choice(value: str, valid: Sequence[str], name: str) -> str:
 # Reports  ->  DataFrame
 # ======================================================================
 
-def robust_summary(df, columns: Sequence[Any] | None = None):
+def robust_summary(df, columns: Sequence[Any] | None = None, *, rich: bool = False):
     """Robust + classical descriptive statistics, one row per column.
 
     Columns of the result: ``n`` (finite count), ``n_missing`` (non-finite
@@ -272,7 +278,31 @@ def robust_summary(df, columns: Sequence[Any] | None = None):
         "mad", "mad_std", "iqr", "qn_scale", "trimmed_mean", "skew", "kurtosis",
     ]
     out = pd.DataFrame(rows, index=pd.Index(cols, name="column"))
-    return out.reindex(columns=order)
+    out = out.reindex(columns=order)
+    if rich:
+        warnings = []
+        empty = [str(c) for c in out.index[out["n"] == 0]]
+        if empty:
+            warnings.append(f"no finite values in column(s): {', '.join(empty)}")
+        constant = [
+            str(c) for c in out.index[(out["n"] > 0) & (out["std"] == 0.0)]
+        ]
+        if constant:
+            warnings.append(
+                f"zero variance in column(s): {', '.join(constant)} — "
+                "scale statistics are 0 and z-scores are undefined"
+            )
+        return SummaryReport(
+            out,
+            meta={
+                "columns": list(cols),
+                "nan_policy": "non-finite dropped per column (see n_missing)",
+                "trimmed_mean": "10% per tail",
+                "kurtosis": "excess (Fisher)",
+            },
+            warnings=warnings,
+        )
+    return out
 
 
 def describe_fast(df, columns: Sequence[Any] | None = None, *, robust: bool = True):
@@ -371,6 +401,7 @@ def outlier_report(
     method: str = "iqr",
     k: float = 1.5,
     z_threshold: float = 3.0,
+    rich: bool = False,
 ):
     """Per-column outlier counts and cutoffs.
 
@@ -420,7 +451,35 @@ def outlier_report(
             }
         )
 
-    return pd.DataFrame(rows, index=pd.Index(cols, name="column"))
+    out = pd.DataFrame(rows, index=pd.Index(cols, name="column"))
+    if rich:
+        warnings = []
+        empty = [str(c) for c in out.index[out["n"] == 0]]
+        if empty:
+            warnings.append(f"no finite values in column(s): {', '.join(empty)}")
+        degenerate = [
+            str(c)
+            for c in out.index[
+                (out["n"] > 0) & (out["lower_bound"] == out["upper_bound"])
+            ]
+        ]
+        if degenerate:
+            warnings.append(
+                f"zero spread in column(s): {', '.join(degenerate)} — "
+                "outlier fences collapse to a point, so nothing can be flagged"
+            )
+        return OutlierReport(
+            out,
+            meta={
+                "method": method,
+                "k": k if method == "iqr" else None,
+                "z_threshold": z_threshold if method != "iqr" else None,
+                "columns": list(cols),
+                "nan_policy": "non-finite never flagged; counted in n_missing",
+            },
+            warnings=warnings,
+        )
+    return out
 
 
 def normality_report(df, columns: Sequence[Any] | None = None, *, alpha: float = 0.05):
@@ -480,6 +539,7 @@ def correlation_report(
     *,
     method: str = "pearson",
     pvalues: bool = False,
+    rich: bool = False,
 ):
     """Correlation between numeric columns, using pairwise-complete rows.
 
@@ -504,6 +564,13 @@ def correlation_report(
 
     test = _bs.pearson_corr_test if method == "pearson" else _bs.spearman_corr_test
 
+    meta = {
+        "method": method,
+        "columns": list(cols),
+        "nan_policy": "pairwise-complete (each pair uses rows finite in both)",
+        "form": "long" if pvalues else "matrix",
+    }
+
     if not pvalues:
         mat = np.full((len(cols), len(cols)), np.nan)
         np.fill_diagonal(mat, 1.0)
@@ -513,7 +580,8 @@ def correlation_report(
                 xj = _as_float(df[cols[j]])
                 r = _pair_corr(test, xi, xj)[0]
                 mat[i, j] = mat[j, i] = r
-        return pd.DataFrame(mat, index=pd.Index(cols, name="column"), columns=cols)
+        out = pd.DataFrame(mat, index=pd.Index(cols, name="column"), columns=cols)
+        return CorrelationReport(out, meta=meta) if rich else out
 
     rows = []
     for i in range(len(cols)):
@@ -527,7 +595,8 @@ def correlation_report(
                     "correlation": r, "statistic": stat, "pvalue": p,
                 }
             )
-    return pd.DataFrame(rows, columns=["x", "y", "n", "correlation", "statistic", "pvalue"])
+    out = pd.DataFrame(rows, columns=["x", "y", "n", "correlation", "statistic", "pvalue"])
+    return CorrelationReport(out, meta=meta) if rich else out
 
 
 def _pair_corr(test, xi: np.ndarray, xj: np.ndarray):
@@ -674,6 +743,7 @@ def bootstrap_ci_report(
     n_resamples: int = 1000,
     conf: float = 0.95,
     random_state: int | None = None,
+    rich: bool = False,
 ):
     """Bootstrap point estimate and confidence interval per column.
 
@@ -724,7 +794,33 @@ def bootstrap_ci_report(
 
     order = ["stat", "n", "n_missing", "estimate", "ci_lower", "ci_upper", "conf"]
     out = pd.DataFrame(rows, index=pd.Index(cols, name="column"))
-    return out.reindex(columns=order)
+    out = out.reindex(columns=order)
+    if rich:
+        warnings = []
+        if n_resamples < 1000:
+            warnings.append(
+                f"n_resamples={n_resamples} is low; CI endpoints may be "
+                "unstable (>= 1000 recommended)"
+            )
+        tiny = [str(c) for c in out.index[out["n"] < 10]]
+        if tiny:
+            warnings.append(
+                f"small sample (n < 10) in column(s): {', '.join(tiny)} — "
+                "bootstrap CIs are unreliable"
+            )
+        return BootstrapCIReport(
+            out,
+            meta={
+                "stat": stat,
+                "n_resamples": n_resamples,
+                "conf": conf,
+                "random_state": random_state,
+                "columns": list(cols),
+                "nan_policy": "omit (non-finite dropped per column)",
+            },
+            warnings=warnings,
+        )
+    return out
 
 
 # ======================================================================
@@ -1097,3 +1193,232 @@ def iqr_outlier_style(
     Thin wrapper over :func:`outlier_style` with ``method="iqr"``.
     """
     return outlier_style(df, [column], method="iqr", k=k, outlier_color=outlier_color)
+
+
+# ======================================================================
+# Report objects  (returned by *_report(..., rich=True))
+# ======================================================================
+
+class NotebookReport:
+    """Base class for rich notebook reports.
+
+    Wraps the report DataFrame (``.data``) together with ``.meta`` — the
+    method context an analyst needs to interpret or reproduce the numbers
+    (method names, parameters, NaN policy, seeds). Reports are returned by the
+    ``*_report`` helpers when called with ``rich=True``; the default return
+    stays a plain DataFrame.
+
+    All reports support ``.to_frame()``, ``.to_dict()``, ``.style()``,
+    ``.info()`` and render as a table in Jupyter via ``_repr_html_``.
+    """
+
+    _title = "Report"
+
+    def __init__(self, data, meta: dict, warnings: Sequence[str] | None = None):
+        self._data = data
+        self.meta = dict(meta)
+        self._warnings = list(warnings or [])
+
+    @property
+    def warnings(self) -> list:
+        """Misuse-prevention warnings attached to this report (may be empty)."""
+        return list(self._warnings)
+
+    def add_warning(self, message: str) -> None:
+        """Attach a warning shown by ``info()`` and included in ``to_dict()``."""
+        self._warnings.append(message)
+
+    @property
+    def data(self):
+        """The underlying report DataFrame (not a copy)."""
+        return self._data
+
+    def to_frame(self):
+        """Return a copy of the report DataFrame."""
+        return self._data.copy()
+
+    def to_dict(self) -> dict:
+        """Stable dict schema: ``{"title", "data", "meta", "warnings"}``.
+
+        ``data`` is ``DataFrame.to_dict(orient="index")`` — one entry per
+        report row, keyed by the row label. NaN values survive as ``float
+        ('nan')`` (JSON encoders should use their NaN handling of choice).
+        ``warnings`` is always present (possibly empty).
+        """
+        return {
+            "title": self._title,
+            "data": self._data.to_dict(orient="index"),
+            "meta": dict(self.meta),
+            "warnings": list(self._warnings),
+        }
+
+    def style(self):
+        """A basic pandas Styler over the report table (float formatting)."""
+        numeric = self._data.select_dtypes(include="number").columns
+        return self._data.style.format({c: "{:.4g}" for c in numeric}, na_rep="·")
+
+    def info(self) -> str:
+        lines = [self._title, "=" * 60]
+        lines.append(f"{'Rows:':<18}{len(self._data)}")
+        for key, value in self.meta.items():
+            lines.append(f"{key + ':':<18}{value}")
+        if self._warnings:
+            lines.append("")
+            lines += [f"Warning: {w}" for w in self._warnings]
+        return "\n".join(lines)
+
+    def _repr_html_(self):
+        return self._data._repr_html_()
+
+    def __repr__(self) -> str:
+        meta = ", ".join(f"{k}={v!r}" for k, v in list(self.meta.items())[:4])
+        return f"{type(self).__name__}(rows={len(self._data)}, {meta})"
+
+
+class SummaryReport(NotebookReport):
+    """Rich wrapper over :func:`robust_summary` / :func:`describe_fast`."""
+
+    _title = "Robust Summary"
+
+
+class OutlierReport(NotebookReport):
+    """Rich wrapper over :func:`outlier_report`, with a Plotly counts chart."""
+
+    _title = "Outlier Report"
+
+    def plot_counts(self):
+        """Bar chart of outlier counts per column (Plotly Figure).
+
+        Hover shows the percentage and detection method. Never calls
+        ``.show()``; returns the Figure.
+        """
+        from ._plotly import require_go
+
+        go = require_go()
+        df = self._data
+        hover = [
+            f"{idx}: {int(row['n_outliers'])} outliers "
+            f"({row['pct_outliers']:.2f}% of {int(row['n'])}) — {row['method']}"
+            if np.isfinite(row["pct_outliers"])
+            else f"{idx}: no finite values"
+            for idx, row in df.iterrows()
+        ]
+        fig = go.Figure(
+            go.Bar(
+                x=[str(i) for i in df.index],
+                y=df["n_outliers"].to_numpy(dtype=float),
+                hovertext=hover,
+                hoverinfo="text",
+            )
+        )
+        fig.update_layout(
+            title=f"Outliers per column (method={self.meta.get('method')})",
+            xaxis_title="column",
+            yaxis_title="n_outliers",
+        )
+        return fig
+
+
+class CorrelationReport(NotebookReport):
+    """Rich wrapper over :func:`correlation_report` (matrix form)."""
+
+    _title = "Correlation Report"
+
+    def style(self):
+        """Gradient-styled matrix (requires matplotlib via pandas Styler)."""
+        return self._data.style.background_gradient(
+            cmap="coolwarm", vmin=-1.0, vmax=1.0
+        )
+
+    def plot_heatmap(self):
+        """Correlation matrix heatmap (Plotly Figure).
+
+        Hover shows the variable pair and the correlation value; NaN cells
+        (insufficient pairwise overlap) render as gaps. Only available for the
+        matrix form (``pvalues=False``).
+        """
+        from ._plotly import require_go
+
+        if self.meta.get("form") == "long":
+            raise ValueError(
+                "plot_heatmap() needs the matrix form; call "
+                "correlation_report(df, pvalues=False, rich=True)"
+            )
+        go = require_go()
+        df = self._data
+        labels = [str(c) for c in df.columns]
+        z = df.to_numpy(dtype=float)
+        hover = [
+            [
+                f"{labels[i]} vs {labels[j]}: r = {z[i, j]:.4f}"
+                if np.isfinite(z[i, j])
+                else f"{labels[i]} vs {labels[j]}: insufficient overlap"
+                for j in range(len(labels))
+            ]
+            for i in range(len(labels))
+        ]
+        fig = go.Figure(
+            go.Heatmap(
+                z=z,
+                x=labels,
+                y=labels,
+                zmin=-1.0,
+                zmax=1.0,
+                colorscale="RdBu",
+                reversescale=True,
+                hovertext=hover,
+                hoverinfo="text",
+            )
+        )
+        fig.update_layout(
+            title=f"Correlation ({self.meta.get('method', 'pearson')})",
+            yaxis_autorange="reversed",
+        )
+        return fig
+
+
+class BootstrapCIReport(NotebookReport):
+    """Rich wrapper over :func:`bootstrap_ci_report`."""
+
+    _title = "Bootstrap CI Report"
+
+    def plot_intervals(self):
+        """Point estimates with CI error bars per column (Plotly Figure)."""
+        from ._plotly import require_go
+
+        go = require_go()
+        df = self._data
+        est = df["estimate"].to_numpy(dtype=float)
+        lo = df["ci_lower"].to_numpy(dtype=float)
+        hi = df["ci_upper"].to_numpy(dtype=float)
+        labels = [str(i) for i in df.index]
+        hover = [
+            f"{labels[i]}: {est[i]:.4g} [{lo[i]:.4g}, {hi[i]:.4g}] "
+            f"({self.meta.get('stat')}, conf={self.meta.get('conf')}, "
+            f"n_resamples={self.meta.get('n_resamples')})"
+            for i in range(len(labels))
+        ]
+        fig = go.Figure(
+            go.Scatter(
+                x=labels,
+                y=est,
+                mode="markers",
+                error_y={
+                    "type": "data",
+                    "symmetric": False,
+                    "array": hi - est,
+                    "arrayminus": est - lo,
+                },
+                hovertext=hover,
+                hoverinfo="text",
+            )
+        )
+        fig.update_layout(
+            title=(
+                f"Bootstrap {self.meta.get('stat', 'mean')} with "
+                f"{int(float(self.meta.get('conf', 0.95)) * 100)}% CI"
+            ),
+            xaxis_title="column",
+            yaxis_title="estimate",
+        )
+        return fig

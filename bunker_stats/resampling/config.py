@@ -2895,9 +2895,59 @@ class BootstrapResult(RichResult):
         
         if self.bca_bias_correction is not None:
             lines.append(f"  BCa bias correction: {self.bca_bias_correction:.4f}")
-        
+
         return "\n".join(lines)
-    
+
+    def plot_distribution(self):
+        """Histogram of the bootstrap draws with estimate and CI marked.
+
+        Returns a ``plotly.graph_objects.Figure`` (requires the ``notebook``
+        extra); never calls ``.show()``. Raises a helpful error when the draws
+        were not retained — pass ``return_draws=True`` to the config.
+        """
+        if self.draws is None:
+            raise ValueError(
+                "Bootstrap draws were not retained for this result. The Rust "
+                "kernels return only (estimate, ci_lower, ci_upper); to plot "
+                "the distribution, construct BootstrapResult with draws= your "
+                "own resample array (draws retention is not yet wired through "
+                "BootstrapConfig)."
+            )
+
+        from bunker_stats._plotly import require_go
+
+        go = require_go()
+        level = self.confidence_level or 0.95
+        fig = go.Figure(
+            go.Histogram(
+                x=np.asarray(self.draws, dtype=float),
+                nbinsx=50,
+                name="bootstrap draws",
+                hovertemplate="draw bin %{x}: %{y}<extra></extra>",
+            )
+        )
+        fig.add_vline(
+            x=float(self.estimate),
+            line_color="red",
+            annotation_text=f"estimate = {self.estimate:.4g}",
+        )
+        for bound, label in ((self.ci_lower, "lower"), (self.ci_upper, "upper")):
+            fig.add_vline(
+                x=float(bound),
+                line_dash="dash",
+                line_color="green",
+                annotation_text=f"{int(level * 100)}% {label}",
+            )
+        fig.update_layout(
+            title=(
+                f"Bootstrap distribution ({self.method or 'percentile'}, "
+                f"n_resamples={self.n_resamples or len(self.draws)})"
+            ),
+            xaxis_title="statistic value",
+            yaxis_title="count",
+        )
+        return fig
+
     def __repr__(self) -> str:
         """Short representation showing key results"""
         return (f"BootstrapResult(estimate={self.estimate:.4f}, "

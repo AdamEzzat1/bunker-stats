@@ -91,18 +91,41 @@ class RollingResult(RichResult):
             "axis": self.axis,
         }
 
-    def plot(self, ax=None):
-        """Quick line plot of each statistic (needs matplotlib; 1-D input)."""
-        import matplotlib.pyplot as plt
+    def plot(self):
+        """Line chart of each statistic as its own trace (Plotly Figure).
 
-        if ax is None:
-            _, ax = plt.subplots(figsize=(10, 4))
+        Requires the ``notebook`` extra; 1-D input only. Returns the Figure —
+        never calls ``.show()``.
+        """
+        from .._plotly import require_go
+
+        go = require_go()
+        fig = go.Figure()
         for name in self.stats:
-            ax.plot(np.asarray(self.table[name]), label=name)
-        ax.set_title(f"Rolling window = {self.window}")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        return ax
+            arr = np.asarray(self.table[name])
+            if arr.ndim != 1:
+                raise ValueError(
+                    "plot() supports 1-D rolling results; "
+                    f"stat {name!r} has shape {arr.shape}"
+                )
+            fig.add_trace(
+                go.Scatter(
+                    y=arr,
+                    mode="lines",
+                    name=name,
+                    hovertemplate=(
+                        f"{name}[%{{x}}] = %{{y:.6g}}"
+                        f"<extra>window={self.window}, "
+                        f"nan_policy={self.nan_policy}</extra>"
+                    ),
+                )
+            )
+        fig.update_layout(
+            title=f"Rolling window = {self.window}",
+            xaxis_title="index",
+            yaxis_title="value",
+        )
+        return fig
 
     def info(self) -> str:
         lines = [self._title, "=" * 60]

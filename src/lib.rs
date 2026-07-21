@@ -11,6 +11,10 @@ mod kernels;
 mod infer;
 pub(crate) mod util;
 
+// Property/fuzz tests for boundary code (proptest + bolero); test builds only.
+#[cfg(test)]
+mod boundary_tests;
+
 
 use numpy::{
     ndarray::{Array2, ArrayViewD, Axis},

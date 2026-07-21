@@ -31,6 +31,10 @@ bitflags = "2.4"
 [dev-dependencies]
 proptest = "1"
 approx = "0.5"
+# Structured fuzzing for boundary/parsing code. Under plain `cargo test` the
+# bolero targets run a bounded random search; point cargo-bolero at the same
+# targets for coverage-guided fuzzing.
+bolero = "0.13"
 
 [features]
 default = ["parallel", "extension-module"]

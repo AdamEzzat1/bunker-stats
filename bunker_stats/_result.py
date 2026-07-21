@@ -60,6 +60,19 @@ class RichResult:
 
     _fields: tuple[str, ...] = ()
     _title: str = "Result"
+    # Misuse-prevention notes ("small sample", "approximate p-value", ...).
+    # Class-level default; add_warning() creates the per-instance list lazily
+    # so dataclass __init__ signatures stay untouched.
+    _warnings: tuple = ()
+
+    @property
+    def warnings(self) -> list:
+        """Misuse-prevention warnings attached to this result (may be empty)."""
+        return list(self._warnings)
+
+    def add_warning(self, message: str) -> None:
+        """Attach a warning shown by ``info()`` and included in ``to_dict()``."""
+        self._warnings = tuple(self._warnings) + (message,)
 
     # -- tuple-like access ------------------------------------------------
     def __iter__(self) -> Iterator[Any]:
@@ -88,6 +101,8 @@ class RichResult:
             if value is None:
                 continue
             out[f.name] = _pyify(value, array=array)
+        if self._warnings:
+            out["warnings"] = list(self._warnings)
         return out
 
     def __repr__(self) -> str:
@@ -101,6 +116,11 @@ class RichResult:
         """(label, value) rows rendered by :meth:`info`. Override in subclasses."""
         return []
 
+    def _warning_lines(self) -> list[str]:
+        if not self._warnings:
+            return []
+        return [""] + [f"Warning: {w}" for w in self._warnings]
+
     def info(self) -> str:
         """Pretty, multi-line human summary."""
         lines = [self._title, "=" * 60]
@@ -108,6 +128,7 @@ class RichResult:
             if _is_missing(value):
                 continue
             lines.append(f"{label:<20}{_fmt_scalar(value)}")
+        lines += self._warning_lines()
         return "\n".join(lines)
 
 
@@ -153,6 +174,7 @@ class HypothesisResult(RichResult):
                 continue
             lines.append(f"{label:<20}{_fmt_scalar(value)}")
         lines += ["", f"Conclusion: {self.conclusion()}"]
+        lines += self._warning_lines()
         return "\n".join(lines)
 
 
