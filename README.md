@@ -213,10 +213,10 @@ passing, 0 compiler warnings**.
 ### Installation
 
 ```bash
-pip install bunker-stats
+pip install bunker-stats-rs
 
 # ...plus the optional pandas/Jupyter reporting layer (see "Notebook UX" below)
-pip install "bunker-stats[notebook]"
+pip install "bunker-stats-rs[notebook]"
 ```
 
 The core package depends only on **numpy**. `pandas`, `jinja2` and `matplotlib`
@@ -256,7 +256,7 @@ X = np.random.randn(1000, 10)
 cov = bs.cov_matrix(X)
 corr = bs.corr_matrix(X, skipna=True)            # pairwise-complete
 
-# Optional notebook layer (pip install "bunker-stats[notebook]")
+# Optional notebook layer (pip install "bunker-stats-rs[notebook]")
 # from bunker_stats.notebook import robust_summary, outlier_style
 # robust_summary(df)          # DataFrame: median, MAD, IQR, Qn, skew, kurtosis...
 # outlier_style(df)           # Styler: highlights outliers across all columns
@@ -571,7 +571,7 @@ pandas/Jupyter. Every helper is a thin, validated wrapper — the numbers always
 come from the same kernels the core API uses.
 
 ```bash
-pip install "bunker-stats[notebook]"
+pip install "bunker-stats-rs[notebook]"
 ```
 
 `import bunker_stats` stays **numpy-only**: pandas is never imported at package

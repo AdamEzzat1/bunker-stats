@@ -7,8 +7,14 @@ for computing rolling window statistics with flexible configuration.
 from .rolling_class import Rolling, RollingConfig
 from .types import RollingResult
 
-# Low-level wrapper functions that call Rust extension directly
-from bunker_stats_rs import rolling_multi_np, rolling_multi_axis0_np
+# Low-level wrapper functions that call the Rust extension directly. Resolve
+# through the facade's `_rs` handle, which already copes with every wheel
+# layout (in-package extension, nested, or legacy top-level module) — a direct
+# `from bunker_stats_rs import ...` breaks on the in-package layout.
+from bunker_stats import _rs as _bunker_stats_rs
+
+rolling_multi_np = _bunker_stats_rs.rolling_multi_np
+rolling_multi_axis0_np = _bunker_stats_rs.rolling_multi_axis0_np
 
 
 def rolling_multi(

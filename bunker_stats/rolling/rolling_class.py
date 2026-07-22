@@ -8,10 +8,14 @@ import numpy as np
 from typing import Optional, Literal, Tuple, Union, Dict
 from dataclasses import dataclass
 
-# Import from Rust extension
+# Import from the Rust extension via the facade's `_rs` handle (covers the
+# in-package, nested and legacy top-level wheel layouts alike).
 try:
-    from bunker_stats_rs import rolling_multi_np, rolling_multi_axis0_np
-except ImportError:
+    from bunker_stats import _rs as _bunker_stats_rs
+
+    rolling_multi_np = _bunker_stats_rs.rolling_multi_np
+    rolling_multi_axis0_np = _bunker_stats_rs.rolling_multi_axis0_np
+except (ImportError, AttributeError):
     # Fallback for development/testing
     rolling_multi_np = None
     rolling_multi_axis0_np = None

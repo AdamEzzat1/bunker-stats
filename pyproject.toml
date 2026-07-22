@@ -82,9 +82,19 @@ issues = "https://github.com/AdamEzzat1/bunker-stats/issues"
 # Build the extension with the pyo3/extension-module feature enabled (it is not a
 # default dependency feature so that `cargo test`/`cargo bolero` can link libpython).
 features = ["extension-module"]
+# Mixed Rust/Python layout: ship the pure-Python `bunker_stats` package (facade,
+# notebook layer, rich results, resampling/rolling/tsa wrappers) in the wheel,
+# with the compiled extension embedded as `bunker_stats.bunker_stats_rs` — the
+# first path the facade's import resolution tries. Without these two lines the
+# wheel contains ONLY the bare extension module and `import bunker_stats` fails
+# for installed users (the 0.2.x wheels had exactly that gap).
+python-source = "."
+module-name = "bunker_stats.bunker_stats_rs"
 exclude = [
     ".venv/**",
+    ".venv*/**",
     "venv/**",
+    "examples/social/**",
     "target/**",
     "dist/**",
     ".hypothesis/**",
