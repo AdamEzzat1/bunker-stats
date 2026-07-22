@@ -268,14 +268,56 @@ def test_bg_test_matches_reference_intercept_only():
     _assert_close(stat, float(ref[0]), rtol=2e-2, atol=1e-8, name="bg.vs_statsmodels")
 
 
-@pytest.mark.skip(
-    reason="API limitation (documented): bg_test(resid, max_lag) cannot include "
-    "the original model's exogenous regressors in the auxiliary regression, so "
-    "it cannot match statsmodels for models with non-constant exog. Requires a "
-    "bg_test(resid, exog, max_lag) kernel extension."
-)
-def test_bg_test_with_exogenous_regressors_deferred():
-    """Deferred: BG parity for models with slope regressors needs an exog arg."""
+def test_bg_test_with_exogenous_regressors():
+    """BG test with the original model's regressors in the auxiliary design.
+
+    ``bg_test(resid, max_lag, exog=X)`` includes X (constant column and all)
+    alongside the zero-padded lags — the full Breusch-Godfrey construction for
+    models beyond intercept-only. Parity is asserted tightly against a clean
+    full-rank lstsq replication; statsmodels is only sanity-checked via its
+    p-value because its duplicated-constant pinv perturbs near-zero statistics
+    by a large relative (but tiny absolute) amount.
+    """
+    pytest.importorskip("statsmodels")
+    import statsmodels.api as sm_api
+    from statsmodels.stats.diagnostic import acorr_breusch_godfrey
+    from scipy import stats as sp_stats
+
+    rng = np.random.default_rng(9)
+    n = 500
+    xr = rng.normal(size=n).astype(np.float64)
+    y = 0.5 * xr + rng.normal(scale=0.5, size=n).astype(np.float64)
+
+    X = sm_api.add_constant(xr)
+    model = sm_api.OLS(y, X).fit()
+    e = np.asarray(model.resid, dtype=np.float64)
+    k = 4
+
+    stat, pval = map(
+        float, bs.bg_test(e, max_lag=k, exog=np.ascontiguousarray(X))[:2]
+    )
+
+    # Clean full-rank reference: e on [X, zero-padded lags], LM = n * R^2.
+    lags = np.column_stack(
+        [np.concatenate([np.zeros(j), e[:-j]]) for j in range(1, k + 1)]
+    )
+    XA = np.column_stack([X, lags])
+    beta, *_ = np.linalg.lstsq(XA, e, rcond=None)
+    resid_aux = e - XA @ beta
+    r2 = 1.0 - resid_aux @ resid_aux / ((e - e.mean()) @ (e - e.mean()))
+    lm_ref = n * r2
+    p_ref = float(sp_stats.chi2.sf(lm_ref, k))
+
+    _assert_close(stat, lm_ref, rtol=1e-8, atol=1e-10, name="bg_exog.lm_stat")
+    _assert_close(pval, p_ref, rtol=1e-6, atol=1e-10, name="bg_exog.lm_pval")
+
+    # statsmodels sanity: p-values agree in absolute terms.
+    ref = acorr_breusch_godfrey(model, nlags=k)
+    assert abs(pval - float(ref[1])) < 0.02, (pval, float(ref[1]))
+
+    # Row-count mismatch must raise a clear error, not garbage.
+    with pytest.raises(ValueError, match="rows"):
+        bs.bg_test(e, max_lag=k, exog=np.ones((n - 1, 2)))
 
 
 # ======================================================================================

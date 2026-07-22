@@ -344,3 +344,71 @@ class TestWarningsMetadata:
         r = bs.t_test_1samp(rng.normal(size=5), 0.0, rich=True)
         stat, pval = r  # warnings must not interfere with the tuple protocol
         assert isinstance(stat, float) and isinstance(pval, float)
+
+
+# ======================================================================
+# BootstrapConfig(return_draws=True) end-to-end
+# ======================================================================
+
+class TestBootstrapReturnDraws:
+    def test_default_tuple_path_unchanged(self):
+        from bunker_stats.resampling import BootstrapConfig
+
+        rng = np.random.default_rng(11)
+        x = rng.normal(size=300)
+        out = BootstrapConfig(n_resamples=500, random_state=3).run(x)
+        assert isinstance(out, tuple) and len(out) == 3
+
+    def test_return_draws_yields_result_with_draws(self):
+        from bunker_stats.resampling import BootstrapConfig
+
+        rng = np.random.default_rng(11)
+        x = rng.normal(size=300)
+        res = BootstrapConfig(
+            n_resamples=500, random_state=3, return_draws=True
+        ).run(x)
+        assert isinstance(res, BootstrapResult)
+        assert res.draws is not None and res.draws.shape == (500,)
+        assert res.method == "percentile"
+        assert res.n_resamples == 500
+        assert res.confidence_level == 0.95
+        assert res.se is not None and res.se > 0
+
+    def test_draws_ci_identical_to_tuple_ci(self):
+        """Both paths share one kernel + RNG stream: results must be equal."""
+        from bunker_stats.resampling import BootstrapConfig
+
+        rng = np.random.default_rng(12)
+        x = rng.normal(size=250)
+        tuple_out = BootstrapConfig(n_resamples=800, random_state=7).run(x)
+        rich_out = BootstrapConfig(
+            n_resamples=800, random_state=7, return_draws=True
+        ).run(x)
+        assert tuple_out == (
+            rich_out.estimate,
+            rich_out.ci_lower,
+            rich_out.ci_upper,
+        )
+        # draws reproduce the estimate
+        assert abs(rich_out.draws.mean() - rich_out.estimate) < 1e-12
+
+    def test_plot_distribution_works_end_to_end(self):
+        from bunker_stats.resampling import BootstrapConfig
+
+        rng = np.random.default_rng(13)
+        x = rng.normal(size=200)
+        res = BootstrapConfig(
+            n_resamples=400, random_state=5, return_draws=True
+        ).run(x)
+        assert_figure(res.plot_distribution())
+
+    def test_return_draws_respects_nan_policy_omit(self):
+        from bunker_stats.resampling import BootstrapConfig
+
+        rng = np.random.default_rng(14)
+        x = rng.normal(size=100)
+        x[::10] = np.nan
+        res = BootstrapConfig(
+            n_resamples=200, random_state=1, nan_policy="omit", return_draws=True
+        ).run(x)
+        assert np.all(np.isfinite(res.draws))

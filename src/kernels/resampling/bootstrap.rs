@@ -1,4 +1,4 @@
-﻿use numpy::PyReadonlyArray1;
+﻿use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rand_pcg::Pcg64;  // Faster RNG: 2-3x faster than StdRng
@@ -126,28 +126,20 @@ pub fn bootstrap_mean_ci(
     Ok((mean_hat, lower, upper))
 }
 
-/// Generic bootstrap CI for simple stats: "mean", "median", "std"
+/// Compute the bootstrap replicate values ("draws") for a simple statistic.
 ///
-/// Python signature:
-///     bootstrap_ci(x, stat="mean", n_resamples=1000, conf=0.95, random_state=None)
-#[pyfunction(signature = (x, stat="mean", n_resamples=1000, conf=0.95, random_state=None))]
-pub fn bootstrap_ci(
-    x: PyReadonlyArray1<f64>,
+/// Draws come back in GENERATION order (replicate b uses the deterministic
+/// seed `mix_seed(base_seed, b)`), so the same (x, stat, n_resamples,
+/// base_seed) always produces the same vector — and therefore the same
+/// percentile CI whether or not the caller also keeps the draws.
+fn bootstrap_draws_core(
+    x: &[f64],
     stat: &str,
     n_resamples: usize,
-    conf: f64,
-    random_state: Option<u64>,
-) -> PyResult<(f64, f64, f64)> {
-    let x = x.as_slice()?;
+    base_seed: u64,
+) -> PyResult<Vec<f64>> {
     let n = x.len();
-
-    if n == 0 || n_resamples == 0 {
-        return Ok((f64::NAN, f64::NAN, f64::NAN));
-    }
-
-    let base_seed = random_state.unwrap_or(0);
-
-    let mut vals: Vec<f64> = match stat {
+    let vals: Vec<f64> = match stat {
         "mean" => (0..n_resamples)
             .into_par_iter()
             .map(|b| {
@@ -217,11 +209,13 @@ pub fn bootstrap_ci(
             ));
         }
     };
+    Ok(vals)
+}
 
-    // point estimate
+/// Point estimate + percentile CI from a vector of draws (sorts in place).
+fn percentile_ci_from_draws(vals: &mut [f64], conf: f64) -> (f64, f64, f64) {
     let est = vals.iter().copied().sum::<f64>() / (vals.len() as f64);
 
-    // percentile CI
     vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let alpha = 1.0 - conf;
@@ -232,10 +226,62 @@ pub fn bootstrap_ci(
     let lower_idx = ((n_b * lower_q).floor() as isize).clamp(0, (vals.len() - 1) as isize);
     let upper_idx = ((n_b * upper_q).floor() as isize).clamp(0, (vals.len() - 1) as isize);
 
-    let lower = vals[lower_idx as usize];
-    let upper = vals[upper_idx as usize];
+    (est, vals[lower_idx as usize], vals[upper_idx as usize])
+}
 
-    Ok((est, lower, upper))
+/// Generic bootstrap CI for simple stats: "mean", "median", "std"
+///
+/// Python signature:
+///     bootstrap_ci(x, stat="mean", n_resamples=1000, conf=0.95, random_state=None)
+#[pyfunction(signature = (x, stat="mean", n_resamples=1000, conf=0.95, random_state=None))]
+pub fn bootstrap_ci(
+    x: PyReadonlyArray1<f64>,
+    stat: &str,
+    n_resamples: usize,
+    conf: f64,
+    random_state: Option<u64>,
+) -> PyResult<(f64, f64, f64)> {
+    let x = x.as_slice()?;
+
+    if x.is_empty() || n_resamples == 0 {
+        return Ok((f64::NAN, f64::NAN, f64::NAN));
+    }
+
+    let mut vals = bootstrap_draws_core(x, stat, n_resamples, random_state.unwrap_or(0))?;
+    Ok(percentile_ci_from_draws(&mut vals, conf))
+}
+
+/// Like `bootstrap_ci`, but ALSO returns the bootstrap draws (generation
+/// order) so callers can inspect or plot the resampling distribution. The
+/// estimate/CI are identical to `bootstrap_ci` for the same arguments.
+///
+/// Python signature:
+///     bootstrap_ci_with_draws(x, stat="mean", n_resamples=1000, conf=0.95, random_state=None)
+///       -> (estimate, ci_lower, ci_upper, draws)
+#[pyfunction(signature = (x, stat="mean", n_resamples=1000, conf=0.95, random_state=None))]
+pub fn bootstrap_ci_with_draws<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<f64>,
+    stat: &str,
+    n_resamples: usize,
+    conf: f64,
+    random_state: Option<u64>,
+) -> PyResult<(f64, f64, f64, Bound<'py, PyArray1<f64>>)> {
+    let x = x.as_slice()?;
+
+    if x.is_empty() || n_resamples == 0 {
+        return Ok((
+            f64::NAN,
+            f64::NAN,
+            f64::NAN,
+            PyArray1::from_vec_bound(py, vec![]),
+        ));
+    }
+
+    let draws = bootstrap_draws_core(x, stat, n_resamples, random_state.unwrap_or(0))?;
+    let mut sorted = draws.clone();
+    let (est, lower, upper) = percentile_ci_from_draws(&mut sorted, conf);
+    Ok((est, lower, upper, PyArray1::from_vec_bound(py, draws)))
 }
 
 /// Bootstrap correlation with CI (percentile CI)

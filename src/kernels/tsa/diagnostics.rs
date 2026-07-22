@@ -1,4 +1,4 @@
-use numpy::PyReadonlyArray1;
+use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use statrs::distribution::{ChiSquared, ContinuousCDF};
 use std::cmp::min;
@@ -94,22 +94,63 @@ pub fn durbin_watson(x: PyReadonlyArray1<f64>) -> PyResult<f64> {
 
 /// Breusch–Godfrey test (LM test for serial correlation in residuals).
 ///
-/// DEBUGGING VERSION - prints intermediate values
+/// Auxiliary regression over the FULL sample, zero-padding the pre-sample
+/// lagged residuals (e[t-j] := 0 for t-j < 0), LM = n · R² — the same
+/// construction as statsmodels' `acorr_breusch_godfrey`.
+///
+/// `exog` (optional, n x k) supplies the ORIGINAL model's regressors so they
+/// participate in the auxiliary regression, as the BG test requires for
+/// models beyond intercept-only. Pass the design matrix INCLUDING its
+/// constant column (statsmodels `add_constant` style); no intercept is added
+/// when `exog` is given. Without `exog` the auxiliary regression uses
+/// [intercept, lags] — the intercept-only contract, unchanged.
+///
+/// NOTE: unlike statsmodels, the design here is full-rank by construction
+/// (statsmodels stacks a second constant next to the user's and its pinv on
+/// that rank-deficient matrix perturbs results by ~1e-2 relative).
+///
 /// Python signature:
-///     bg_test(resid, max_lag=5) -> (statistic, pvalue)
-#[pyfunction(signature = (resid, max_lag=5))]
-pub fn bg_test(resid: PyReadonlyArray1<f64>, max_lag: usize) -> PyResult<(f64, f64)> {
+///     bg_test(resid, max_lag=5, exog=None) -> (statistic, pvalue)
+#[pyfunction(signature = (resid, max_lag=5, exog=None))]
+pub fn bg_test(
+    resid: PyReadonlyArray1<f64>,
+    max_lag: usize,
+    exog: Option<PyReadonlyArray2<f64>>,
+) -> PyResult<(f64, f64)> {
     let e = resid.as_slice()?;
     let n = e.len();
     if n <= max_lag + 1 || max_lag == 0 {
         return Ok((f64::NAN, f64::NAN));
     }
 
-    // Auxiliary regression over the FULL sample, zero-padding the pre-sample
-    // lagged residuals (e[t-j] := 0 for t-j < 0). This matches statsmodels'
-    // `acorr_breusch_godfrey`, which keeps all n rows and reports LM = n * R².
+    // Original-model regressors (rows must align with resid). Copied into a
+    // contiguous row-major buffer so non-contiguous NumPy views work too.
+    let exog_data: Option<(Vec<f64>, usize)> = match &exog {
+        Some(arr) => {
+            let a = arr.as_array();
+            if a.shape()[0] != n {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "exog has {} rows but resid has {} observations",
+                    a.shape()[0],
+                    n
+                )));
+            }
+            let k = a.shape()[1];
+            let mut buf = Vec::with_capacity(n * k);
+            for t in 0..n {
+                for c in 0..k {
+                    buf.push(a[[t, c]]);
+                }
+            }
+            Some((buf, k))
+        }
+        None => None,
+    };
+
     let t_len = n;
-    let p = max_lag + 1;
+    // Columns: [exog (k cols) | lags] with exog supplied, else [1 | lags].
+    let k_exog = exog_data.as_ref().map(|(_, k)| *k).unwrap_or(1);
+    let p = k_exog + max_lag;
 
     // Dependent variable: current residuals e[t] for all t.
     let mut y = Vec::with_capacity(t_len);
@@ -117,10 +158,18 @@ pub fn bg_test(resid: PyReadonlyArray1<f64>, max_lag: usize) -> PyResult<(f64, f
         y.push(e[t]);
     }
 
-    // Independent variables: intercept + lagged residuals (0 before the sample).
+    // Independent variables: original regressors (or intercept) + zero-padded
+    // lagged residuals.
     let mut x_mat = Vec::with_capacity(t_len * p);
     for t in 0..n {
-        x_mat.push(1.0); // intercept
+        match &exog_data {
+            Some((buf, k)) => {
+                for c in 0..*k {
+                    x_mat.push(buf[t * k + c]);
+                }
+            }
+            None => x_mat.push(1.0), // intercept
+        }
         for j in 1..=max_lag {
             x_mat.push(if t >= j { e[t - j] } else { 0.0 });
         }

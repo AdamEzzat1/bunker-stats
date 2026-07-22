@@ -80,7 +80,7 @@ use kernels::robust::extended::{
 
 // resampling
 use crate::kernels::resampling::bootstrap::{
-    bootstrap_mean, bootstrap_mean_ci, bootstrap_ci, bootstrap_corr,
+    bootstrap_mean, bootstrap_mean_ci, bootstrap_ci, bootstrap_ci_with_draws, bootstrap_corr,
     bootstrap_se, bootstrap_var, bootstrap_t_ci_mean, bootstrap_bca_ci,
     bayesian_bootstrap_ci,
     permutation_corr_test, permutation_mean_diff_test,
@@ -2862,6 +2862,7 @@ m.add_function(wrap_pyfunction!(rolling_linreg_skipna, m)?)?;
     m.add_function(wrap_pyfunction!(bootstrap_mean, m)?)?;
     m.add_function(wrap_pyfunction!(bootstrap_mean_ci, m)?)?;
     m.add_function(wrap_pyfunction!(bootstrap_ci, m)?)?;
+    m.add_function(wrap_pyfunction!(bootstrap_ci_with_draws, m)?)?;
     m.add_function(wrap_pyfunction!(bootstrap_corr, m)?)?;
     m.add_function(wrap_pyfunction!(jackknife_mean, m)?)?;
     m.add_function(wrap_pyfunction!(jackknife_mean_ci, m)?)?;

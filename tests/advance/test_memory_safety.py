@@ -433,22 +433,30 @@ class TestMemoryGrowthPatterns:
         gc.collect()
 
         rss_before = proc.memory_info().rss
+        theoretical_peak = 0
         for size in sizes:
             np.random.seed(42)
             data = np.random.randn(size, 10)
             result = bs.rolling_mean_axis0(data, 50)
             assert result.shape == (size - 50 + 1, 10)
+            theoretical_peak = max(
+                theoretical_peak, data.nbytes + result.nbytes
+            )
             del data, result
             gc.collect()
         rss_after = proc.memory_info().rss
 
         growth_mb = (rss_after - rss_before) / 1e6
-        # Largest transient working set is ~8MB (50000x10 input + result).
-        # After del+gc, retained RSS growth should be far below the sum of all
-        # transients (~12MB); allow 64MB of allocator slack. A leak that keeps
-        # every result alive would exceed this.
-        print(f"RSS growth across increasing sizes: {growth_mb:.1f}MB")
-        assert growth_mb < 64, f"RSS grew {growth_mb:.1f}MB — possible leak"
+        # Bound derived from the workload, not a blanket number: after del+gc
+        # the retained growth should be near zero, so cap it at 3x the largest
+        # transient working set (input + result, ~8MB at 50000x10) plus 8MB of
+        # allocator/OS-page slack. A leak retaining even half the per-size
+        # results would blow through this.
+        bound_mb = (3 * theoretical_peak) / 1e6 + 8
+        print(f"RSS growth {growth_mb:.1f}MB (bound {bound_mb:.1f}MB)")
+        assert growth_mb < bound_mb, (
+            f"RSS grew {growth_mb:.1f}MB > bound {bound_mb:.1f}MB — possible leak"
+        )
     
     def test_increasing_resamples_bounded_growth(self):
         """Bootstrap memory stays bounded as n_resamples grows (no leak).
@@ -477,11 +485,13 @@ class TestMemoryGrowthPatterns:
         rss_after = proc.memory_info().rss
 
         growth_mb = (rss_after - rss_before) / 1e6
-        # Even 10k resamples of a 1000-point sample is <1MB of working set per
-        # call; nine calls leaking their distributions would blow well past
-        # this bound.
+        # Bound from the workload: the largest call's working set is the draws
+        # vector (10k * 8B = 80KB) plus per-thread scratch — well under 1MB.
+        # Nine calls leaking their draws would still be ~1MB; 16MB covers
+        # allocator caching with a wide margin while catching real leaks
+        # (e.g. retaining every resample buffer) decisively.
         print(f"RSS growth across 9 bootstrap calls: {growth_mb:.1f}MB")
-        assert growth_mb < 64, f"RSS grew {growth_mb:.1f}MB — possible leak"
+        assert growth_mb < 16, f"RSS grew {growth_mb:.1f}MB — possible leak"
 
 
 # ============================================================================

@@ -294,37 +294,40 @@ class BootstrapConfig:
     random_state: Optional[int] = None
     nan_policy: Literal["propagate", "omit"] = "propagate"
     parallel: bool = True  # Currently not exposed to Rust, documented for future
-    
+    return_draws: bool = False  # True -> run() returns BootstrapResult with .draws
+
     def __post_init__(self):
         """Validate config parameters on construction."""
         _validate_n_resamples(self.n_resamples, "BootstrapConfig")
         _validate_conf(self.conf, "BootstrapConfig")
         _validate_stat(self.stat, "BootstrapConfig", ["mean", "median", "std"])
         self.random_state = _validate_random_state(self.random_state, "BootstrapConfig")
-        
+
         if self.nan_policy not in ["propagate", "omit"]:
             raise ValueError(
                 f"BootstrapConfig: nan_policy must be 'propagate' or 'omit', got '{self.nan_policy}'."
             )
-    
-    def run(self, x: np.ndarray) -> Tuple[float, float, float]:
+
+    def run(self, x: np.ndarray):
         """
         Run bootstrap on data.
-        
+
         Parameters
         ----------
         x : array-like
             1D data array to bootstrap.
-        
+
         Returns
         -------
-        estimate : float
-            Bootstrap estimate of the statistic (mean of bootstrap distribution).
-        lower : float
-            Lower confidence bound.
-        upper : float
-            Upper confidence bound.
-        
+        (estimate, lower, upper) : tuple of float
+            The default (``return_draws=False``) — unchanged fast path.
+        BootstrapResult
+            When ``return_draws=True``: carries the same estimate/CI plus the
+            bootstrap draws (``.draws``, generation order) and reproducibility
+            metadata, so ``.plot_distribution()`` and ``.summary()`` work.
+            The estimate/CI are IDENTICAL to the tuple path for the same
+            config: both paths share one Rust kernel and RNG stream.
+
         Raises
         ------
         ValueError
@@ -332,11 +335,32 @@ class BootstrapConfig:
         """
         # Validate and convert input
         x = _validate_array(x, "BootstrapConfig.run(x)")
-        
+
         # Apply NaN policy
         if self.nan_policy == "omit":
             x = _filter_nans_single(x, "BootstrapConfig")
-        
+
+        if self.return_draws:
+            estimate, lower, upper, draws = _rs.bootstrap_ci_with_draws(
+                x,
+                stat=self.stat,
+                n_resamples=self.n_resamples,
+                conf=self.conf,
+                random_state=self.random_state,
+            )
+            draws = np.asarray(draws)
+            return BootstrapResult(
+                estimate=estimate,
+                ci_lower=lower,
+                ci_upper=upper,
+                se=float(np.std(draws, ddof=1)) if draws.size > 1 else None,
+                draws=draws,
+                method="percentile",
+                n_resamples=self.n_resamples,
+                random_state=self.random_state,
+                confidence_level=self.conf,
+            )
+
         # Call Rust kernel
         # Note: bootstrap_ci returns (estimate, lower, upper)
         result = _rs.bootstrap_ci(
@@ -346,10 +370,10 @@ class BootstrapConfig:
             conf=self.conf,
             random_state=self.random_state
         )
-        
+
         return result
-    
-    def __call__(self, x: np.ndarray) -> Tuple[float, float, float]:
+
+    def __call__(self, x: np.ndarray):
         """Shorthand for .run()"""
         return self.run(x)
 
@@ -2907,11 +2931,9 @@ class BootstrapResult(RichResult):
         """
         if self.draws is None:
             raise ValueError(
-                "Bootstrap draws were not retained for this result. The Rust "
-                "kernels return only (estimate, ci_lower, ci_upper); to plot "
-                "the distribution, construct BootstrapResult with draws= your "
-                "own resample array (draws retention is not yet wired through "
-                "BootstrapConfig)."
+                "Bootstrap draws were not retained for this result. Re-run "
+                "with BootstrapConfig(..., return_draws=True) to keep the "
+                "draws and enable plot_distribution()."
             )
 
         from bunker_stats._plotly import require_go

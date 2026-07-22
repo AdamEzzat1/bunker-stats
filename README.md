@@ -655,7 +655,12 @@ ci.plot_intervals()        # plotly Figure: estimates with CI error bars
 # Result objects grew Plotly methods too:
 bs.Rolling(x, window=20).result("mean", "std").plot()   # one trace per stat
 za.plot_breakpoint_scan_plotly()                        # Zivot-Andrews scan
-boot_result.plot_distribution()                         # needs retained draws
+
+# Bootstrap draws are retained on request — same kernel and RNG stream, so
+# the estimate/CI match the plain tuple path exactly:
+from bunker_stats.resampling import BootstrapConfig
+res = BootstrapConfig(n_resamples=5000, random_state=0, return_draws=True).run(x)
+res.plot_distribution()      # histogram of draws + estimate/CI lines
 ```
 
 Figure methods return `plotly.graph_objects.Figure` — they never call
