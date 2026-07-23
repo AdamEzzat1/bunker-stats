@@ -23,8 +23,11 @@ from scipy.spatial.distance import pdist, squareform
 import sys
 
 # Build first: maturin develop --release
+# The compiled module's import path varies by layout (in-package for mixed
+# maturin builds, top-level for old wheels); the facade's _rs handle already
+# resolves all of them, so tests must go through it rather than guessing.
 try:
-    import bunker_stats_rs as bsr
+    from bunker_stats import _rs as bsr
 except ImportError:
     print("ERROR: bunker_stats_rs not installed. Run: maturin develop --release")
     sys.exit(1)

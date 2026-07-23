@@ -52,6 +52,6 @@ def test_previously_phantom_functions_are_callable():
 
 def test_removed_debug_export_is_absent():
     # kpss_test_debug was debug scaffolding; the real kpss_test remains.
-    import bunker_stats_rs as _rs
+    from bunker_stats import _rs
     assert not hasattr(_rs, "kpss_test_debug")
     assert hasattr(_rs, "kpss_test")
