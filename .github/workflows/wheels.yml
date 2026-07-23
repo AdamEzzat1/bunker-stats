@@ -42,10 +42,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Rust unit + property tests
         run: cargo test --lib --quiet
-      - name: Build and install (debug)
+      - name: Build and install
         run: |
-          pip install maturin numpy pandas jinja2 matplotlib plotly scipy statsmodels hypothesis pytest pytest-benchmark psutil
-          maturin develop
+          pip install numpy pandas jinja2 matplotlib plotly scipy statsmodels hypothesis pytest pytest-benchmark psutil
+          pip install .
       - name: Python test suite (core)
         run: pytest tests -q --ignore=tests/advance
 
@@ -65,7 +65,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i 3.9 -i 3.10 -i 3.11 -i 3.12 -i 3.13
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
       - name: Smoke test installed wheel (native only)
@@ -94,7 +94,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i 3.9 -i 3.10 -i 3.11 -i 3.12 -i 3.13
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: musllinux_1_2
       - uses: actions/upload-artifact@v6
@@ -106,8 +106,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
-      # Install every CPython we ship wheels for; --find-interpreter picks
-      # them all up from PATH.
+      # Install every CPython we ship wheels for; the pinned -i list below
+      # builds one wheel per interpreter. (pyo3 0.22 supports <= 3.13, so we
+      # never use --find-interpreter: runners now carry 3.14.)
       - uses: actions/setup-python@v6
         with:
           python-version: |
@@ -120,7 +121,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x64
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i 3.9 -i 3.10 -i 3.11 -i 3.12 -i 3.13
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Smoke test installed wheel
         shell: bash
@@ -139,6 +140,7 @@ jobs:
         platform:
           - runner: macos-15-intel
             target: x86_64
+            interpreters: "-i 3.9 -i 3.10 -i 3.11 -i 3.12 -i 3.13"
             pythons: |
               3.9
               3.10
@@ -147,6 +149,7 @@ jobs:
               3.13
           - runner: macos-latest
             target: aarch64
+            interpreters: "-i 3.10 -i 3.11 -i 3.12 -i 3.13"
             pythons: |
               3.10
               3.11
@@ -161,7 +164,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist ${{ matrix.platform.interpreters }}
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Smoke test installed wheel
         run: |
