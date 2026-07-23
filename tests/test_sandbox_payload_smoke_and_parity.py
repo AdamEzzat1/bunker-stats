@@ -263,9 +263,13 @@ def test_bg_test_matches_reference_intercept_only():
     _assert_close(stat, lm_ref, rtol=1e-8, atol=1e-10, name="bg.lm_stat")
     _assert_close(pval, p_ref, rtol=1e-6, atol=1e-10, name="bg.lm_pval")
 
-    # statsmodels itself, loose tolerance (its duplicated-constant pinv wobble).
+    # statsmodels itself, loose tolerance: its duplicated-constant design goes
+    # through pinv, whose output on a rank-deficient matrix depends on the
+    # platform's BLAS/LAPACK (measured: ~0.7% off on Windows MKL-ish builds,
+    # ~2.7% on Linux OpenBLAS). This line documents the gap; the tight
+    # assertions above are the correctness gate.
     ref = acorr_breusch_godfrey(model, nlags=k)
-    _assert_close(stat, float(ref[0]), rtol=2e-2, atol=1e-8, name="bg.vs_statsmodels")
+    _assert_close(stat, float(ref[0]), rtol=5e-2, atol=1e-8, name="bg.vs_statsmodels")
 
 
 def test_bg_test_with_exogenous_regressors():
