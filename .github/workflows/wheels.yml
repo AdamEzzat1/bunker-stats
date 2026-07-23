@@ -1,0 +1,214 @@
+# Multi-platform wheel builds + PyPI publish for bunker-stats-rs.
+#
+# Scaffolded with `maturin generate-ci github`, then hardened:
+#   * RUSTFLAGS is pinned empty workflow-wide: .cargo/config.toml sets
+#     `target-cpu=native` for local dev, which must never leak
+#     machine-specific instructions into distributed wheels.
+#   * Every natively-runnable build smoke-tests the INSTALLED wheel
+#     (all __all__ names resolve + flagship features run). The 0.2.x wheels
+#     shipped without the Python layer entirely; this gate makes that class
+#     of packaging bug impossible to release again.
+#   * Matrix trimmed to targets people actually install on. The sdist covers
+#     everything else via source builds.
+#
+# Publishing: push a git tag (e.g. `v0.3.0`) and the release job uploads to
+# PyPI using the PYPI_API_TOKEN repository secret (Settings -> Secrets and
+# variables -> Actions). Regular pushes/PRs only build and smoke-test.
+name: wheels
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Portable binaries: override .cargo/config.toml's target-cpu=native.
+  RUSTFLAGS: ""
+
+jobs:
+  test:
+    name: tests (linux)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust unit + property tests
+        run: cargo test --lib --quiet
+      - name: Build and install (debug)
+        run: |
+          pip install maturin numpy pandas jinja2 matplotlib plotly scipy statsmodels hypothesis pytest pytest-benchmark psutil
+          maturin develop
+      - name: Python test suite (core)
+        run: pytest tests -q --ignore=tests/advance
+
+  linux:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        platform:
+          - target: x86_64
+          - target: aarch64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --find-interpreter
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          manylinux: auto
+      - name: Smoke test installed wheel (native only)
+        if: matrix.platform.target == 'x86_64'
+        run: |
+          pip install bunker-stats-rs --no-index --find-links dist
+          python .github/wheel_smoke.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-linux-${{ matrix.platform.target }}
+          path: dist
+
+  musllinux:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        platform:
+          - target: x86_64
+          - target: aarch64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --find-interpreter
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          manylinux: musllinux_1_2
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-musllinux-${{ matrix.platform.target }}
+          path: dist
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      # Install every CPython we ship wheels for; --find-interpreter picks
+      # them all up from PATH.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x64
+          args: --release --out dist --find-interpreter
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Smoke test installed wheel
+        shell: bash
+        run: |
+          pip install bunker-stats-rs --no-index --find-links dist
+          python .github/wheel_smoke.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-windows-x64
+          path: dist
+
+  macos:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: macos-15-intel
+            target: x86_64
+            pythons: |
+              3.9
+              3.10
+              3.11
+              3.12
+              3.13
+          - runner: macos-latest
+            target: aarch64
+            pythons: |
+              3.10
+              3.11
+              3.12
+              3.13
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.platform.pythons }}
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --find-interpreter
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Smoke test installed wheel
+        run: |
+          pip install bunker-stats-rs --no-index --find-links dist
+          python .github/wheel_smoke.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-macos-${{ matrix.platform.target }}
+          path: dist
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-sdist
+          path: dist
+
+  release:
+    name: Release to PyPI
+    runs-on: ubuntu-latest
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    needs: [test, linux, musllinux, windows, macos, sdist]
+    permissions:
+      id-token: write      # sign artifacts
+      contents: write      # upload to the GitHub release
+      attestations: write  # artifact attestation
+    steps:
+      - uses: actions/download-artifact@v7
+      - name: Generate artifact attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: 'wheels-*/*'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Publish to PyPI
+        run: uv publish 'wheels-*/*'
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+      - name: Upload wheels to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: wheels-*/*
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}
