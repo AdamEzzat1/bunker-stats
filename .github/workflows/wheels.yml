@@ -42,12 +42,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Rust unit + property tests
         run: cargo test --lib --quiet
-      - name: Build and install
+      - name: Build and install (venv + maturin develop)
         run: |
-          pip install numpy pandas jinja2 matplotlib plotly scipy statsmodels hypothesis pytest pytest-benchmark psutil
-          pip install .
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin numpy pandas jinja2 matplotlib plotly scipy statsmodels hypothesis pytest pytest-benchmark psutil
+          maturin develop
       - name: Python test suite (core)
-        run: pytest tests -q --ignore=tests/advance
+        run: |
+          source .venv/bin/activate
+          pytest tests -q --ignore=tests/advance
 
   linux:
     runs-on: ubuntu-22.04
@@ -71,7 +75,8 @@ jobs:
       - name: Smoke test installed wheel (native only)
         if: matrix.platform.target == 'x86_64'
         run: |
-          pip install bunker-stats-rs --no-index --find-links dist
+          pip install numpy
+          pip install bunker-stats-rs --no-index --no-deps --find-links dist
           python .github/wheel_smoke.py
       - uses: actions/upload-artifact@v6
         with:
@@ -126,7 +131,8 @@ jobs:
       - name: Smoke test installed wheel
         shell: bash
         run: |
-          pip install bunker-stats-rs --no-index --find-links dist
+          pip install numpy
+          pip install bunker-stats-rs --no-index --no-deps --find-links dist
           python .github/wheel_smoke.py
       - uses: actions/upload-artifact@v6
         with:
@@ -168,7 +174,8 @@ jobs:
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Smoke test installed wheel
         run: |
-          pip install bunker-stats-rs --no-index --find-links dist
+          pip install numpy
+          pip install bunker-stats-rs --no-index --no-deps --find-links dist
           python .github/wheel_smoke.py
       - uses: actions/upload-artifact@v6
         with:
