@@ -11,9 +11,9 @@
 #   * Matrix trimmed to targets people actually install on. The sdist covers
 #     everything else via source builds.
 #
-# Publishing: push a git tag (e.g. `v0.3.0`) and the release job uploads to
-# PyPI using the PYPI_API_TOKEN repository secret (Settings -> Secrets and
-# variables -> Actions). Regular pushes/PRs only build and smoke-test.
+# Publishing: push a git tag (e.g. `v0.3.1`) and the release job uploads to
+# PyPI via OIDC Trusted Publishing — no stored token; PyPI trusts this repo's
+# wheels.yml workflow directly. Regular pushes/PRs only build and smoke-test.
 name: wheels
 
 on:
@@ -227,10 +227,12 @@ jobs:
           subject-path: 'wheels-*/*'
       - name: Install uv
         uses: astral-sh/setup-uv@v7
-      - name: Publish to PyPI
+      - name: Publish to PyPI (trusted publishing)
+        # No token anywhere: uv exchanges the job's OIDC identity (id-token:
+        # write above) for a short-lived PyPI credential. Requires the GitHub
+        # publisher to be registered on the PyPI project (owner AdamEzzat1,
+        # repo bunker-stats, workflow wheels.yml).
         run: uv publish 'wheels-*/*'
-        env:
-          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
       - name: Upload wheels to GitHub Release
         uses: softprops/action-gh-release@v1
         with:
