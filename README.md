@@ -2,8 +2,8 @@
 
 **Production-grade statistical computing library combining Rust performance with Python ergonomics**
 
-Version: 0.3.0  
-Status: Release candidate  
+Version: 0.3.1  
+Status: Released  
 License: See LICENSE file
 
 ---
@@ -20,6 +20,32 @@ License: See LICENSE file
 🧪 **Thoroughly Tested** - 53 Rust unit/property tests + 600+ Python tests (numpy/scipy/pandas/statsmodels parity, edge cases, and never-panic properties); ~99% of public functions have a direct reference test  
 🔒 **Type-Safe** - Rust implementation with full input validation  
 📦 **Zero Dependencies** - Core functionality requires only NumPy
+
+---
+
+## Release Notes — 0.3.1
+
+The first release whose PyPI artifacts actually ship the documented Python
+API. Every 0.2.x artifact — wheel and sdist alike — installed only the raw
+`bunker_stats_rs` bindings; `import bunker_stats` failed for installed users.
+0.3.1 wheels and sdist carry the full package, and CI now install-tests both
+paths on every build so that gap cannot reopen.
+
+Highlights on top of the 0.3.0 base (which was never published):
+
+- **Notebook layer** (`bunker_stats.notebook`, `pip install "bunker-stats-rs[notebook]"`):
+  reports, stylers, batch transforms, and report objects with Plotly figures.
+- **Rich results everywhere**: `rich=True` on the hypothesis tests and reports
+  returns tuple-unpackable result objects with `.to_dict()`, `.info()`,
+  `.conclusion(alpha)`, and misuse warnings (small n, NaN, approximate p).
+- **Bootstrap draws**: `BootstrapConfig(return_draws=True)` retains the
+  resampling distribution with a CI identical to the tuple path (one shared
+  kernel and RNG stream), enabling `plot_distribution()`.
+- **`bg_test(resid, max_lag, exog=None)`**: the full Breusch-Godfrey
+  construction with the original model's regressors.
+- **Portable wheels for Linux (glibc + musl), Windows, macOS (Intel + ARM),
+  CPython 3.9–3.13**, built and smoke-gated in CI; local `target-cpu=native`
+  tuning is explicitly stripped from release builds.
 
 ---
 
@@ -828,7 +854,7 @@ maturin build --release
 
 ## Roadmap
 
-### v0.3.0 (Current)
+### v0.3.1 (Current)
 ✅ NaN inputs no longer abort the interpreter; panic boundaries hardened  
 ✅ Numeric correctness pass (cancellation-stable covariance/correlation, exact KS p-values, corrected PSD scaling, MacKinnon ADF/PP p-values)  
 ✅ TSA core validated against statsmodels (ADF, KPSS, Ljung-Box, ACF/PACF)  

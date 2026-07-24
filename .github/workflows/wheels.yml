@@ -191,6 +191,20 @@ jobs:
         with:
           command: sdist
           args: --out dist
+      # The 0.2.9 sdist CONTAINED the Python facade but installs built from it
+      # omitted the package entirely — the wheel smoke alone can't catch that
+      # class of bug, so the sdist path gets its own install-and-import gate
+      # (this compiles the crate from source, like a real `pip install` from
+      # the sdist does).
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Smoke test sdist install
+        run: |
+          pip install numpy
+          pip install --no-deps dist/*.tar.gz
+          python .github/wheel_smoke.py
       - uses: actions/upload-artifact@v6
         with:
           name: wheels-sdist
