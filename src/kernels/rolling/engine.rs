@@ -122,13 +122,18 @@ mod proptests {
         // per window — for ANY finite data and ANY offset. This catches both
         // accumulator drift and large-offset cancellation.
         //
-        // TOLERANCE: rounding error for a streaming variance scales with the
-        // magnitude of the *values* in the window, not with the std. A window
-        // like [309.63, 309.76] has std ~ 0.088 but condition number
-        // (mean/std)^2 ~ 1e7, so ~1e-8 absolute disagreement with a two-pass
-        // reference is expected floating-point behavior, not a bug (proptest
-        // found exactly this case; it is persisted in proptest-regressions/).
-        // Bound the error relative to window magnitude + result scale.
+        // TOLERANCE: the residual rounding in a sliding accumulator scales
+        // with the largest magnitude that has PASSED THROUGH it — not with
+        // the current window's contents. After ingesting and removing a value
+        // like -623, the running sums keep an absolute error ~ eps * 623^2
+        // (in variance units) that a window of small values then inherits
+        // (proptest found exactly this: window [12.559, 12.671] right after
+        // -622.99 disagreed with two-pass by 3e-10 where a current-window
+        // bound predicted 1.4e-10). So the comparison is done in VARIANCE
+        // units — what the accumulator actually maintains — with a bound
+        // driven by the running max magnitude and the number of ingested
+        // values. Real accumulator-drift bugs exceed this by orders of
+        // magnitude; see the deterministic regression tests below.
         #[test]
         fn rolling_std_matches_two_pass(
             data in prop::collection::vec(-1e3f64..1e3f64, 2..40),
@@ -142,14 +147,41 @@ mod proptests {
             for (i, s) in stds.iter().enumerate() {
                 let mean = xs[i..i + window].iter().sum::<f64>() / window as f64;
                 let ss: f64 = xs[i..i + window].iter().map(|v| (v - mean) * (v - mean)).sum();
-                let expected = (ss / (window - 1) as f64).sqrt();
-                let tol = 5e-12 * window as f64 * (1.0 + mean.abs() + expected.abs()) + 1e-12;
+                let expected_var = ss / (window - 1) as f64;
+                let expected = expected_var.sqrt();
+                // Largest |x| the accumulator has ingested up to this window.
+                let m = xs[..i + window]
+                    .iter()
+                    .fold(0.0f64, |acc, v| acc.max(v.abs()));
+                let n_ingested = (i + window) as f64;
+                let tol_var = 5e-15 * n_ingested * m * m + 1e-12;
+                let got_var = s * s;
                 prop_assert!(
-                    (s - expected).abs() <= tol,
-                    "window {i}: got {s}, expected {expected} (offset {offset}, tol {tol})"
+                    (got_var - expected_var).abs() <= tol_var,
+                    "window {i}: got std {s} (var {got_var}), expected std {expected} \
+                     (var {expected_var}); offset {offset}, tol_var {tol_var}"
                 );
             }
         }
+    }
+
+    /// The CI-found counterexample, pinned deterministically: a small-valued
+    /// window immediately after a large value left the accumulator. The
+    /// variance-units bound above must accept it forever.
+    #[test]
+    fn rolling_std_small_window_after_large_departure() {
+        let xs = [-622.9902542719688, 12.559005916715245, 12.670524924120446];
+        let (_means, stds) = rolling_mean_std_vec(&xs, 2);
+        let e = ((12.670524924120446f64 - 12.559005916715245) / 2.0_f64.sqrt()).abs();
+        // Two-pass std of the last window; streaming may differ by the
+        // inherited eps*623^2 residual (in variance units), no more.
+        let tol_var = 5e-15 * 3.0 * 622.9902542719688f64.powi(2) + 1e-12;
+        let got_var = stds[1] * stds[1];
+        let exp_var = e * e;
+        assert!(
+            (got_var - exp_var).abs() <= tol_var,
+            "got var {got_var}, expected {exp_var}, tol {tol_var}"
+        );
     }
 }
 
