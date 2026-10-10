@@ -29,27 +29,30 @@ pub fn p_adjust_np<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    reject_nonfinite(pvals, "pvalues")?;
+    let adjusted = py.allow_threads(|| -> PyResult<_> {
+        reject_nonfinite(pvals, "pvalues")?;
 
-    // Validate: all p-values must be in [0, 1]
-    for &p in pvals {
-        if p < 0.0 || p > 1.0 {
-            return Err(PyValueError::new_err(
-                "p-values must be in [0, 1]",
-            ));
+        // Validate: all p-values must be in [0, 1]
+        for &p in pvals {
+            if p < 0.0 || p > 1.0 {
+                return Err(PyValueError::new_err(
+                    "p-values must be in [0, 1]",
+                ));
+            }
         }
-    }
 
-    let adjusted = match method.to_lowercase().as_str() {
-        "bonferroni" => bonferroni(pvals),
-        "holm" => holm(pvals),
-        "bh" | "fdr_bh" | "benjamini-hochberg" => benjamini_hochberg(pvals),
-        _ => {
-            return Err(PyValueError::new_err(
-                "method must be one of: 'bonferroni', 'holm', 'bh'",
-            ))
-        }
-    };
+        let adjusted = match method.to_lowercase().as_str() {
+            "bonferroni" => bonferroni(pvals),
+            "holm" => holm(pvals),
+            "bh" | "fdr_bh" | "benjamini-hochberg" => benjamini_hochberg(pvals),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "method must be one of: 'bonferroni', 'holm', 'bh'",
+                ))
+            }
+        };
+        Ok(adjusted)
+    })?;
 
     Ok(PyArray1::from_vec_bound(py, adjusted))
 }

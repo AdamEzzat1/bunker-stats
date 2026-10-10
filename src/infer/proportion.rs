@@ -31,33 +31,36 @@ pub fn proportion_ztest_np(
     value: f64,
     alternative: &str,
 ) -> PyResult<Py<PyDict>> {
-    if nobs <= 0.0 || !nobs.is_finite() {
-        return Err(PyValueError::new_err("nobs must be a positive finite number"));
-    }
-    if count < 0.0 || count > nobs || !count.is_finite() {
-        return Err(PyValueError::new_err("count must be in [0, nobs]"));
-    }
-    if value <= 0.0 || value >= 1.0 {
-        return Err(PyValueError::new_err("value must be in (0, 1)"));
-    }
+    let (p_hat, z, p) = py.allow_threads(|| -> PyResult<_> {
+        if nobs <= 0.0 || !nobs.is_finite() {
+            return Err(PyValueError::new_err("nobs must be a positive finite number"));
+        }
+        if count < 0.0 || count > nobs || !count.is_finite() {
+            return Err(PyValueError::new_err("count must be in [0, nobs]"));
+        }
+        if value <= 0.0 || value >= 1.0 {
+            return Err(PyValueError::new_err("value must be in (0, 1)"));
+        }
 
-    let alt = Alternative::from_str(alternative)?;
+        let alt = Alternative::from_str(alternative)?;
 
-    let p_hat = count / nobs;
-    let se = (value * (1.0 - value) / nobs).sqrt();
+        let p_hat = count / nobs;
+        let se = (value * (1.0 - value) / nobs).sqrt();
 
-    if se == 0.0 {
-        return Err(PyValueError::new_err("standard error is zero (degenerate case)"));
-    }
+        if se == 0.0 {
+            return Err(PyValueError::new_err("standard error is zero (degenerate case)"));
+        }
 
-    let z = (p_hat - value) / se;
+        let z = (p_hat - value) / se;
 
-    let norm = Normal::new(0.0, 1.0).unwrap();
-    let p = match alt {
-        Alternative::TwoSided => (2.0 * norm.sf(z.abs())).clamp(0.0, 1.0),
-        Alternative::Greater => norm.sf(z).clamp(0.0, 1.0),
-        Alternative::Less => norm.cdf(z).clamp(0.0, 1.0),
-    };
+        let norm = Normal::new(0.0, 1.0).unwrap();
+        let p = match alt {
+            Alternative::TwoSided => (2.0 * norm.sf(z.abs())).clamp(0.0, 1.0),
+            Alternative::Greater => norm.sf(z).clamp(0.0, 1.0),
+            Alternative::Less => norm.cdf(z).clamp(0.0, 1.0),
+        };
+        Ok((p_hat, z, p))
+    })?;
 
     let d = PyDict::new_bound(py);
     d.set_item("statistic", z)?;
@@ -117,20 +120,23 @@ pub fn two_proportions_ztest_np(
         return Ok(d.unbind());
     }
 
-    let se = (p_pool * (1.0 - p_pool) * (1.0 / nobs1 + 1.0 / nobs2)).sqrt();
+    let (z, p) = py.allow_threads(|| -> PyResult<_> {
+        let se = (p_pool * (1.0 - p_pool) * (1.0 / nobs1 + 1.0 / nobs2)).sqrt();
 
-    if se == 0.0 {
-        return Err(PyValueError::new_err("standard error is zero"));
-    }
+        if se == 0.0 {
+            return Err(PyValueError::new_err("standard error is zero"));
+        }
 
-    let z = (p1 - p2) / se;
+        let z = (p1 - p2) / se;
 
-    let norm = Normal::new(0.0, 1.0).unwrap();
-    let p = match alt {
-        Alternative::TwoSided => (2.0 * norm.sf(z.abs())).clamp(0.0, 1.0),
-        Alternative::Greater => norm.sf(z).clamp(0.0, 1.0),
-        Alternative::Less => norm.cdf(z).clamp(0.0, 1.0),
-    };
+        let norm = Normal::new(0.0, 1.0).unwrap();
+        let p = match alt {
+            Alternative::TwoSided => (2.0 * norm.sf(z.abs())).clamp(0.0, 1.0),
+            Alternative::Greater => norm.sf(z).clamp(0.0, 1.0),
+            Alternative::Less => norm.cdf(z).clamp(0.0, 1.0),
+        };
+        Ok((z, p))
+    })?;
 
     let d = PyDict::new_bound(py);
     d.set_item("statistic", z)?;

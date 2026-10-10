@@ -135,15 +135,18 @@ pub fn mann_whitney_u_np(
     let xs = x.as_slice()?;
     let ys = y.as_slice()?;
 
-    if xs.is_empty() || ys.is_empty() {
-        return Err(PyValueError::new_err("x and y must be non-empty"));
-    }
-    reject_nonfinite(xs, "x")?;
-    reject_nonfinite(ys, "y")?;
+    let (stat, p) = py.allow_threads(|| -> PyResult<_> {
+        if xs.is_empty() || ys.is_empty() {
+            return Err(PyValueError::new_err("x and y must be non-empty"));
+        }
+        reject_nonfinite(xs, "x")?;
+        reject_nonfinite(ys, "y")?;
 
-    let alt = Alternative::from_str(alternative)?;
+        let alt = Alternative::from_str(alternative)?;
 
-    let (stat, p) = mann_whitney_asymptotic(xs, ys, alt);
+        let (stat, p) = mann_whitney_asymptotic(xs, ys, alt);
+        Ok((stat, p))
+    })?;
 
     let dct = PyDict::new_bound(py);
     dct.set_item("statistic", stat)?;

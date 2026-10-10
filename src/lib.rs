@@ -275,79 +275,91 @@ fn parse_nan_policy(s: &str) -> PyResult<NanPolicy> {
 // ======================
 
 #[pyfunction]
-fn mean_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(mean_slice(a.as_slice()?))
+fn mean_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| mean_slice(xs)))
 }
 
 #[pyfunction]
-fn mean_skipna_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(mean_slice_skipna(a.as_slice()?))
+fn mean_skipna_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| mean_slice_skipna(xs)))
 }
 
 #[pyfunction]
-fn var_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(var_slice(a.as_slice()?))
+fn var_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| var_slice(xs)))
 }
 
 #[pyfunction]
-fn var_skipna_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(var_slice_skipna(a.as_slice()?))
+fn var_skipna_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| var_slice_skipna(xs)))
 }
 
 #[pyfunction]
-fn std_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(std_slice(a.as_slice()?))
+fn std_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| std_slice(xs)))
 }
 
 #[pyfunction]
-fn std_skipna_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(std_slice_skipna(a.as_slice()?))
+fn std_skipna_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| std_slice_skipna(xs)))
 }
 
 // --- NaN-aware aliases (Python API compatibility) ---
 // Python facade expects *_nan_np names in some versions.
 #[pyfunction]
-fn mean_nan_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    mean_skipna_np(a)
+fn mean_nan_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    mean_skipna_np(py, a)
 }
 #[pyfunction]
-fn var_nan_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    var_skipna_np(a)
+fn var_nan_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    var_skipna_np(py, a)
 }
 #[pyfunction]
-fn std_nan_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    std_skipna_np(a)
+fn std_nan_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    std_skipna_np(py, a)
 }
 
 #[pyfunction]
-fn percentile_np(a: PyReadonlyArray1<f64>, q: f64) -> PyResult<f64> {
+fn percentile_np(py: Python<'_>, a: PyReadonlyArray1<f64>, q: f64) -> PyResult<f64> {
     if !(0.0..=100.0).contains(&q) {
         return Err(PyValueError::new_err(
             "q must be in the range [0, 100] (numpy.percentile semantics)",
         ));
     }
-    Ok(percentile_slice_k(a.as_slice()?, q))
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| percentile_slice_k(xs, q)))
 }
 
 #[pyfunction]
-fn iqr_np(a: PyReadonlyArray1<f64>) -> PyResult<(f64, f64, f64)> {
-    Ok(iqr_slice_k(a.as_slice()?))
+fn iqr_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<(f64, f64, f64)> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| iqr_slice_k(xs)))
 }
 
 // Scalar IQR width (kept for convenience; avoids conflicting with tuple iqr_np)
 #[pyfunction]
-fn iqr_width_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    let (q1, q3, iqr) = iqr_slice_k(a.as_slice()?);
-    if q1.is_nan() || q3.is_nan() || iqr.is_nan() {
-        Ok(f64::NAN)
-    } else {
-        Ok(iqr)
-    }
+fn iqr_width_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| {
+        let (q1, q3, iqr) = iqr_slice_k(xs);
+        if q1.is_nan() || q3.is_nan() || iqr.is_nan() {
+            f64::NAN
+        } else {
+            iqr
+        }
+    }))
 }
 
 #[pyfunction]
-fn mad_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(mad_slice_k(a.as_slice()?))
+fn mad_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| mad_slice_k(xs)))
 }
 
 /// Validate a trim/cut proportion: must be finite and in [0, 0.5).
@@ -363,11 +375,13 @@ fn check_proportion_to_cut(p: f64) -> PyResult<()> {
 
 #[pyfunction]
 fn trimmed_mean_np(
+    py: Python<'_>,
     a: PyReadonlyArray1<f64>,
     proportion_to_cut: f64,
 ) -> PyResult<f64> {
     check_proportion_to_cut(proportion_to_cut)?;
-    Ok(trimmed_mean_slice_k(a.as_slice()?, proportion_to_cut))
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| trimmed_mean_slice_k(xs, proportion_to_cut)))
 }
 
 // ======================
@@ -375,76 +389,90 @@ fn trimmed_mean_np(
 // ======================
 
 #[pyfunction]
-fn median_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(median_slice_k(a.as_slice()?))
+fn median_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| median_slice_k(xs)))
 }
 
 #[pyfunction]
-fn iqr_robust_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(iqr_robust_slice_k(a.as_slice()?))
+fn iqr_robust_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| iqr_robust_slice_k(xs)))
 }
 
 #[pyfunction]
 fn winsorized_mean_np(
+    py: Python<'_>,
     a: PyReadonlyArray1<f64>,
     lower_percentile: f64,
     upper_percentile: f64,
 ) -> PyResult<f64> {
-    Ok(winsorized_mean_slice_k(a.as_slice()?, lower_percentile, upper_percentile))
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| winsorized_mean_slice_k(xs, lower_percentile, upper_percentile)))
 }
 
 #[pyfunction]
-fn trimmed_std_np(a: PyReadonlyArray1<f64>, proportion_to_cut: f64) -> PyResult<f64> {
-    Ok(trimmed_std_slice_k(a.as_slice()?, proportion_to_cut))
+fn trimmed_std_np(py: Python<'_>, a: PyReadonlyArray1<f64>, proportion_to_cut: f64) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| trimmed_std_slice_k(xs, proportion_to_cut)))
 }
 
 #[pyfunction]
-fn mad_std_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(mad_std_slice_k(a.as_slice()?))
+fn mad_std_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| mad_std_slice_k(xs)))
 }
 
 #[pyfunction(signature = (a, c=None))]
-fn biweight_midvariance_np(a: PyReadonlyArray1<f64>, c: Option<f64>) -> PyResult<f64> {
+fn biweight_midvariance_np(py: Python<'_>, a: PyReadonlyArray1<f64>, c: Option<f64>) -> PyResult<f64> {
     let c_val = c.unwrap_or(9.0);  // Default tuning constant
-    Ok(biweight_midvariance_slice_k(a.as_slice()?, c_val))
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| biweight_midvariance_slice_k(xs, c_val)))
 }
 
 #[pyfunction]
-fn qn_scale_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(qn_scale_slice_k(a.as_slice()?))
+fn qn_scale_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| qn_scale_slice_k(xs)))
 }
 
 #[pyfunction(signature = (a, k=None, max_iter=None))]
 fn huber_location_np(
+    py: Python<'_>,
     a: PyReadonlyArray1<f64>,
     k: Option<f64>,
     max_iter: Option<usize>,
 ) -> PyResult<f64> {
     let k_val = k.unwrap_or(1.345);  // Default for 95% efficiency
     let max_iter_val = max_iter.unwrap_or(30);
-    Ok(huber_location_slice_k(a.as_slice()?, k_val, max_iter_val))
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| huber_location_slice_k(xs, k_val, max_iter_val)))
 }
 
 // NaN-aware robust estimators
 #[pyfunction]
-fn median_skipna_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(median_slice_skipna_k(a.as_slice()?))
+fn median_skipna_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| median_slice_skipna_k(xs)))
 }
 
 #[pyfunction]
-fn mad_skipna_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(mad_slice_skipna_k(a.as_slice()?))
+fn mad_skipna_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| mad_slice_skipna_k(xs)))
 }
 
 #[pyfunction]
-fn trimmed_mean_skipna_np(a: PyReadonlyArray1<f64>, proportion_to_cut: f64) -> PyResult<f64> {
+fn trimmed_mean_skipna_np(py: Python<'_>, a: PyReadonlyArray1<f64>, proportion_to_cut: f64) -> PyResult<f64> {
     check_proportion_to_cut(proportion_to_cut)?;
-    Ok(trimmed_mean_slice_skipna_k(a.as_slice()?, proportion_to_cut))
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| trimmed_mean_slice_skipna_k(xs, proportion_to_cut)))
 }
 
 #[pyfunction]
-fn iqr_skipna_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    Ok(iqr_slice_skipna_k(a.as_slice()?))
+fn iqr_skipna_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    let xs = a.as_slice()?;
+    Ok(py.allow_threads(|| iqr_slice_skipna_k(xs)))
 }
 
 
@@ -455,12 +483,14 @@ fn zscore_np<'py>(py: Python<'py>, a: PyReadonlyArray1<f64>) -> PyResult<Bound<'
     if n == 0 {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
-    let m = mean_slice(xs);
-    let s = std_slice(xs); // sample std (ddof=1)
-    if !s.is_finite() || s == 0.0 {
-        return Ok(PyArray1::from_vec_bound(py, vec![f64::NAN; n]));
-    }
-    let out: Vec<f64> = xs.iter().map(|&x| (x - m) / s).collect();
+    let out: Vec<f64> = py.allow_threads(|| {
+        let m = mean_slice(xs);
+        let s = std_slice(xs); // sample std (ddof=1)
+        if !s.is_finite() || s == 0.0 {
+            return vec![f64::NAN; n];
+        }
+        xs.iter().map(|&x| (x - m) / s).collect()
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -470,73 +500,80 @@ fn zscore_skipna_np<'py>(
     a: PyReadonlyArray1<f64>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let xs = a.as_slice()?;
-    let m = mean_slice_skipna(xs);
-    let s = std_slice_skipna(xs);
-    let out: Vec<f64> = xs
-        .iter()
-        .map(|&v| {
-            if v.is_nan() {
-                f64::NAN
-            } else if s == 0.0 || s.is_nan() {
-                f64::NAN
-            } else {
-                (v - m) / s
-            }
-        })
-        .collect();
+    let out = py.allow_threads(|| {
+        let m = mean_slice_skipna(xs);
+        let s = std_slice_skipna(xs);
+        let out: Vec<f64> = xs
+            .iter()
+            .map(|&v| {
+                if v.is_nan() {
+                    f64::NAN
+                } else if s == 0.0 || s.is_nan() {
+                    f64::NAN
+                } else {
+                    (v - m) / s
+                }
+            })
+            .collect();
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
 #[pyfunction]
-fn skew_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+fn skew_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
     let xs = a.as_slice()?;
-    if xs.len() < 3 {
-        return Ok(f64::NAN);
-    }
-    // Population skewness g1 = m3 / m2^(3/2) with CONSISTENT central moments
-    // (both divided by n). Matches scipy.stats.skew (bias=True). The previous
-    // code divided m3 by the SAMPLE std (ddof=1), mixing estimators, so it
-    // matched neither scipy convention.
-    let m = mean_slice(xs);
-    let n = xs.len() as f64;
-    let (mut m2, mut m3) = (0.0f64, 0.0f64);
-    for &v in xs {
-        let d = v - m;
-        m2 += d * d;
-        m3 += d * d * d;
-    }
-    m2 /= n;
-    m3 /= n;
-    if m2 <= 0.0 {
-        return Ok(f64::NAN);
-    }
-    Ok(m3 / m2.powf(1.5))
+    py.allow_threads(|| {
+        if xs.len() < 3 {
+            return Ok(f64::NAN);
+        }
+        // Population skewness g1 = m3 / m2^(3/2) with CONSISTENT central moments
+        // (both divided by n). Matches scipy.stats.skew (bias=True). The previous
+        // code divided m3 by the SAMPLE std (ddof=1), mixing estimators, so it
+        // matched neither scipy convention.
+        let m = mean_slice(xs);
+        let n = xs.len() as f64;
+        let (mut m2, mut m3) = (0.0f64, 0.0f64);
+        for &v in xs {
+            let d = v - m;
+            m2 += d * d;
+            m3 += d * d * d;
+        }
+        m2 /= n;
+        m3 /= n;
+        if m2 <= 0.0 {
+            return Ok(f64::NAN);
+        }
+        Ok(m3 / m2.powf(1.5))
+    })
 }
 
 #[pyfunction]
-fn kurtosis_np(a: PyReadonlyArray1<f64>) -> PyResult<f64> {
+fn kurtosis_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<f64> {
     let xs = a.as_slice()?;
-    if xs.len() < 4 {
-        return Ok(f64::NAN);
-    }
-    // Excess (Fisher) kurtosis = m4 / m2^2 - 3 with CONSISTENT central moments
-    // (both divided by n). Matches scipy.stats.kurtosis (bias=True). The previous
-    // code divided m4 by the SAMPLE variance^2 (ddof=1), mixing estimators.
-    let m = mean_slice(xs);
-    let n = xs.len() as f64;
-    let (mut m2, mut m4) = (0.0f64, 0.0f64);
-    for &v in xs {
-        let d = v - m;
-        let d2 = d * d;
-        m2 += d2;
-        m4 += d2 * d2;
-    }
-    m2 /= n;
-    m4 /= n;
-    if m2 <= 0.0 {
-        return Ok(f64::NAN);
-    }
-    Ok(m4 / (m2 * m2) - 3.0)
+    py.allow_threads(|| {
+        if xs.len() < 4 {
+            return Ok(f64::NAN);
+        }
+        // Excess (Fisher) kurtosis = m4 / m2^2 - 3 with CONSISTENT central moments
+        // (both divided by n). Matches scipy.stats.kurtosis (bias=True). The previous
+        // code divided m4 by the SAMPLE variance^2 (ddof=1), mixing estimators.
+        let m = mean_slice(xs);
+        let n = xs.len() as f64;
+        let (mut m2, mut m4) = (0.0f64, 0.0f64);
+        for &v in xs {
+            let d = v - m;
+            let d2 = d * d;
+            m2 += d2;
+            m4 += d2 * d2;
+        }
+        m2 /= n;
+        m4 /= n;
+        if m2 <= 0.0 {
+            return Ok(f64::NAN);
+        }
+        Ok(m4 / (m2 * m2) - 3.0)
+    })
 }
 
 // ======================
@@ -554,58 +591,61 @@ fn mean_axis_np<'py>(
     let a: ArrayViewD<'_, f64> = x.as_array();
     let ndim = a.ndim();
 
-    match ndim {
-        1 => {
-            if axis != 0 {
-                return Err(PyValueError::new_err(
-                    "mean_axis_np: for 1D input, axis must be 0",
-                ));
-            }
-            let slice = a
-                .as_slice()
-                .ok_or_else(|| PyValueError::new_err("mean_axis_np: 1D input must be contiguous"))?;
-            let m = if use_skipna {
-                mean_slice_skipna(slice)
-            } else {
-                mean_slice(slice)
-            };
-            Ok(PyArray1::from_vec_bound(py, vec![m]))
-        }
-        2 => {
-            let axis_u = match axis {
-                0 => 0usize,
-                1 => 1usize,
-                _ => {
+    let out = py.allow_threads(|| -> PyResult<Vec<f64>> {
+        match ndim {
+            1 => {
+                if axis != 0 {
                     return Err(PyValueError::new_err(
-                        "mean_axis_np: for 2D input, axis must be 0 or 1",
-                    ))
+                        "mean_axis_np: for 1D input, axis must be 0",
+                    ));
                 }
-            };
-
-            let mut out: Vec<f64> = Vec::new();
-
-            if axis_u == 0 {
-                let n_cols = a.len_of(Axis(1));
-                for j in 0..n_cols {
-                    let col = a.index_axis(Axis(1), j);
-                    let v: Vec<f64> = col.iter().copied().collect();
-                    out.push(if use_skipna { mean_slice_skipna(&v) } else { mean_slice(&v) });
-                }
-            } else {
-                let n_rows = a.len_of(Axis(0));
-                for i in 0..n_rows {
-                    let row = a.index_axis(Axis(0), i);
-                    let v: Vec<f64> = row.iter().copied().collect();
-                    out.push(if use_skipna { mean_slice_skipna(&v) } else { mean_slice(&v) });
-                }
+                let slice = a
+                    .as_slice()
+                    .ok_or_else(|| PyValueError::new_err("mean_axis_np: 1D input must be contiguous"))?;
+                let m = if use_skipna {
+                    mean_slice_skipna(slice)
+                } else {
+                    mean_slice(slice)
+                };
+                Ok(vec![m])
             }
+            2 => {
+                let axis_u = match axis {
+                    0 => 0usize,
+                    1 => 1usize,
+                    _ => {
+                        return Err(PyValueError::new_err(
+                            "mean_axis_np: for 2D input, axis must be 0 or 1",
+                        ))
+                    }
+                };
 
-            Ok(PyArray1::from_vec_bound(py, out))
+                let mut out: Vec<f64> = Vec::new();
+
+                if axis_u == 0 {
+                    let n_cols = a.len_of(Axis(1));
+                    for j in 0..n_cols {
+                        let col = a.index_axis(Axis(1), j);
+                        let v: Vec<f64> = col.iter().copied().collect();
+                        out.push(if use_skipna { mean_slice_skipna(&v) } else { mean_slice(&v) });
+                    }
+                } else {
+                    let n_rows = a.len_of(Axis(0));
+                    for i in 0..n_rows {
+                        let row = a.index_axis(Axis(0), i);
+                        let v: Vec<f64> = row.iter().copied().collect();
+                        out.push(if use_skipna { mean_slice_skipna(&v) } else { mean_slice(&v) });
+                    }
+                }
+
+                Ok(out)
+            }
+            _ => Err(PyValueError::new_err(
+                "mean_axis_np currently supports only 1D or 2D arrays",
+            )),
         }
-        _ => Err(PyValueError::new_err(
-            "mean_axis_np currently supports only 1D or 2D arrays",
-        )),
-    }
+    })?;
+    Ok(PyArray1::from_vec_bound(py, out))
 }
 
 // ======================
@@ -625,21 +665,24 @@ fn mean_over_last_axis_dyn_np<'py>(
         return PyArray1::from_vec_bound(py, vec![v]);
     }
 
-    let shape = view.shape();
-    let last_dim = shape[ndim - 1];
-    let batch_size: usize = shape[..ndim - 1].iter().product();
+    let out = py.allow_threads(|| {
+        let shape = view.shape();
+        let last_dim = shape[ndim - 1];
+        let batch_size: usize = shape[..ndim - 1].iter().product();
 
-    let reshaped = view
-        .to_owned()
-        .into_shape((batch_size, last_dim))
-        .expect("reshape failed in mean_over_last_axis_dyn_np");
+        let reshaped = view
+            .to_owned()
+            .into_shape((batch_size, last_dim))
+            .expect("reshape failed in mean_over_last_axis_dyn_np");
 
-    let mut out = Vec::with_capacity(batch_size);
-    for row in reshaped.axis_iter(Axis(0)) {
-        let sum: f64 = row.iter().copied().sum();
-        let len = row.len() as f64;
-        out.push(if len > 0.0 { sum / len } else { f64::NAN });
-    }
+        let mut out = Vec::with_capacity(batch_size);
+        for row in reshaped.axis_iter(Axis(0)) {
+            let sum: f64 = row.iter().copied().sum();
+            let len = row.len() as f64;
+            out.push(if len > 0.0 { sum / len } else { f64::NAN });
+        }
+        out
+    });
 
     PyArray1::from_vec_bound(py, out)
 }
@@ -667,7 +710,10 @@ fn rolling_mean_std_np<'py>(
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
     check_window_ge1(window)?;
     let xs = a.as_slice()?;
-    let (means, stds) = rolling_mean_std_vec(xs, window);
+    let (means, stds) = py.allow_threads(|| {
+        let (means, stds) = rolling_mean_std_vec(xs, window);
+        (means, stds)
+    });
     Ok((PyArray1::from_vec_bound(py, means), PyArray1::from_vec_bound(py, stds)))
 }
 
@@ -679,7 +725,10 @@ fn rolling_mean_np<'py>(
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     check_window_ge1(window)?;
     let xs = a.as_slice()?;
-    let (means, _stds) = rolling_mean_std_vec(xs, window);
+    let means = py.allow_threads(|| {
+        let (means, _stds) = rolling_mean_std_vec(xs, window);
+        means
+    });
     Ok(PyArray1::from_vec_bound(py, means))
 }
 
@@ -691,7 +740,10 @@ fn rolling_std_np<'py>(
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     check_window_ge1(window)?;
     let xs = a.as_slice()?;
-    let (_means, stds) = rolling_mean_std_vec(xs, window);
+    let stds = py.allow_threads(|| {
+        let (_means, stds) = rolling_mean_std_vec(xs, window);
+        stds
+    });
     Ok(PyArray1::from_vec_bound(py, stds))
 }
 
@@ -705,13 +757,15 @@ fn rolling_var_np<'py>(
     let xs = a.as_slice()?;
 
 // single rolling pass (engine)
-let (_means, stds) = rolling_mean_std_vec(xs, window);
+let vars = py.allow_threads(|| {
+    let (_means, stds) = rolling_mean_std_vec(xs, window);
 
-// final linear pass (std -> var)
-let vars = vars_from_stds(&stds);
+    // final linear pass (std -> var)
+    let vars = vars_from_stds(&stds);
+    vars
+});
 
 Ok(PyArray1::from_vec_bound(py, vars))
-
 }
 
 #[pyfunction]
@@ -724,10 +778,13 @@ fn rolling_zscore_np<'py>(
     let xs = a.as_slice()?;
 
     // single rolling pass
-    let (means, stds) = rolling_mean_std_vec(xs, window);
+    let out = py.allow_threads(|| {
+        let (means, stds) = rolling_mean_std_vec(xs, window);
 
-    // final linear pass
-    let out = zscore_from_mean_std(xs, &means, &stds);
+        // final linear pass
+        let out = zscore_from_mean_std(xs, &means, &stds);
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -745,29 +802,32 @@ fn rolling_mean_nan_np<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let mut out = vec![f64::NAN; n];
-    let mut sum = 0.0f64;
-    let mut cnt = 0usize;
+    let out = py.allow_threads(|| {
+        let mut out = vec![f64::NAN; n];
+        let mut sum = 0.0f64;
+        let mut cnt = 0usize;
 
-    for i in 0..n {
-        let x_new = xs[i];
-        if !x_new.is_nan() {
-            sum += x_new;
-            cnt += 1;
-        }
+        for i in 0..n {
+            let x_new = xs[i];
+            if !x_new.is_nan() {
+                sum += x_new;
+                cnt += 1;
+            }
 
-        if i >= window {
-            let x_old = xs[i - window];
-            if !x_old.is_nan() {
-                sum -= x_old;
-                cnt -= 1;
+            if i >= window {
+                let x_old = xs[i - window];
+                if !x_old.is_nan() {
+                    sum -= x_old;
+                    cnt -= 1;
+                }
+            }
+
+            if cnt > 0 {
+                out[i] = sum / (cnt as f64);
             }
         }
-
-        if cnt > 0 {
-            out[i] = sum / (cnt as f64);
-        }
-    }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -786,40 +846,43 @@ fn rolling_std_nan_np<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let mut out = vec![f64::NAN; n];
-    // Shift by a finite constant near the data magnitude: variance is
-    // translation-invariant and the shift prevents catastrophic cancellation
-    // in `sumsq - sum^2/c` on large-offset data (see rolling::engine).
-    let off = first_finite_offset(xs);
-    let mut sum = 0.0f64;
-    let mut sumsq = 0.0f64;
-    let mut cnt = 0usize;
+    let out = py.allow_threads(|| {
+        let mut out = vec![f64::NAN; n];
+        // Shift by a finite constant near the data magnitude: variance is
+        // translation-invariant and the shift prevents catastrophic cancellation
+        // in `sumsq - sum^2/c` on large-offset data (see rolling::engine).
+        let off = first_finite_offset(xs);
+        let mut sum = 0.0f64;
+        let mut sumsq = 0.0f64;
+        let mut cnt = 0usize;
 
-    for i in 0..n {
-        let x_new = xs[i];
-        if !x_new.is_nan() {
-            let xs_ = x_new - off;
-            sum += xs_;
-            sumsq += xs_ * xs_;
-            cnt += 1;
-        }
+        for i in 0..n {
+            let x_new = xs[i];
+            if !x_new.is_nan() {
+                let xs_ = x_new - off;
+                sum += xs_;
+                sumsq += xs_ * xs_;
+                cnt += 1;
+            }
 
-        if i >= window {
-            let x_old = xs[i - window];
-            if !x_old.is_nan() {
-                let xs_ = x_old - off;
-                sum -= xs_;
-                sumsq -= xs_ * xs_;
-                cnt -= 1;
+            if i >= window {
+                let x_old = xs[i - window];
+                if !x_old.is_nan() {
+                    let xs_ = x_old - off;
+                    sum -= xs_;
+                    sumsq -= xs_ * xs_;
+                    cnt -= 1;
+                }
+            }
+
+            if cnt >= 2 {
+                let c = cnt as f64;
+                let var = (sumsq - (sum * sum) / c) / (c - 1.0);
+                out[i] = var.max(0.0).sqrt();
             }
         }
-
-        if cnt >= 2 {
-            let c = cnt as f64;
-            let var = (sumsq - (sum * sum) / c) / (c - 1.0);
-            out[i] = var.max(0.0).sqrt();
-        }
-    }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -838,53 +901,56 @@ fn rolling_zscore_nan_np<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let mut out = vec![f64::NAN; n];
-    // Offset shift for cancellation safety (see rolling_std_nan_np). The
-    // z-score is invariant under a common shift of the data and the mean.
-    let off = first_finite_offset(xs);
-    let mut sum = 0.0f64;
-    let mut sumsq = 0.0f64;
-    let mut cnt = 0usize;
+    let out = py.allow_threads(|| {
+        let mut out = vec![f64::NAN; n];
+        // Offset shift for cancellation safety (see rolling_std_nan_np). The
+        // z-score is invariant under a common shift of the data and the mean.
+        let off = first_finite_offset(xs);
+        let mut sum = 0.0f64;
+        let mut sumsq = 0.0f64;
+        let mut cnt = 0usize;
 
-    for i in 0..n {
-        let x_new = xs[i];
-        if !x_new.is_nan() {
-            let xs_ = x_new - off;
-            sum += xs_;
-            sumsq += xs_ * xs_;
-            cnt += 1;
-        }
+        for i in 0..n {
+            let x_new = xs[i];
+            if !x_new.is_nan() {
+                let xs_ = x_new - off;
+                sum += xs_;
+                sumsq += xs_ * xs_;
+                cnt += 1;
+            }
 
-        if i >= window {
-            let x_old = xs[i - window];
-            if !x_old.is_nan() {
-                let xs_ = x_old - off;
-                sum -= xs_;
-                sumsq -= xs_ * xs_;
-                cnt -= 1;
+            if i >= window {
+                let x_old = xs[i - window];
+                if !x_old.is_nan() {
+                    let xs_ = x_old - off;
+                    sum -= xs_;
+                    sumsq -= xs_ * xs_;
+                    cnt -= 1;
+                }
+            }
+
+            let x = xs[i];
+            if x.is_nan() {
+                out[i] = f64::NAN;
+                continue;
+            }
+
+            if cnt >= 2 {
+                let c = cnt as f64;
+                let mean_shifted = sum / c;
+                let var = (sumsq - (sum * sum) / c) / (c - 1.0);
+                let std = var.max(0.0).sqrt();
+                out[i] = if std > 0.0 && std.is_finite() {
+                    ((x - off) - mean_shifted) / std
+                } else {
+                    f64::NAN
+                };
+            } else {
+                out[i] = f64::NAN;
             }
         }
-
-        let x = xs[i];
-        if x.is_nan() {
-            out[i] = f64::NAN;
-            continue;
-        }
-
-        if cnt >= 2 {
-            let c = cnt as f64;
-            let mean_shifted = sum / c;
-            let var = (sumsq - (sum * sum) / c) / (c - 1.0);
-            let std = var.max(0.0).sqrt();
-            out[i] = if std > 0.0 && std.is_finite() {
-                ((x - off) - mean_shifted) / std
-            } else {
-                f64::NAN
-            };
-        } else {
-            out[i] = f64::NAN;
-        }
-    }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -904,15 +970,18 @@ fn ewma_np<'py>(
     if n == 0 {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
-    let mut out = Vec::with_capacity(n);
-    let mut prev = xs[0];
-    out.push(prev);
-    let one_minus = 1.0 - alpha;
-    for i in 1..n {
-        let val = alpha * xs[i] + one_minus * prev;
-        out.push(val);
-        prev = val;
-    }
+    let out = py.allow_threads(|| {
+        let mut out = Vec::with_capacity(n);
+        let mut prev = xs[0];
+        out.push(prev);
+        let one_minus = 1.0 - alpha;
+        for i in 1..n {
+            let val = alpha * xs[i] + one_minus * prev;
+            out.push(val);
+            prev = val;
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -940,7 +1009,7 @@ fn rolling_mean_std_axis0_np<'py>(
     let flat = a.as_slice().ok_or_else(|| PyValueError::new_err("array must be contiguous"))?;
     let out_rows = n_rows - window + 1;
 
-    let (means, stds) = rolling_mean_std_axis0_vec(flat, n_rows, n_cols, window);
+    let (means, stds) = py.allow_threads(|| rolling_mean_std_axis0_vec(flat, n_rows, n_cols, window));
     let means2 = Array2::from_shape_vec((out_rows, n_cols), means).unwrap();
     let stds2 = Array2::from_shape_vec((out_rows, n_cols), stds).unwrap();
     Ok((means2.into_pyarray_bound(py), stds2.into_pyarray_bound(py)))
@@ -961,7 +1030,7 @@ fn rolling_mean_axis0_np<'py>(
     let flat = a.as_slice().ok_or_else(|| PyValueError::new_err("array must be contiguous"))?;
     let out_rows = n_rows - window + 1;
 
-    let means = rolling_mean_axis0_vec(flat, n_rows, n_cols, window);
+    let means = py.allow_threads(|| rolling_mean_axis0_vec(flat, n_rows, n_cols, window));
     let out2 = Array2::from_shape_vec((out_rows, n_cols), means).unwrap();
     Ok(out2.into_pyarray_bound(py))
 }
@@ -981,7 +1050,7 @@ fn rolling_std_axis0_np<'py>(
     let flat = a.as_slice().ok_or_else(|| PyValueError::new_err("array must be contiguous"))?;
     let out_rows = n_rows - window + 1;
 
-    let stds = rolling_std_axis0_vec(flat, n_rows, n_cols, window);
+    let stds = py.allow_threads(|| rolling_std_axis0_vec(flat, n_rows, n_cols, window));
     let out2 = Array2::from_shape_vec((out_rows, n_cols), stds).unwrap();
     Ok(out2.into_pyarray_bound(py))
 }
@@ -997,7 +1066,10 @@ fn iqr_outliers_np<'py>(
     k: f64,
 ) -> PyResult<Bound<'py, PyArray1<bool>>> {
     let xs = a.as_slice()?;
-    let (q1, q3, iqr) = iqr_slice_k(xs);
+    let (q1, q3, iqr) = py.allow_threads(|| {
+        let (q1, q3, iqr) = iqr_slice_k(xs);
+        (q1, q3, iqr)
+    });
     if iqr.is_nan() {
         return Ok(PyArray1::from_vec_bound(py, vec![false; xs.len()]));
     }
@@ -1017,12 +1089,14 @@ fn zscore_outliers_np<'py>(
     if xs.is_empty() {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
-    let m = mean_slice(xs);
-    let s = std_slice(xs);
-    if s == 0.0 || s.is_nan() {
-        return Ok(PyArray1::from_vec_bound(py, vec![false; xs.len()]));
-    }
-    let mask: Vec<bool> = xs.iter().map(|&x| ((x - m) / s).abs() > threshold).collect();
+    let mask: Vec<bool> = py.allow_threads(|| {
+        let m = mean_slice(xs);
+        let s = std_slice(xs);
+        if s == 0.0 || s.is_nan() {
+            return vec![false; xs.len()];
+        }
+        xs.iter().map(|&x| ((x - m) / s).abs() > threshold).collect()
+    });
     Ok(PyArray1::from_vec_bound(py, mask))
 }
 
@@ -1035,21 +1109,24 @@ fn minmax_scale_np<'py>(
     if xs.is_empty() {
         return Ok((PyArray1::from_vec_bound(py, vec![]), f64::NAN, f64::NAN));
     }
-    let mut mn = xs[0];
-    let mut mx = xs[0];
-    for &x in xs.iter().skip(1) {
-        if x < mn {
-            mn = x;
+    let (scaled, mn, mx) = py.allow_threads(|| {
+        let mut mn = xs[0];
+        let mut mx = xs[0];
+        for &x in xs.iter().skip(1) {
+            if x < mn {
+                mn = x;
+            }
+            if x > mx {
+                mx = x;
+            }
         }
-        if x > mx {
-            mx = x;
+        if mx == mn {
+            return (vec![0.0; xs.len()], mn, mx);
         }
-    }
-    if mx == mn {
-        return Ok((PyArray1::from_vec_bound(py, vec![0.0; xs.len()]), mn, mx));
-    }
-    let scale = mx - mn;
-    let scaled: Vec<f64> = xs.iter().map(|&x| (x - mn) / scale).collect();
+        let scale = mx - mn;
+        let scaled: Vec<f64> = xs.iter().map(|&x| (x - mn) / scale).collect();
+        (scaled, mn, mx)
+    });
     Ok((PyArray1::from_vec_bound(py, scaled), mn, mx))
 }
 
@@ -1063,19 +1140,21 @@ fn robust_scale_np<'py>(
     if xs.is_empty() {
         return Ok((PyArray1::from_vec_bound(py, vec![]), f64::NAN, f64::NAN));
     }
-    // NaN in input -> NaN out (numpy semantics), never a crash under panic="abort".
-    if crate::util::any_nan(xs) {
-        let nans = vec![f64::NAN; xs.len()];
-        return Ok((PyArray1::from_vec_bound(py, nans), f64::NAN, f64::NAN));
-    }
-    let mad = mad_slice(xs);
-    let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.total_cmp(b));
-    let n = v.len();
-    let med = if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) };
+    let (scaled, med, mad) = py.allow_threads(|| {
+        // NaN in input -> NaN out (numpy semantics), never a crash under panic="abort".
+        if crate::util::any_nan(xs) {
+            return (vec![f64::NAN; xs.len()], f64::NAN, f64::NAN);
+        }
+        let mad = mad_slice(xs);
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.total_cmp(b));
+        let n = v.len();
+        let med = if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) };
 
-    let denom = if mad == 0.0 { 1e-12 } else { mad * scale_factor };
-    let scaled: Vec<f64> = xs.iter().map(|&x| (x - med) / denom).collect();
+        let denom = if mad == 0.0 { 1e-12 } else { mad * scale_factor };
+        let scaled: Vec<f64> = xs.iter().map(|&x| (x - med) / denom).collect();
+        (scaled, med, mad)
+    });
     Ok((PyArray1::from_vec_bound(py, scaled), med, mad))
 }
 
@@ -1100,7 +1179,7 @@ fn winsorize_np<'py>(
     }
 
     // Delegate to the kernel (single source of truth)
-    let out = winsorize_vec_k(xs, lower_q, upper_q);
+    let out = py.allow_threads(|| winsorize_vec_k(xs, lower_q, upper_q));
     Ok(PyArray1::from_vec_bound(py, out))
 }
 // Clip-based winsorize (explicit bounds)
@@ -1119,10 +1198,11 @@ fn winsorize_clip_np<'py>(
     // If caller swapped them, fix it deterministically
     let (lo, hi) = if lower <= upper { (lower, upper) } else { (upper, lower) };
 
-    let out: Vec<f64> = xs
-        .iter()
-        .map(|&v| if v < lo { lo } else if v > hi { hi } else { v })
-        .collect();
+    let out: Vec<f64> = py.allow_threads(|| {
+        xs.iter()
+            .map(|&v| if v < lo { lo } else if v > hi { hi } else { v })
+            .collect()
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -1146,16 +1226,19 @@ fn diff_np<'py>(py: Python<'py>, a: PyReadonlyArray1<f64>, periods: isize) -> Py
         return Ok(PyArray1::from_vec_bound(py, vec![f64::NAN; n]));
     }
 
-    let mut out = vec![f64::NAN; n];
-    if periods > 0 {
-        for i in p..n {
-            out[i] = xs[i] - xs[i - p];
+    let out = py.allow_threads(|| {
+        let mut out = vec![f64::NAN; n];
+        if periods > 0 {
+            for i in p..n {
+                out[i] = xs[i] - xs[i - p];
+            }
+        } else {
+            for i in 0..(n - p) {
+                out[i] = xs[i] - xs[i + p];
+            }
         }
-    } else {
-        for i in 0..(n - p) {
-            out[i] = xs[i] - xs[i + p];
-        }
-    }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -1176,42 +1259,51 @@ fn pct_change_np<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![f64::NAN; n]));
     }
 
-    let mut out = vec![f64::NAN; n];
-    if periods > 0 {
-        for i in p..n {
-            let base = xs[i - p];
-            out[i] = if base == 0.0 { f64::NAN } else { (xs[i] - base) / base };
+    let out = py.allow_threads(|| {
+        let mut out = vec![f64::NAN; n];
+        if periods > 0 {
+            for i in p..n {
+                let base = xs[i - p];
+                out[i] = if base == 0.0 { f64::NAN } else { (xs[i] - base) / base };
+            }
+        } else {
+            for i in 0..(n - p) {
+                let base = xs[i + p];
+                out[i] = if base == 0.0 { f64::NAN } else { (xs[i] - base) / base };
+            }
         }
-    } else {
-        for i in 0..(n - p) {
-            let base = xs[i + p];
-            out[i] = if base == 0.0 { f64::NAN } else { (xs[i] - base) / base };
-        }
-    }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
 #[pyfunction]
 fn cumsum_np<'py>(py: Python<'py>, a: PyReadonlyArray1<f64>) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let xs = a.as_slice()?;
-    let mut out = Vec::with_capacity(xs.len());
-    let mut s = 0.0;
-    for &x in xs {
-        s += x;
-        out.push(s);
-    }
+    let out = py.allow_threads(|| {
+        let mut out = Vec::with_capacity(xs.len());
+        let mut s = 0.0;
+        for &x in xs {
+            s += x;
+            out.push(s);
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
 #[pyfunction]
 fn cummean_np<'py>(py: Python<'py>, a: PyReadonlyArray1<f64>) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let xs = a.as_slice()?;
-    let mut out = Vec::with_capacity(xs.len());
-    let mut s = 0.0;
-    for (i, &x) in xs.iter().enumerate() {
-        s += x;
-        out.push(s / ((i + 1) as f64));
-    }
+    let out = py.allow_threads(|| {
+        let mut out = Vec::with_capacity(xs.len());
+        let mut s = 0.0;
+        for (i, &x) in xs.iter().enumerate() {
+            s += x;
+            out.push(s / ((i + 1) as f64));
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -1224,11 +1316,14 @@ fn ecdf_np<'py>(
     if xs.is_empty() {
         return Ok((PyArray1::from_vec_bound(py, vec![]), PyArray1::from_vec_bound(py, vec![])));
     }
-    let mut vals = xs.to_vec();
-    // total_cmp is a total order over f64 (NaN sorts last), so this never panics.
-    vals.sort_by(|a, b| a.total_cmp(b));
-    let n = vals.len();
-    let cdf: Vec<f64> = (0..n).map(|i| (i + 1) as f64 / (n as f64)).collect();
+    let (vals, cdf) = py.allow_threads(|| {
+        let mut vals = xs.to_vec();
+        // total_cmp is a total order over f64 (NaN sorts last), so this never panics.
+        vals.sort_by(|a, b| a.total_cmp(b));
+        let n = vals.len();
+        let cdf: Vec<f64> = (0..n).map(|i| (i + 1) as f64 / (n as f64)).collect();
+        (vals, cdf)
+    });
     Ok((PyArray1::from_vec_bound(py, vals), PyArray1::from_vec_bound(py, cdf)))
 }
 
@@ -1247,20 +1342,23 @@ fn quantile_bins_np<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let mut pairs: Vec<(f64, usize)> = xs.iter().copied().zip(0..n).collect();
-    // total_cmp is a total order over f64 (NaN sorts last), so this never panics.
-    pairs.sort_by(|(v1, _), (v2, _)| v1.total_cmp(v2));
+    let bins = py.allow_threads(|| {
+        let mut pairs: Vec<(f64, usize)> = xs.iter().copied().zip(0..n).collect();
+        // total_cmp is a total order over f64 (NaN sorts last), so this never panics.
+        pairs.sort_by(|(v1, _), (v2, _)| v1.total_cmp(v2));
 
-    let mut bins = vec![-1_i64; n];
-    let mut start = 0usize;
-    for b in 0..n_bins {
-        let end = if b == n_bins - 1 { n } else { ((b + 1) * n) / n_bins };
-        for i in start..end {
-            let (_, idx) = pairs[i];
-            bins[idx] = b as i64;
+        let mut bins = vec![-1_i64; n];
+        let mut start = 0usize;
+        for b in 0..n_bins {
+            let end = if b == n_bins - 1 { n } else { ((b + 1) * n) / n_bins };
+            for i in start..end {
+                let (_, idx) = pairs[i];
+                bins[idx] = b as i64;
+            }
+            start = end;
         }
-        start = end;
-    }
+        bins
+    });
 
     Ok(PyArray1::from_vec_bound(py, bins))
 }
@@ -1268,10 +1366,13 @@ fn quantile_bins_np<'py>(
 #[pyfunction]
 fn sign_mask_np<'py>(py: Python<'py>, a: PyReadonlyArray1<f64>) -> PyResult<Bound<'py, PyArray1<i8>>> {
     let xs = a.as_slice()?;
-    let out: Vec<i8> = xs
-        .iter()
-        .map(|&x| if x > 0.0 { 1 } else if x < 0.0 { -1 } else { 0 })
-        .collect();
+    let out = py.allow_threads(|| {
+        let out: Vec<i8> = xs
+            .iter()
+            .map(|&x| if x > 0.0 { 1 } else if x < 0.0 { -1 } else { 0 })
+            .collect();
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -1281,14 +1382,17 @@ fn demean_with_signs_np<'py>(
     a: PyReadonlyArray1<f64>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<i8>>)> {
     let xs = a.as_slice()?;
-    let m = mean_slice(xs);
-    let mut demeaned = Vec::with_capacity(xs.len());
-    let mut signs = Vec::with_capacity(xs.len());
-    for &x in xs {
-        let d = x - m;
-        demeaned.push(d);
-        signs.push(if d > 0.0 { 1 } else if d < 0.0 { -1 } else { 0 });
-    }
+    let (demeaned, signs) = py.allow_threads(|| {
+        let m = mean_slice(xs);
+        let mut demeaned = Vec::with_capacity(xs.len());
+        let mut signs = Vec::with_capacity(xs.len());
+        for &x in xs {
+            let d = x - m;
+            demeaned.push(d);
+            signs.push(if d > 0.0 { 1 } else if d < 0.0 { -1 } else { 0 });
+        }
+        (demeaned, signs)
+    });
     Ok((PyArray1::from_vec_bound(py, demeaned), PyArray1::from_vec_bound(py, signs)))
 }
 
@@ -1342,65 +1446,69 @@ fn cov_impl(xs: &[f64], ys: &[f64]) -> f64 {
 }
 
 #[pyfunction]
-fn cov_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
+fn cov_np(py: Python<'_>, x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
     let xs = x.as_slice()?;
     let ys = y.as_slice()?;
-    if xs.len() != ys.len() {
-        return Err(PyValueError::new_err(
-            "x and y must have the same length",
-        ));
-    }
-    Ok(cov_impl(xs, ys))
+    py.allow_threads(|| {
+        if xs.len() != ys.len() {
+            return Err(PyValueError::new_err(
+                "x and y must have the same length",
+            ));
+        }
+        Ok(cov_impl(xs, ys))
+    })
 }
 
 #[pyfunction]
-fn corr_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
+fn corr_np(py: Python<'_>, x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
     let xs = x.as_slice()?;
     let ys = y.as_slice()?;
-    if xs.len() != ys.len() {
-        return Err(PyValueError::new_err(
-            "x and y must have the same length",
-        ));
-    }
-    let n = xs.len().min(ys.len());
-    if n <= 1 {
-        return Ok(f64::NAN);
-    }
-    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
-
-    // Strict: if any NaN is present in either series, return NaN (matches prior behavior).
-    let mut sum_x = 0.0f64;
-    let mut sum_y = 0.0f64;
-    let mut sum_xx = 0.0f64;
-    let mut sum_yy = 0.0f64;
-    let mut sum_xy = 0.0f64;
-
-    for i in 0..n {
-        let x = xs[i];
-        let y = ys[i];
-        if x.is_nan() || y.is_nan() {
+    py.allow_threads(|| {
+        if xs.len() != ys.len() {
+            return Err(PyValueError::new_err(
+                "x and y must have the same length",
+            ));
+        }
+        let n = xs.len().min(ys.len());
+        if n <= 1 {
             return Ok(f64::NAN);
         }
-        let x = x - ox;
-        let y = y - oy;
-        sum_x += x;
-        sum_y += y;
-        sum_xx += x * x;
-        sum_yy += y * y;
-        sum_xy += x * y;
-    }
+        let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
 
-    let c = n as f64;
-    let denom = c - 1.0;
+        // Strict: if any NaN is present in either series, return NaN (matches prior behavior).
+        let mut sum_x = 0.0f64;
+        let mut sum_y = 0.0f64;
+        let mut sum_xx = 0.0f64;
+        let mut sum_yy = 0.0f64;
+        let mut sum_xy = 0.0f64;
 
-    let cov = (sum_xy - (sum_x * sum_y) / c) / denom;
-    let varx = (sum_xx - (sum_x * sum_x) / c) / denom;
-    let vary = (sum_yy - (sum_y * sum_y) / c) / denom;
+        for i in 0..n {
+            let x = xs[i];
+            let y = ys[i];
+            if x.is_nan() || y.is_nan() {
+                return Ok(f64::NAN);
+            }
+            let x = x - ox;
+            let y = y - oy;
+            sum_x += x;
+            sum_y += y;
+            sum_xx += x * x;
+            sum_yy += y * y;
+            sum_xy += x * y;
+        }
 
-    if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
-        return Ok(f64::NAN);
-    }
-    Ok((cov / (varx * vary).sqrt()).clamp(-1.0, 1.0))
+        let c = n as f64;
+        let denom = c - 1.0;
+
+        let cov = (sum_xy - (sum_x * sum_y) / c) / denom;
+        let varx = (sum_xx - (sum_x * sum_x) / c) / denom;
+        let vary = (sum_yy - (sum_y * sum_y) / c) / denom;
+
+        if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
+            return Ok(f64::NAN);
+        }
+        Ok((cov / (varx * vary).sqrt()).clamp(-1.0, 1.0))
+    })
 }
 
 // ======================
@@ -1630,7 +1738,7 @@ pub fn corr_matrix_np<'py>(
     }
 
     let mut out = vec![0.0f64; n_cols * n_cols];
-    corr_matrix_out_k(xs, n_rows, n_cols, &mut out);
+    py.allow_threads(|| corr_matrix_out_k(xs, n_rows, n_cols, &mut out));
 
     let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("corr_matrix_np: from_shape_vec failed"))?;
@@ -1651,7 +1759,7 @@ pub fn corr_matrix_skipna_np<'py>(
     }
 
     let mut out = vec![0.0f64; n_cols * n_cols];
-    corr_matrix_skipna_out_k(xs, n_rows, n_cols, &mut out);
+    py.allow_threads(|| corr_matrix_skipna_out_k(xs, n_rows, n_cols, &mut out));
 
     let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("corr_matrix_skipna_np: from_shape_vec failed"))?;
@@ -1672,7 +1780,7 @@ pub fn corr_distance_np<'py>(
     }
 
     let mut out = vec![0.0f64; n_cols * n_cols];
-    corr_distance_out_k(xs, n_rows, n_cols, &mut out);
+    py.allow_threads(|| corr_distance_out_k(xs, n_rows, n_cols, &mut out));
 
     let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("corr_distance_np: from_shape_vec failed"))?;
@@ -1690,52 +1798,59 @@ pub fn diag_np<'py>(
     }
     let xs = xs_vec.as_slice();
 
-    let n = n_rows;
-    let mut out = vec![0.0_f64; n];
-    for i in 0..n {
-        out[i] = xs[i * n + i];
-    }
+    let out = py.allow_threads(|| {
+        let n = n_rows;
+        let mut out = vec![0.0_f64; n];
+        for i in 0..n {
+            out[i] = xs[i * n + i];
+        }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
 #[pyfunction]
-pub fn trace_np(a: &Bound<'_, PyAny>) -> PyResult<f64> {
+pub fn trace_np(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<f64> {
     let (xs_vec, n_rows, n_cols) = extract_mat_f64(a)?;
     if n_rows != n_cols {
         return Err(PyValueError::new_err("trace_np expects a square 2D array"));
     }
     let xs = xs_vec.as_slice();
 
-    let n = n_rows;
-    let mut sum = 0.0_f64;
-    for i in 0..n {
-        sum += xs[i * n + i];
-    }
-    Ok(sum)
+    py.allow_threads(|| {
+        let n = n_rows;
+        let mut sum = 0.0_f64;
+        for i in 0..n {
+            sum += xs[i * n + i];
+        }
+        Ok(sum)
+    })
 }
 
 #[pyfunction]
-pub fn is_symmetric_np(a: &Bound<'_, PyAny>, tol: f64) -> PyResult<bool> {
+pub fn is_symmetric_np(py: Python<'_>, a: &Bound<'_, PyAny>, tol: f64) -> PyResult<bool> {
     let (xs_vec, n_rows, n_cols) = extract_mat_f64(a)?;
     if n_rows != n_cols {
         // By definition a non-square matrix can't be symmetric.
         return Ok(false);
     }
     let xs = xs_vec.as_slice();
-    let n = n_rows;
+    py.allow_threads(|| {
+        let n = n_rows;
 
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let a_ij = xs[i * n + j];
-            let a_ji = xs[j * n + i];
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let a_ij = xs[i * n + j];
+                let a_ji = xs[j * n + i];
 
-            if (a_ij - a_ji).abs() > tol {
-                return Ok(false);
+                if (a_ij - a_ji).abs() > tol {
+                    return Ok(false);
+                }
             }
         }
-    }
-    Ok(true)
+        Ok(true)
+    })
 }
 
 
@@ -1757,7 +1872,7 @@ fn rolling_cov_np<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out = rolling_cov_vec(xs, ys, window);
+    let out = py.allow_threads(|| rolling_cov_vec(xs, ys, window));
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -1780,56 +1895,59 @@ fn rolling_corr_np<'py>(
     if window > n {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
-    let mut out = Vec::with_capacity(n - window + 1);
+    let out = py.allow_threads(|| {
+        let mut out = Vec::with_capacity(n - window + 1);
 
-    // Offset shift (correlation is translation-invariant) to avoid
-    // catastrophic cancellation on large-offset data.
-    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
+        // Offset shift (correlation is translation-invariant) to avoid
+        // catastrophic cancellation on large-offset data.
+        let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
 
-    let mut sum_x = 0.0;
-    let mut sum_y = 0.0;
-    let mut sum_x2 = 0.0;
-    let mut sum_y2 = 0.0;
-    let mut sum_xy = 0.0;
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        let mut sum_x2 = 0.0;
+        let mut sum_y2 = 0.0;
+        let mut sum_xy = 0.0;
 
-    for i in 0..window {
-        let xi = xs[i] - ox;
-        let yi = ys[i] - oy;
-        sum_x += xi;
-        sum_y += yi;
-        sum_x2 += xi * xi;
-        sum_y2 += yi * yi;
-        sum_xy += xi * yi;
-    }
-
-    for i in (window - 1)..n {
-        if i > window - 1 {
-            let xi_new = xs[i] - ox;
-            let yi_new = ys[i] - oy;
-            let xi_old = xs[i - window] - ox;
-            let yi_old = ys[i - window] - oy;
-
-            sum_x += xi_new - xi_old;
-            sum_y += yi_new - yi_old;
-            sum_x2 += xi_new * xi_new - xi_old * xi_old;
-            sum_y2 += yi_new * yi_new - yi_old * yi_old;
-            sum_xy += xi_new * yi_new - xi_old * yi_old;
+        for i in 0..window {
+            let xi = xs[i] - ox;
+            let yi = ys[i] - oy;
+            sum_x += xi;
+            sum_y += yi;
+            sum_x2 += xi * xi;
+            sum_y2 += yi * yi;
+            sum_xy += xi * yi;
         }
 
-        let w = window as f64;
-        let mx = sum_x / w;
-        let my = sum_y / w;
-        let var_x = (sum_x2 - w * mx * mx) / ((window - 1) as f64);
-        let var_y = (sum_y2 - w * my * my) / ((window - 1) as f64);
-        let cov = (sum_xy - w * mx * my) / ((window - 1) as f64);
+        for i in (window - 1)..n {
+            if i > window - 1 {
+                let xi_new = xs[i] - ox;
+                let yi_new = ys[i] - oy;
+                let xi_old = xs[i - window] - ox;
+                let yi_old = ys[i - window] - oy;
 
-        let denom = (var_x.max(0.0).sqrt()) * (var_y.max(0.0).sqrt());
-        out.push(if denom == 0.0 || denom.is_nan() {
-            f64::NAN
-        } else {
-            (cov / denom).clamp(-1.0, 1.0)
-        });
-    }
+                sum_x += xi_new - xi_old;
+                sum_y += yi_new - yi_old;
+                sum_x2 += xi_new * xi_new - xi_old * xi_old;
+                sum_y2 += yi_new * yi_new - yi_old * yi_old;
+                sum_xy += xi_new * yi_new - xi_old * yi_old;
+            }
+
+            let w = window as f64;
+            let mx = sum_x / w;
+            let my = sum_y / w;
+            let var_x = (sum_x2 - w * mx * mx) / ((window - 1) as f64);
+            let var_y = (sum_y2 - w * my * my) / ((window - 1) as f64);
+            let cov = (sum_xy - w * mx * my) / ((window - 1) as f64);
+
+            let denom = (var_x.max(0.0).sqrt()) * (var_y.max(0.0).sqrt());
+            out.push(if denom == 0.0 || denom.is_nan() {
+                f64::NAN
+            } else {
+                (cov / denom).clamp(-1.0, 1.0)
+            });
+        }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -1840,33 +1958,35 @@ fn rolling_corr_np<'py>(
 // ======================
 
 #[pyfunction]
-pub fn welford_np(a: PyReadonlyArray1<f64>) -> PyResult<(f64, f64, usize)> {
+pub fn welford_np(py: Python<'_>, a: PyReadonlyArray1<f64>) -> PyResult<(f64, f64, usize)> {
     let xs = a.as_slice()?;
-    let mut mean = 0.0;
-    let mut m2 = 0.0;
-    let mut n = 0usize;
+    py.allow_threads(|| {
+        let mut mean = 0.0;
+        let mut m2 = 0.0;
+        let mut n = 0usize;
 
-    for &x in xs {
-        if x.is_nan() {
-            continue;
+        for &x in xs {
+            if x.is_nan() {
+                continue;
+            }
+            n += 1;
+            let delta = x - mean;
+            mean += delta / n as f64;
+            let delta2 = x - mean;
+            m2 += delta * delta2;
         }
-        n += 1;
-        let delta = x - mean;
-        mean += delta / n as f64;
-        let delta2 = x - mean;
-        m2 += delta * delta2;
-    }
 
-    if n == 0 {
-        // No valid observations: the mean is undefined, not 0.0.
-        return Ok((f64::NAN, f64::NAN, 0));
-    }
-    if n < 2 {
-        return Ok((mean, f64::NAN, n));
-    }
+        if n == 0 {
+            // No valid observations: the mean is undefined, not 0.0.
+            return Ok((f64::NAN, f64::NAN, 0));
+        }
+        if n < 2 {
+            return Ok((mean, f64::NAN, n));
+        }
 
-    let var = m2 / (n as f64 - 1.0);
-    Ok((mean, var, n))
+        let var = m2 / (n as f64 - 1.0);
+        Ok((mean, var, n))
+    })
 }
 
 // ======================
@@ -1874,91 +1994,95 @@ pub fn welford_np(a: PyReadonlyArray1<f64>) -> PyResult<(f64, f64, usize)> {
 // ======================
 
 #[pyfunction]
-pub fn cov_nan_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
+pub fn cov_nan_np(py: Python<'_>, x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
     let xs = x.as_slice()?;
     let ys = y.as_slice()?;
-    if xs.len() != ys.len() {
-        return Err(PyValueError::new_err("length mismatch"));
-    }
-
-    // Skipna: drop pairs where either value is NaN.
-    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
-    let mut count = 0usize;
-    let mut sum_x = 0.0f64;
-    let mut sum_y = 0.0f64;
-    let mut sum_xy = 0.0f64;
-
-    for i in 0..xs.len() {
-        let xi = xs[i];
-        let yi = ys[i];
-        if xi.is_nan() || yi.is_nan() {
-            continue;
+    py.allow_threads(|| {
+        if xs.len() != ys.len() {
+            return Err(PyValueError::new_err("length mismatch"));
         }
-        let xi = xi - ox;
-        let yi = yi - oy;
-        count += 1;
-        sum_x += xi;
-        sum_y += yi;
-        sum_xy += xi * yi;
-    }
 
-    if count < 2 {
-        return Ok(f64::NAN);
-    }
+        // Skipna: drop pairs where either value is NaN.
+        let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
+        let mut count = 0usize;
+        let mut sum_x = 0.0f64;
+        let mut sum_y = 0.0f64;
+        let mut sum_xy = 0.0f64;
 
-    let c = count as f64;
-    let cov = sum_xy - (sum_x * sum_y) / c;
-    Ok(cov / (c - 1.0))
+        for i in 0..xs.len() {
+            let xi = xs[i];
+            let yi = ys[i];
+            if xi.is_nan() || yi.is_nan() {
+                continue;
+            }
+            let xi = xi - ox;
+            let yi = yi - oy;
+            count += 1;
+            sum_x += xi;
+            sum_y += yi;
+            sum_xy += xi * yi;
+        }
+
+        if count < 2 {
+            return Ok(f64::NAN);
+        }
+
+        let c = count as f64;
+        let cov = sum_xy - (sum_x * sum_y) / c;
+        Ok(cov / (c - 1.0))
+    })
 }
 
 #[pyfunction]
-pub fn corr_nan_np(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
+pub fn corr_nan_np(py: Python<'_>, x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
     let xs = x.as_slice()?;
     let ys = y.as_slice()?;
-    if xs.len() != ys.len() {
-        return Err(PyValueError::new_err("length mismatch"));
-    }
-
-    // Skipna: drop pairs where either value is NaN.
-    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
-    let mut count = 0usize;
-    let mut sum_x = 0.0f64;
-    let mut sum_y = 0.0f64;
-    let mut sum_xx = 0.0f64;
-    let mut sum_yy = 0.0f64;
-    let mut sum_xy = 0.0f64;
-
-    for i in 0..xs.len() {
-        let x = xs[i];
-        let y = ys[i];
-        if x.is_nan() || y.is_nan() {
-            continue;
+    py.allow_threads(|| {
+        if xs.len() != ys.len() {
+            return Err(PyValueError::new_err("length mismatch"));
         }
-        let x = x - ox;
-        let y = y - oy;
-        count += 1;
-        sum_x += x;
-        sum_y += y;
-        sum_xx += x * x;
-        sum_yy += y * y;
-        sum_xy += x * y;
-    }
 
-    if count < 2 {
-        return Ok(f64::NAN);
-    }
+        // Skipna: drop pairs where either value is NaN.
+        let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
+        let mut count = 0usize;
+        let mut sum_x = 0.0f64;
+        let mut sum_y = 0.0f64;
+        let mut sum_xx = 0.0f64;
+        let mut sum_yy = 0.0f64;
+        let mut sum_xy = 0.0f64;
 
-    let c = count as f64;
-    let denom = c - 1.0;
+        for i in 0..xs.len() {
+            let x = xs[i];
+            let y = ys[i];
+            if x.is_nan() || y.is_nan() {
+                continue;
+            }
+            let x = x - ox;
+            let y = y - oy;
+            count += 1;
+            sum_x += x;
+            sum_y += y;
+            sum_xx += x * x;
+            sum_yy += y * y;
+            sum_xy += x * y;
+        }
 
-    let cov = (sum_xy - (sum_x * sum_y) / c) / denom;
-    let varx = (sum_xx - (sum_x * sum_x) / c) / denom;
-    let vary = (sum_yy - (sum_y * sum_y) / c) / denom;
+        if count < 2 {
+            return Ok(f64::NAN);
+        }
 
-    if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
-        return Ok(f64::NAN);
-    }
-    Ok((cov / (varx * vary).sqrt()).clamp(-1.0, 1.0))
+        let c = count as f64;
+        let denom = c - 1.0;
+
+        let cov = (sum_xy - (sum_x * sum_y) / c) / denom;
+        let varx = (sum_xx - (sum_x * sum_x) / c) / denom;
+        let vary = (sum_yy - (sum_y * sum_y) / c) / denom;
+
+        if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
+            return Ok(f64::NAN);
+        }
+        Ok((cov / (varx * vary).sqrt()).clamp(-1.0, 1.0))
+    })
 }
 // ======================================================================================
 // Rolling skipna pair-state (used for rolling cov/corr/beta/linreg)
@@ -2059,27 +2183,30 @@ pub fn rolling_cov_nan_np<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out_len = n - window + 1;
-    let mut out = vec![f64::NAN; out_len];
+    let out = py.allow_threads(|| {
+        let out_len = n - window + 1;
+        let mut out = vec![f64::NAN; out_len];
 
-    // init window. NaN pairs are dropped by add_pair; requiring a FULL window
-    // of valid pairs below matches pandas rolling(...).cov's default
-    // min_periods=window (NaN whenever any pair in the window is missing).
-    // Values are shifted by a finite offset for cancellation safety
-    // (covariance is translation-invariant).
-    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
-    let mut st = RollingPairState::default();
-    for i in 0..window {
-        st.add_pair(xs[i] - ox, ys[i] - oy);
-    }
-    out[0] = if st.count == window { st.cov() } else { f64::NAN };
+        // init window. NaN pairs are dropped by add_pair; requiring a FULL window
+        // of valid pairs below matches pandas rolling(...).cov's default
+        // min_periods=window (NaN whenever any pair in the window is missing).
+        // Values are shifted by a finite offset for cancellation safety
+        // (covariance is translation-invariant).
+        let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
+        let mut st = RollingPairState::default();
+        for i in 0..window {
+            st.add_pair(xs[i] - ox, ys[i] - oy);
+        }
+        out[0] = if st.count == window { st.cov() } else { f64::NAN };
 
-    // slide
-    for i in window..n {
-        st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
-        st.add_pair(xs[i] - ox, ys[i] - oy);
-        out[i - window + 1] = if st.count == window { st.cov() } else { f64::NAN };
-    }
+        // slide
+        for i in window..n {
+            st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
+            st.add_pair(xs[i] - ox, ys[i] - oy);
+            out[i - window + 1] = if st.count == window { st.cov() } else { f64::NAN };
+        }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -2103,25 +2230,28 @@ pub fn rolling_corr_nan_np<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out_len = n - window + 1;
-    let mut out = vec![f64::NAN; out_len];
+    let out = py.allow_threads(|| {
+        let out_len = n - window + 1;
+        let mut out = vec![f64::NAN; out_len];
 
-    // init window. Full-window requirement mirrors pandas rolling(...).corr
-    // default min_periods=window (see rolling_cov_nan_np). Values are shifted
-    // by a finite offset for cancellation safety.
-    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
-    let mut st = RollingPairState::default();
-    for i in 0..window {
-        st.add_pair(xs[i] - ox, ys[i] - oy);
-    }
-    out[0] = if st.count == window { st.corr() } else { f64::NAN };
+        // init window. Full-window requirement mirrors pandas rolling(...).corr
+        // default min_periods=window (see rolling_cov_nan_np). Values are shifted
+        // by a finite offset for cancellation safety.
+        let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
+        let mut st = RollingPairState::default();
+        for i in 0..window {
+            st.add_pair(xs[i] - ox, ys[i] - oy);
+        }
+        out[0] = if st.count == window { st.corr() } else { f64::NAN };
 
-    // slide
-    for i in window..n {
-        st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
-        st.add_pair(xs[i] - ox, ys[i] - oy);
-        out[i - window + 1] = if st.count == window { st.corr() } else { f64::NAN };
-    }
+        // slide
+        for i in window..n {
+            st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
+            st.add_pair(xs[i] - ox, ys[i] - oy);
+            out[i - window + 1] = if st.count == window { st.corr() } else { f64::NAN };
+        }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -2132,13 +2262,13 @@ pub fn rolling_corr_nan_np<'py>(
 // --------------------
 
 #[pyfunction]
-pub fn cov_skipna(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    cov_nan_np(x, y)
+pub fn cov_skipna(py: Python<'_>, x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    cov_nan_np(py, x, y)
 }
 
 #[pyfunction]
-pub fn corr_skipna(x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
-    corr_nan_np(x, y)
+pub fn corr_skipna(py: Python<'_>, x: PyReadonlyArray1<f64>, y: PyReadonlyArray1<f64>) -> PyResult<f64> {
+    corr_nan_np(py, x, y)
 }
 
 #[pyfunction]
@@ -2180,26 +2310,29 @@ pub fn rolling_beta_skipna<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out_len = n - window + 1;
-    let mut out = vec![f64::NAN; out_len];
+    let out = py.allow_threads(|| {
+        let out_len = n - window + 1;
+        let mut out = vec![f64::NAN; out_len];
 
-    // Slope (cov/var) is translation-invariant, so shifted accumulation is
-    // exact and avoids catastrophic cancellation on large-offset data.
-    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
-    let mut st = RollingPairState::default();
-    for i in 0..window {
-        st.add_pair(xs[i] - ox, ys[i] - oy);
-    }
-    let varx0 = st.var_x();
-    out[0] = if varx0 <= 0.0 || !varx0.is_finite() { f64::NAN } else { st.cov() / varx0 };
+        // Slope (cov/var) is translation-invariant, so shifted accumulation is
+        // exact and avoids catastrophic cancellation on large-offset data.
+        let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
+        let mut st = RollingPairState::default();
+        for i in 0..window {
+            st.add_pair(xs[i] - ox, ys[i] - oy);
+        }
+        let varx0 = st.var_x();
+        out[0] = if varx0 <= 0.0 || !varx0.is_finite() { f64::NAN } else { st.cov() / varx0 };
 
-    for i in window..n {
-        st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
-        st.add_pair(xs[i] - ox, ys[i] - oy);
+        for i in window..n {
+            st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
+            st.add_pair(xs[i] - ox, ys[i] - oy);
 
-        let varx = st.var_x();
-        out[i - window + 1] = if varx <= 0.0 || !varx.is_finite() { f64::NAN } else { st.cov() / varx };
-    }
+            let varx = st.var_x();
+            out[i - window + 1] = if varx <= 0.0 || !varx.is_finite() { f64::NAN } else { st.cov() / varx };
+        }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -2226,56 +2359,59 @@ pub fn rolling_linreg_skipna<'py>(
         ));
     }
 
-    let out_len = n - window + 1;
-    let mut slope = vec![f64::NAN; out_len];
-    let mut intercept = vec![f64::NAN; out_len];
+    let (slope, intercept) = py.allow_threads(|| {
+        let out_len = n - window + 1;
+        let mut slope = vec![f64::NAN; out_len];
+        let mut intercept = vec![f64::NAN; out_len];
 
-    // Shifted accumulation for cancellation safety. The slope is
-    // translation-invariant; the intercept of the shifted fit is unshifted via
-    // a = a_shifted + oy - b*ox.
-    let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
-    let mut st = RollingPairState::default();
-    for i in 0..window {
-        st.add_pair(xs[i] - ox, ys[i] - oy);
-    }
+        // Shifted accumulation for cancellation safety. The slope is
+        // translation-invariant; the intercept of the shifted fit is unshifted via
+        // a = a_shifted + oy - b*ox.
+        let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
+        let mut st = RollingPairState::default();
+        for i in 0..window {
+            st.add_pair(xs[i] - ox, ys[i] - oy);
+        }
 
-    // window 0
-    if st.count >= 2 {
-        let c = st.count as f64;
-        let denom = c - 1.0;
-        let sxx = (st.sum_xx - (st.sum_x * st.sum_x) / c) / denom; // var_x
-        if sxx > 0.0 && sxx.is_finite() {
-            let sxy = (st.sum_xy - (st.sum_x * st.sum_y) / c) / denom; // cov_xy
+        // window 0
+        if st.count >= 2 {
+            let c = st.count as f64;
+            let denom = c - 1.0;
+            let sxx = (st.sum_xx - (st.sum_x * st.sum_x) / c) / denom; // var_x
+            if sxx > 0.0 && sxx.is_finite() {
+                let sxy = (st.sum_xy - (st.sum_x * st.sum_y) / c) / denom; // cov_xy
+                let b = sxy / sxx;
+                let a = (st.sum_y / c) - b * (st.sum_x / c) + oy - b * ox;
+                slope[0] = b;
+                intercept[0] = a;
+            }
+        }
+
+        // slide
+        for i in window..n {
+            st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
+            st.add_pair(xs[i] - ox, ys[i] - oy);
+
+            let o = i - window + 1;
+            if st.count < 2 {
+                continue;
+            }
+
+            let c = st.count as f64;
+            let denom = c - 1.0;
+            let sxx = (st.sum_xx - (st.sum_x * st.sum_x) / c) / denom;
+            if sxx <= 0.0 || !sxx.is_finite() {
+                continue;
+            }
+            let sxy = (st.sum_xy - (st.sum_x * st.sum_y) / c) / denom;
             let b = sxy / sxx;
             let a = (st.sum_y / c) - b * (st.sum_x / c) + oy - b * ox;
-            slope[0] = b;
-            intercept[0] = a;
+
+            slope[o] = b;
+            intercept[o] = a;
         }
-    }
-
-    // slide
-    for i in window..n {
-        st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
-        st.add_pair(xs[i] - ox, ys[i] - oy);
-
-        let o = i - window + 1;
-        if st.count < 2 {
-            continue;
-        }
-
-        let c = st.count as f64;
-        let denom = c - 1.0;
-        let sxx = (st.sum_xx - (st.sum_x * st.sum_x) / c) / denom;
-        if sxx <= 0.0 || !sxx.is_finite() {
-            continue;
-        }
-        let sxy = (st.sum_xy - (st.sum_x * st.sum_y) / c) / denom;
-        let b = sxy / sxx;
-        let a = (st.sum_y / c) - b * (st.sum_x / c) + oy - b * ox;
-
-        slope[o] = b;
-        intercept[o] = a;
-    }
+        (slope, intercept)
+    });
 
     Ok((
         PyArray1::from_vec_bound(py, slope),
@@ -2310,69 +2446,72 @@ fn kde_gaussian_np<'py>(
     bandwidth: Option<f64>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
     let xs = x.as_slice()?;
-    let n = xs.len();
+    let (grid, density) = py.allow_threads(|| -> PyResult<_> {
+        let n = xs.len();
 
-    if points == 0 {
-        return Err(PyValueError::new_err("points must be >= 1"));
-    }
-    if n == 0 {
-        return Err(PyValueError::new_err("x must have at least 1 element"));
-    }
-    if xs.iter().any(|v| !v.is_finite()) {
-        return Err(PyValueError::new_err("x contains NaN or Inf"));
-    }
-    if let Some(h) = bandwidth {
-        if !(h > 0.0) || !h.is_finite() {
-            return Err(PyValueError::new_err("bandwidth must be a positive finite number"));
+        if points == 0 {
+            return Err(PyValueError::new_err("points must be >= 1"));
         }
-    }
-
-    let h = match bandwidth {
-        Some(h) => h,
-        None => {
-            let s = std_slice(xs);
-            if !(s > 0.0) || !s.is_finite() {
-                return Err(PyValueError::new_err(
-                    "cannot infer a bandwidth from constant or singleton data; pass bandwidth explicitly",
-                ));
+        if n == 0 {
+            return Err(PyValueError::new_err("x must have at least 1 element"));
+        }
+        if xs.iter().any(|v| !v.is_finite()) {
+            return Err(PyValueError::new_err("x contains NaN or Inf"));
+        }
+        if let Some(h) = bandwidth {
+            if !(h > 0.0) || !h.is_finite() {
+                return Err(PyValueError::new_err("bandwidth must be a positive finite number"));
             }
-            (n as f64).powf(-0.2) * s
         }
-    };
 
-    let mut mn = xs[0];
-    let mut mx = xs[0];
-    for &v in &xs[1..] {
-        if v < mn {
-            mn = v;
-        }
-        if v > mx {
-            mx = v;
-        }
-    }
-    let lo = mn - 3.0 * h;
-    let hi = mx + 3.0 * h;
-
-    let grid: Vec<f64> = if points == 1 {
-        vec![0.5 * (lo + hi)]
-    } else {
-        let step = (hi - lo) / ((points - 1) as f64);
-        (0..points).map(|i| lo + step * (i as f64)).collect()
-    };
-
-    let inv_h = 1.0 / h;
-    let norm = 1.0 / ((n as f64) * h * (2.0 * std::f64::consts::PI).sqrt());
-    let density: Vec<f64> = grid
-        .iter()
-        .map(|&g| {
-            let mut acc = 0.0f64;
-            for &xi in xs {
-                let z = (g - xi) * inv_h;
-                acc += (-0.5 * z * z).exp();
+        let h = match bandwidth {
+            Some(h) => h,
+            None => {
+                let s = std_slice(xs);
+                if !(s > 0.0) || !s.is_finite() {
+                    return Err(PyValueError::new_err(
+                        "cannot infer a bandwidth from constant or singleton data; pass bandwidth explicitly",
+                    ));
+                }
+                (n as f64).powf(-0.2) * s
             }
-            acc * norm
-        })
-        .collect();
+        };
+
+        let mut mn = xs[0];
+        let mut mx = xs[0];
+        for &v in &xs[1..] {
+            if v < mn {
+                mn = v;
+            }
+            if v > mx {
+                mx = v;
+            }
+        }
+        let lo = mn - 3.0 * h;
+        let hi = mx + 3.0 * h;
+
+        let grid: Vec<f64> = if points == 1 {
+            vec![0.5 * (lo + hi)]
+        } else {
+            let step = (hi - lo) / ((points - 1) as f64);
+            (0..points).map(|i| lo + step * (i as f64)).collect()
+        };
+
+        let inv_h = 1.0 / h;
+        let norm = 1.0 / ((n as f64) * h * (2.0 * std::f64::consts::PI).sqrt());
+        let density: Vec<f64> = grid
+            .iter()
+            .map(|&g| {
+                let mut acc = 0.0f64;
+                for &xi in xs {
+                    let z = (g - xi) * inv_h;
+                    acc += (-0.5 * z * z).exp();
+                }
+                acc * norm
+            })
+            .collect();
+        Ok((grid, density))
+    })?;
 
     Ok((
         PyArray1::from_vec_bound(py, grid),
@@ -2386,23 +2525,25 @@ fn kde_gaussian_np<'py>(
 
 #[pyfunction(signature = (x, y, pooled=None))]
 fn hedges_g_2samp_np(
+    py: Python<'_>,
     x: PyReadonlyArray1<f64>,
     y: PyReadonlyArray1<f64>,
     pooled: Option<bool>,
 ) -> PyResult<f64> {
     // Public API: defaults to pooled variance
     let pooled = pooled.unwrap_or(true);
-    infer::effect::hedges_g_2samp_np2(x, y, pooled)
+    infer::effect::hedges_g_2samp_np2(py, x, y, pooled)
 }
 
 #[pyfunction]
 fn hedges_g_2samp_raw_np(
+    py: Python<'_>,
     x: PyReadonlyArray1<f64>,
     y: PyReadonlyArray1<f64>,
     pooled: bool,
 ) -> PyResult<f64> {
     // Raw API: explicit pooled flag, no defaults
-    infer::effect::hedges_g_2samp_np2(x, y, pooled)
+    infer::effect::hedges_g_2samp_np2(py, x, y, pooled)
 }
 // ======================
 // Module definition
@@ -2452,44 +2593,47 @@ pub fn unif_cumhazard(py: Python<'_>, x: PyReadonlyArray1<f64>, a: f64, b: f64) 
     }
 
     let xs = x.as_slice()?;
-    let n = xs.len();
-    let mut out = Vec::with_capacity(n);
+    let out = py.allow_threads(|| {
+        let n = xs.len();
+        let mut out = Vec::with_capacity(n);
 
-    let width = b - a;
+        let width = b - a;
 
-    // Precompute a "clamped" tail value for x > b (finite, huge).
-    let b_prev = next_down(b);
-    // If b_prev collapsed below a (pathological), fall back to +inf.
-    let tail_val = if b_prev > a {
-        let sf_tail = (b - b_prev) / width; // tiny positive
-        // sf_tail should be > 0, but be defensive.
-        if sf_tail > 0.0 {
-            -sf_tail.ln()
+        // Precompute a "clamped" tail value for x > b (finite, huge).
+        let b_prev = next_down(b);
+        // If b_prev collapsed below a (pathological), fall back to +inf.
+        let tail_val = if b_prev > a {
+            let sf_tail = (b - b_prev) / width; // tiny positive
+            // sf_tail should be > 0, but be defensive.
+            if sf_tail > 0.0 {
+                -sf_tail.ln()
+            } else {
+                f64::INFINITY
+            }
         } else {
             f64::INFINITY
-        }
-    } else {
-        f64::INFINITY
-    };
+        };
 
-    for &xi in xs {
-        if xi.is_nan() {
-            out.push(f64::NAN);
-        } else if xi < a {
-            out.push(0.0);
-        } else if xi < b {
-            let sf = (b - xi) / width;
-            if sf <= 0.0 {
+        for &xi in xs {
+            if xi.is_nan() {
+                out.push(f64::NAN);
+            } else if xi < a {
+                out.push(0.0);
+            } else if xi < b {
+                let sf = (b - xi) / width;
+                if sf <= 0.0 {
+                    out.push(f64::INFINITY);
+                } else {
+                    out.push(-sf.ln());
+                }
+            } else if xi == b {
                 out.push(f64::INFINITY);
             } else {
-                out.push(-sf.ln());
+                out.push(tail_val);
             }
-        } else if xi == b {
-            out.push(f64::INFINITY);
-        } else {
-            out.push(tail_val);
         }
-    }
+        out
+    });
 
     Ok(out.into_pyarray_bound(py).unbind())
 }
@@ -2550,37 +2694,41 @@ fn rolling_multi_np<'py>(
     stats: Option<Vec<String>>,
 ) -> PyResult<Py<PyAny>> {
     let xs = x.as_slice()?;
-    let n = xs.len();
+    let (stats, out_mean, out_std, out_var, out_count, out_min, out_max) = py.allow_threads(|| -> PyResult<_> {
+        let n = xs.len();
     
-    // Parse config
-    let align = parse_alignment(alignment)?;
-    let nan_pol = parse_nan_policy(nan_policy)?;
-    let config = RollingConfig::new(window, min_periods, align, nan_pol)
-        .map_err(|e| PyErr::new::<PyValueError, _>(e))?;
+        // Parse config
+        let align = parse_alignment(alignment)?;
+        let nan_pol = parse_nan_policy(nan_policy)?;
+        let config = RollingConfig::new(window, min_periods, align, nan_pol)
+            .map_err(|e| PyErr::new::<PyValueError, _>(e))?;
     
-    // Parse stats mask
-    let stats = stats.unwrap_or_else(|| vec!["mean".to_string()]);
-    let stats_str = stats.join(",");
-    let mask = StatsMask::from_str_list(&stats_str)
-        .map_err(|e| PyErr::new::<PyValueError, _>(e))?;
+        // Parse stats mask
+        let stats = stats.unwrap_or_else(|| vec!["mean".to_string()]);
+        let stats_str = stats.join(",");
+        let mask = StatsMask::from_str_list(&stats_str)
+            .map_err(|e| PyErr::new::<PyValueError, _>(e))?;
     
-    let out_len = output_length(n, window, align);
+        let out_len = output_length(n, window, align);
     
-    // Allocate outputs - only if out_len > 0
-    let mut out_mean = if mask.has_mean() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
-    let mut out_std = if mask.has_std() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
-    let mut out_var = if mask.has_var() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
-    let mut out_count = if mask.has_count() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
-    let mut out_min = if mask.has_min() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
-    let mut out_max = if mask.has_max() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+        // Allocate outputs - only if out_len > 0
+        let mut out_mean = if mask.has_mean() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+        let mut out_std = if mask.has_std() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+        let mut out_var = if mask.has_var() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+        let mut out_count = if mask.has_count() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+        let mut out_min = if mask.has_min() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+        let mut out_max = if mask.has_max() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
     
-    // Compute
-    rolling_multi_into(
-        xs, &config, mask,
-        &mut out_mean, &mut out_std, &mut out_var,
-        &mut out_count, &mut out_min, &mut out_max,
-    );
+        // Compute
+        rolling_multi_into(
+            xs, &config, mask,
+            &mut out_mean, &mut out_std, &mut out_var,
+            &mut out_count, &mut out_min, &mut out_max,
+        );
     
+        Ok((stats, out_mean, out_std, out_var, out_count, out_min, out_max))
+    })?;
+
     // Build result tuple in requested order
     let mut results = Vec::new();
     for stat in &stats {
@@ -2630,35 +2778,39 @@ fn rolling_multi_axis0_np<'py>(
         .ok_or_else(|| PyErr::new::<PyValueError, _>("Array must be contiguous"))?;
     
     // Parse config
-    let align = parse_alignment(alignment)?;
-    let nan_pol = parse_nan_policy(nan_policy)?;
-    let config = RollingConfig::new(window, min_periods, align, nan_pol)
-        .map_err(|e| PyErr::new::<PyValueError, _>(e))?;
+    let (stats, out_mean, out_std, out_var, out_count, out_min, out_max) = py.allow_threads(|| -> PyResult<_> {
+        let align = parse_alignment(alignment)?;
+        let nan_pol = parse_nan_policy(nan_policy)?;
+        let config = RollingConfig::new(window, min_periods, align, nan_pol)
+            .map_err(|e| PyErr::new::<PyValueError, _>(e))?;
     
-    // Parse stats mask
-    let stats = stats.unwrap_or_else(|| vec!["mean".to_string()]);
-    let stats_str = stats.join(",");
-    let mask = StatsMask::from_str_list(&stats_str)
-        .map_err(|e| PyErr::new::<PyValueError, _>(e))?;
+        // Parse stats mask
+        let stats = stats.unwrap_or_else(|| vec!["mean".to_string()]);
+        let stats_str = stats.join(",");
+        let mask = StatsMask::from_str_list(&stats_str)
+            .map_err(|e| PyErr::new::<PyValueError, _>(e))?;
     
-    let out_rows = output_length(n_rows, window, align);
-    let out_len = out_rows * n_cols;
+        let out_rows = output_length(n_rows, window, align);
+        let out_len = out_rows * n_cols;
     
-    // Allocate outputs - only if out_len > 0
-    let mut out_mean = if mask.has_mean() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
-    let mut out_std = if mask.has_std() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
-    let mut out_var = if mask.has_var() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
-    let mut out_count = if mask.has_count() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
-    let mut out_min = if mask.has_min() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
-    let mut out_max = if mask.has_max() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+        // Allocate outputs - only if out_len > 0
+        let mut out_mean = if mask.has_mean() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+        let mut out_std = if mask.has_std() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+        let mut out_var = if mask.has_var() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+        let mut out_count = if mask.has_count() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+        let mut out_min = if mask.has_min() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
+        let mut out_max = if mask.has_max() && out_len > 0 { vec![0.0; out_len] } else { Vec::new() };
     
-    // Compute
-    rolling_multi_axis0_into(
-        data, n_rows, n_cols, &config, mask,
-        &mut out_mean, &mut out_std, &mut out_var,
-        &mut out_count, &mut out_min, &mut out_max,
-    );
+        // Compute
+        rolling_multi_axis0_into(
+            data, n_rows, n_cols, &config, mask,
+            &mut out_mean, &mut out_std, &mut out_var,
+            &mut out_count, &mut out_min, &mut out_max,
+        );
     
+        Ok((stats, out_mean, out_std, out_var, out_count, out_min, out_max))
+    })?;
+
     // Build result tuple
     let mut results = Vec::new();
     for stat in &stats {

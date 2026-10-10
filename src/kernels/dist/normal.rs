@@ -78,20 +78,23 @@ pub fn norm_pdf<'py>(
         return Err(PyValueError::new_err("sigma must be positive"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let inv_sigma = 1.0 / sigma;
-    let norm_const = inv_sigma / libm::sqrt(2.0 * std::f64::consts::PI);
+        let inv_sigma = 1.0 / sigma;
+        let norm_const = inv_sigma / libm::sqrt(2.0 * std::f64::consts::PI);
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        if v.is_nan() {
-            out[i] = f64::NAN;
-            continue;
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            if v.is_nan() {
+                out[i] = f64::NAN;
+                continue;
+            }
+            let z = (v - mu) * inv_sigma;
+            out[i] = norm_const * libm::exp(-0.5 * z * z);
         }
-        let z = (v - mu) * inv_sigma;
-        out[i] = norm_const * libm::exp(-0.5 * z * z);
-    }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -110,20 +113,23 @@ pub fn norm_logpdf<'py>(
         return Err(PyValueError::new_err("sigma must be positive"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let inv_sigma = 1.0 / sigma;
-    let log_sigma = libm::log(sigma);
+        let inv_sigma = 1.0 / sigma;
+        let log_sigma = libm::log(sigma);
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        if v.is_nan() {
-            out[i] = f64::NAN;
-            continue;
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            if v.is_nan() {
+                out[i] = f64::NAN;
+                continue;
+            }
+            let z = (v - mu) * inv_sigma;
+            out[i] = -0.5 * LN_2PI - log_sigma - 0.5 * z * z;
         }
-        let z = (v - mu) * inv_sigma;
-        out[i] = -0.5 * LN_2PI - log_sigma - 0.5 * z * z;
-    }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -144,12 +150,15 @@ pub fn norm_cdf<'py>(
         return Err(PyValueError::new_err("sigma must be positive"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        out[i] = norm_cdf_scalar(v, mu, sigma);
-    }
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            out[i] = norm_cdf_scalar(v, mu, sigma);
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -170,12 +179,15 @@ pub fn norm_sf<'py>(
         return Err(PyValueError::new_err("sigma must be positive"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        out[i] = norm_sf_scalar(v, mu, sigma);
-    }
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            out[i] = norm_sf_scalar(v, mu, sigma);
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -196,12 +208,15 @@ pub fn norm_logsf<'py>(
         return Err(PyValueError::new_err("sigma must be positive"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        out[i] = norm_logsf_scalar(v, mu, sigma);
-    }
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            out[i] = norm_logsf_scalar(v, mu, sigma);
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -220,21 +235,24 @@ pub fn norm_cumhazard<'py>(
         return Err(PyValueError::new_err("sigma must be positive"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        if v.is_nan() {
-            out[i] = f64::NAN;
-            continue;
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            if v.is_nan() {
+                out[i] = f64::NAN;
+                continue;
+            }
+            let sf = norm_sf_scalar(v, mu, sigma);
+            out[i] = if sf <= 0.0 {
+                f64::INFINITY
+            } else {
+                -libm::log(sf)
+            };
         }
-        let sf = norm_sf_scalar(v, mu, sigma);
-        out[i] = if sf <= 0.0 {
-            f64::INFINITY
-        } else {
-            -libm::log(sf)
-        };
-    }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -258,37 +276,40 @@ pub fn norm_ppf<'py>(
     let q = q.as_slice()?;
 
     // Strict range check like SciPy - validates before any computation
-    for &p in q {
-        if p.is_nan() {
-            continue;
+    let out = py.allow_threads(|| -> PyResult<_> {
+        for &p in q {
+            if p.is_nan() {
+                continue;
+            }
+            if !(0.0..=1.0).contains(&p) {
+                return Err(PyValueError::new_err("q values must be in [0, 1]"));
+            }
         }
-        if !(0.0..=1.0).contains(&p) {
-            return Err(PyValueError::new_err("q values must be in [0, 1]"));
+
+        let n = q.len();
+        let mut out = vec![0.0_f64; n];
+
+        // Use statrs for inverse but handle special cases explicitly
+        use statrs::distribution::{ContinuousCDF, Normal};
+        let dist = Normal::new(mu, sigma)
+            .map_err(|e| PyValueError::new_err(format!("Invalid normal params: {e}")))?;
+
+        for (i, &p) in q.iter().enumerate() {
+            if p.is_nan() {
+                // NaN input -> NaN output (prevents crashes)
+                out[i] = f64::NAN;
+            } else if p == 0.0 {
+                // q=0 -> -inf (explicit to avoid statrs edge case)
+                out[i] = f64::NEG_INFINITY;
+            } else if p == 1.0 {
+                // q=1 -> +inf (explicit to avoid statrs edge case)
+                out[i] = f64::INFINITY;
+            } else {
+                // Safe to call inverse_cdf - we've validated range
+                out[i] = dist.inverse_cdf(p);
+            }
         }
-    }
-
-    let n = q.len();
-    let mut out = vec![0.0_f64; n];
-
-    // Use statrs for inverse but handle special cases explicitly
-    use statrs::distribution::{ContinuousCDF, Normal};
-    let dist = Normal::new(mu, sigma)
-        .map_err(|e| PyValueError::new_err(format!("Invalid normal params: {e}")))?;
-
-    for (i, &p) in q.iter().enumerate() {
-        if p.is_nan() {
-            // NaN input -> NaN output (prevents crashes)
-            out[i] = f64::NAN;
-        } else if p == 0.0 {
-            // q=0 -> -inf (explicit to avoid statrs edge case)
-            out[i] = f64::NEG_INFINITY;
-        } else if p == 1.0 {
-            // q=1 -> +inf (explicit to avoid statrs edge case)
-            out[i] = f64::INFINITY;
-        } else {
-            // Safe to call inverse_cdf - we've validated range
-            out[i] = dist.inverse_cdf(p);
-        }
-    }
+        Ok(out)
+    })?;
     Ok(PyArray1::from_vec_bound(py, out))
 }

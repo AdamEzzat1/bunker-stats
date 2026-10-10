@@ -96,12 +96,13 @@ impl RobustStats {
     /// Zero string operations - uses pre-built enum config.
     fn fit<'py>(
         &self,
-        _py: Python<'py>,
+        py: Python<'py>,
         x: PyReadonlyArray1<f64>,
     ) -> PyResult<(f64, f64)> {
         let data = x.as_slice()?;
+        let config = &self.config;
         // FAST: No parsing, direct enum dispatch (Optimization #4)
-        Ok(robust_fit_slice(data, &self.config))
+        Ok(py.allow_threads(|| robust_fit_slice(data, config)))
     }
 
     /// Compute robust z-scores - OPTIMIZED
@@ -114,7 +115,8 @@ impl RobustStats {
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let data = x.as_slice()?;
         // FAST: No parsing, direct enum dispatch (Optimization #4)
-        let scores = robust_score_slice(data, &self.config);
+        let config = &self.config;
+        let scores = py.allow_threads(|| robust_score_slice(data, config));
         Ok(PyArray1::from_vec_bound(py, scores))
     }
 
@@ -179,6 +181,7 @@ fn parse_scale_policy(scale: &str, mad_consistent: bool) -> PyResult<ScalePolicy
 #[pyfunction]
 #[pyo3(signature = (x, location="median", scale="mad", c=1.345, trim=0.1, max_iter=50, tol=1e-6, mad_consistent=true))]
 pub fn robust_fit(
+    py: Python<'_>,
     x: PyReadonlyArray1<f64>,
     location: &str,
     scale: &str,
@@ -191,17 +194,19 @@ pub fn robust_fit(
     let data = x.as_slice()?;
     
     // Parse once, then dispatch
-    let location_policy = parse_location_policy(
-        location, scale, c, trim, max_iter, tol, mad_consistent
-    )?;
-    let scale_policy = parse_scale_policy(scale, mad_consistent)?;
+    py.allow_threads(|| {
+        let location_policy = parse_location_policy(
+            location, scale, c, trim, max_iter, tol, mad_consistent
+        )?;
+        let scale_policy = parse_scale_policy(scale, mad_consistent)?;
     
-    let config = RobustConfig {
-        location: location_policy,
-        scale: scale_policy,
-    };
+        let config = RobustConfig {
+            location: location_policy,
+            scale: scale_policy,
+        };
     
-    Ok(robust_fit_slice(data, &config))
+        Ok(robust_fit_slice(data, &config))
+    })
 }
 
 /// Compute robust z-scores - OPTIMIZED
@@ -221,17 +226,20 @@ pub fn robust_score<'py>(
     let data = x.as_slice()?;
     
     // Parse once, then dispatch
-    let location_policy = parse_location_policy(
-        location, scale, c, trim, max_iter, tol, mad_consistent
-    )?;
-    let scale_policy = parse_scale_policy(scale, mad_consistent)?;
+    let scores = py.allow_threads(|| -> PyResult<_> {
+        let location_policy = parse_location_policy(
+            location, scale, c, trim, max_iter, tol, mad_consistent
+        )?;
+        let scale_policy = parse_scale_policy(scale, mad_consistent)?;
     
-    let config = RobustConfig {
-        location: location_policy,
-        scale: scale_policy,
-    };
+        let config = RobustConfig {
+            location: location_policy,
+            scale: scale_policy,
+        };
     
-    let scores = robust_score_slice(data, &config);
+        let scores = robust_score_slice(data, &config);
+        Ok(scores)
+    })?;
     Ok(PyArray1::from_vec_bound(py, scores))
 }
 
@@ -243,6 +251,9 @@ pub fn rolling_median<'py>(
     window: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let data = x.as_slice()?;
-    let result = super::rolling::rolling_median(data, window);
+    let result = py.allow_threads(|| {
+        let result = super::rolling::rolling_median(data, window);
+        result
+    });
     Ok(PyArray1::from_vec_bound(py, result))
 }

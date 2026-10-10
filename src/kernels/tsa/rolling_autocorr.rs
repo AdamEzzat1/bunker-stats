@@ -101,39 +101,42 @@ pub fn rolling_correlation<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out_len = n - window + 1;
-    let mut out = Vec::with_capacity(out_len);
+    let out = py.allow_threads(|| {
+        let out_len = n - window + 1;
+        let mut out = Vec::with_capacity(out_len);
 
-    for start in 0..=n - window {
-        let x_slice = &x_data[start..start + window];
-        let y_slice = &y_data[start..start + window];
+        for start in 0..=n - window {
+            let x_slice = &x_data[start..start + window];
+            let y_slice = &y_data[start..start + window];
 
-        let w_f = window as f64;
+            let w_f = window as f64;
         
-        // Calculate means
-        let mean_x = x_slice.iter().copied().sum::<f64>() / w_f;
-        let mean_y = y_slice.iter().copied().sum::<f64>() / w_f;
+            // Calculate means
+            let mean_x = x_slice.iter().copied().sum::<f64>() / w_f;
+            let mean_y = y_slice.iter().copied().sum::<f64>() / w_f;
 
-        // Calculate covariance and variances
-        let mut cov = 0.0;
-        let mut var_x = 0.0;
-        let mut var_y = 0.0;
+            // Calculate covariance and variances
+            let mut cov = 0.0;
+            let mut var_x = 0.0;
+            let mut var_y = 0.0;
         
-        for i in 0..window {
-            let dx = x_slice[i] - mean_x;
-            let dy = y_slice[i] - mean_y;
-            cov += dx * dy;
-            var_x += dx * dx;
-            var_y += dy * dy;
+            for i in 0..window {
+                let dx = x_slice[i] - mean_x;
+                let dy = y_slice[i] - mean_y;
+                cov += dx * dy;
+                var_x += dx * dx;
+                var_y += dy * dy;
+            }
+        
+            let denom = (var_x * var_y).sqrt();
+            if denom <= 0.0 {
+                out.push(f64::NAN);
+            } else {
+                out.push(cov / denom);
+            }
         }
-        
-        let denom = (var_x * var_y).sqrt();
-        if denom <= 0.0 {
-            out.push(f64::NAN);
-        } else {
-            out.push(cov / denom);
-        }
-    }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -172,47 +175,50 @@ pub fn rolling_autocorr_multi<'py>(
         return Ok(arr.into_pyarray_bound(py));
     }
 
-    let out_len = n - window + 1;
-    let n_lags = lags.len();
-    let mut out = vec![0.0; out_len * n_lags];
+    let arr = py.allow_threads(|| -> PyResult<_> {
+        let out_len = n - window + 1;
+        let n_lags = lags.len();
+        let mut out = vec![0.0; out_len * n_lags];
 
-    for start in 0..=n - window {
-        let slice = &data[start..start + window];
-        let w_f = window as f64;
-        let mean = slice.iter().copied().sum::<f64>() / w_f;
+        for start in 0..=n - window {
+            let slice = &data[start..start + window];
+            let w_f = window as f64;
+            let mean = slice.iter().copied().sum::<f64>() / w_f;
 
-        let mut denom = 0.0;
-        for &v in slice {
-            let d = v - mean;
-            denom += d * d;
-        }
+            let mut denom = 0.0;
+            for &v in slice {
+                let d = v - mean;
+                denom += d * d;
+            }
         
-        // Calculate autocorrelation for each lag
-        for (lag_idx, &lag) in lags.iter().enumerate() {
-            let val = if denom <= 0.0 {
-                f64::NAN
-            } else {
-                let mut numer = 0.0;
-                for i in lag..window {
-                    let a = slice[i] - mean;
-                    let b = slice[i - lag] - mean;
-                    numer += a * b;
-                }
-                numer / denom
-            };
+            // Calculate autocorrelation for each lag
+            for (lag_idx, &lag) in lags.iter().enumerate() {
+                let val = if denom <= 0.0 {
+                    f64::NAN
+                } else {
+                    let mut numer = 0.0;
+                    for i in lag..window {
+                        let a = slice[i] - mean;
+                        let b = slice[i - lag] - mean;
+                        numer += a * b;
+                    }
+                    numer / denom
+                };
             
-            // Store ROW-major: from_shape_vec((out_len, n_lags), ..) below reads
-            // C-order, so the flat index must be row*n_lags + col. The previous
-            // column-major write (start + lag_idx*out_len) scrambled the output
-            // whenever more than one lag was requested (single-lag calls happen
-            // to coincide, which is why they looked correct).
-            out[start * n_lags + lag_idx] = val;
+                // Store ROW-major: from_shape_vec((out_len, n_lags), ..) below reads
+                // C-order, so the flat index must be row*n_lags + col. The previous
+                // column-major write (start + lag_idx*out_len) scrambled the output
+                // whenever more than one lag was requested (single-lag calls happen
+                // to coincide, which is why they looked correct).
+                out[start * n_lags + lag_idx] = val;
+            }
         }
-    }
 
-    // Convert to 2D array (shape: [out_len, n_lags])
+        // Convert to 2D array (shape: [out_len, n_lags])
+        let arr = numpy::ndarray::Array2::from_shape_vec((out_len, n_lags), out)
+            .map_err(|e| PyValueError::new_err(format!("shape error: {e}")))?;
+        Ok(arr)
+    })?;
     use numpy::IntoPyArray;
-    let arr = numpy::ndarray::Array2::from_shape_vec((out_len, n_lags), out)
-        .map_err(|e| PyValueError::new_err(format!("shape error: {e}")))?;
     Ok(arr.into_pyarray_bound(py))
 }

@@ -150,16 +150,18 @@ fn df_ols(x: &[f64], reg: &str, p: usize) -> Option<(f64, f64, f64, Vec<f64>, us
 /// Both arguments are now honored (previously ignored). Returns (t_stat, p_value)
 /// with p-values from the Dickey-Fuller distribution matching the specification.
 #[pyfunction(signature = (x, regression="c", max_lag=None))]
-pub fn adf_test(x: PyReadonlyArray1<f64>, regression: &str, max_lag: Option<usize>) -> PyResult<(f64, f64)> {
+pub fn adf_test(py: Python<'_>, x: PyReadonlyArray1<f64>, regression: &str, max_lag: Option<usize>) -> PyResult<(f64, f64)> {
     let x = x.as_slice()?;
-    let n = x.len();
-    let reg = normalize_reg(regression)?;
-    let p = max_lag.unwrap_or(0);
+    py.allow_threads(|| {
+        let n = x.len();
+        let reg = normalize_reg(regression)?;
+        let p = max_lag.unwrap_or(0);
 
-    match df_ols(x, reg, p) {
-        Some((t_stat, _, _, _, _, _, _)) => Ok((t_stat, df_pvalue(t_stat, n, reg))),
-        None => Ok((f64::NAN, f64::NAN)),
-    }
+        match df_ols(x, reg, p) {
+            Some((t_stat, _, _, _, _, _, _)) => Ok((t_stat, df_pvalue(t_stat, n, reg))),
+            None => Ok((f64::NAN, f64::NAN)),
+        }
+    })
 }
 
 /// Calculate KPSS p-value using critical value tables
@@ -299,97 +301,100 @@ fn long_run_variance(resid: &[f64], max_lag: Option<usize>) -> f64 {
 ///     kpss_test(x, regression="c", max_lag=None) -> (statistic, pvalue)
 #[pyfunction(signature = (x, regression="c", max_lag=None))]
 pub fn kpss_test(
+    py: Python<'_>,
     x: PyReadonlyArray1<f64>,
     regression: &str,
     max_lag: Option<usize>,
 ) -> PyResult<(f64, f64)> {
     let x = x.as_slice()?;
-    let n = x.len();
+    py.allow_threads(|| {
+        let n = x.len();
 
-    if n < 3 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-
-    let (resid, _) = match regression {
-        "c" => {
-            // Level stationarity: y_t = μ + e_t
-            // OPTIMIZATION: Single-pass mean
-            let mean = x.iter().sum::<f64>() / (n as f64);
-            (x.iter().map(|v| v - mean).collect::<Vec<f64>>(), 1)
+        if n < 3 {
+            return Ok((f64::NAN, f64::NAN));
         }
-        "ct" => {
-            // Trend stationarity: y_t = μ + β t + e_t
-            // OPTIMIZATION: Build XtX and XtY in single pass
-            let mut xtx = [[0.0_f64; 2]; 2];
-            let mut xty = [0.0_f64; 2];
-            
-            for (i, &v) in x.iter().enumerate() {
-                let t = (i + 1) as f64;
-                xtx[0][0] += 1.0;
-                xtx[0][1] += t;
-                xtx[1][0] += t;
-                xtx[1][1] += t * t;
-                xty[0] += v;
-                xty[1] += v * t;
-            }
-            
-            let det = xtx[0][0] * xtx[1][1] - xtx[0][1] * xtx[1][0];
-            if det.abs() < 1e-12 {
-                return Ok((f64::NAN, f64::NAN));
-            }
-            
-            let inv00 = xtx[1][1] / det;
-            let inv01 = -xtx[0][1] / det;
-            let inv10 = -xtx[1][0] / det;
-            let inv11 = xtx[0][0] / det;
-            
-            let mu = inv00 * xty[0] + inv01 * xty[1];
-            let beta = inv10 * xty[0] + inv11 * xty[1];
 
-            let resid: Vec<f64> = x.iter().enumerate()
-                .map(|(i, &v)| {
+        let (resid, _) = match regression {
+            "c" => {
+                // Level stationarity: y_t = μ + e_t
+                // OPTIMIZATION: Single-pass mean
+                let mean = x.iter().sum::<f64>() / (n as f64);
+                (x.iter().map(|v| v - mean).collect::<Vec<f64>>(), 1)
+            }
+            "ct" => {
+                // Trend stationarity: y_t = μ + β t + e_t
+                // OPTIMIZATION: Build XtX and XtY in single pass
+                let mut xtx = [[0.0_f64; 2]; 2];
+                let mut xty = [0.0_f64; 2];
+            
+                for (i, &v) in x.iter().enumerate() {
                     let t = (i + 1) as f64;
-                    v - (mu + beta * t)
-                })
-                .collect();
+                    xtx[0][0] += 1.0;
+                    xtx[0][1] += t;
+                    xtx[1][0] += t;
+                    xtx[1][1] += t * t;
+                    xty[0] += v;
+                    xty[1] += v * t;
+                }
             
-            (resid, 2)
+                let det = xtx[0][0] * xtx[1][1] - xtx[0][1] * xtx[1][0];
+                if det.abs() < 1e-12 {
+                    return Ok((f64::NAN, f64::NAN));
+                }
+            
+                let inv00 = xtx[1][1] / det;
+                let inv01 = -xtx[0][1] / det;
+                let inv10 = -xtx[1][0] / det;
+                let inv11 = xtx[0][0] / det;
+            
+                let mu = inv00 * xty[0] + inv01 * xty[1];
+                let beta = inv10 * xty[0] + inv11 * xty[1];
+
+                let resid: Vec<f64> = x.iter().enumerate()
+                    .map(|(i, &v)| {
+                        let t = (i + 1) as f64;
+                        v - (mu + beta * t)
+                    })
+                    .collect();
+            
+                (resid, 2)
+            }
+            _ => {
+                return Err(PyValueError::new_err(
+                    "regression must be 'c' or 'ct'",
+                ));
+            }
+        };
+
+        // Cumulative sum of residuals
+        let mut s = Vec::with_capacity(n);
+        let mut cum = 0.0;
+        for &e in &resid {
+            cum += e;
+            s.push(cum);
         }
-        _ => {
-            return Err(PyValueError::new_err(
-                "regression must be 'c' or 'ct'",
-            ));
+
+        // Bandwidth: user-supplied, else the Hobijn data-dependent rule
+        // (statsmodels `nlags="auto"`, its default).
+        let nlags = match max_lag {
+            Some(v) => v.min(n - 1),
+            None => kpss_autolag(&resid),
+        };
+        let lrv = long_run_variance(&resid, Some(nlags));
+
+        if !lrv.is_finite() || lrv <= 0.0 {
+            return Ok((f64::NAN, f64::NAN));
         }
-    };
 
-    // Cumulative sum of residuals
-    let mut s = Vec::with_capacity(n);
-    let mut cum = 0.0;
-    for &e in &resid {
-        cum += e;
-        s.push(cum);
-    }
+        // KPSS statistic
+        let n_f = n as f64;
+        let eta: f64 = s.iter().map(|v| v * v).sum();
+        let stat = eta / (n_f * n_f * lrv);
 
-    // Bandwidth: user-supplied, else the Hobijn data-dependent rule
-    // (statsmodels `nlags="auto"`, its default).
-    let nlags = match max_lag {
-        Some(v) => v.min(n - 1),
-        None => kpss_autolag(&resid),
-    };
-    let lrv = long_run_variance(&resid, Some(nlags));
+        let p_val = kpss_pvalue(stat, regression);
 
-    if !lrv.is_finite() || lrv <= 0.0 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-
-    // KPSS statistic
-    let n_f = n as f64;
-    let eta: f64 = s.iter().map(|v| v * v).sum();
-    let stat = eta / (n_f * n_f * lrv);
-
-    let p_val = kpss_pvalue(stat, regression);
-
-    Ok((stat, p_val))
+        Ok((stat, p_val))
+    })
 }
 
 /// Phillips–Perron (PP) test (simplified).
@@ -398,36 +403,38 @@ pub fn kpss_test(
 /// Python signature:
 ///     pp_test(x, regression="c") -> (statistic, pvalue)
 #[pyfunction(signature = (x, regression="c"))]
-pub fn pp_test(x: PyReadonlyArray1<f64>, regression: &str) -> PyResult<(f64, f64)> {
+pub fn pp_test(py: Python<'_>, x: PyReadonlyArray1<f64>, regression: &str) -> PyResult<(f64, f64)> {
     let x = x.as_slice()?;
-    let n = x.len();
-    let reg = normalize_reg(regression)?;
+    py.allow_threads(|| {
+        let n = x.len();
+        let reg = normalize_reg(regression)?;
 
-    // Base DF regression (no augmenting lags): Δy_t = [det] + β·y_{t-1} + u_t.
-    let (t_stat, se_b, _beta, resid, m, _k, s) = match df_ols(x, reg, 0) {
-        Some(v) => v,
-        None => return Ok((f64::NAN, f64::NAN)),
-    };
-    let m_f = m as f64;
+        // Base DF regression (no augmenting lags): Δy_t = [det] + β·y_{t-1} + u_t.
+        let (t_stat, se_b, _beta, resid, m, _k, s) = match df_ols(x, reg, 0) {
+            Some(v) => v,
+            None => return Ok((f64::NAN, f64::NAN)),
+        };
+        let m_f = m as f64;
 
-    // Short-run vs long-run residual variance.
-    let gamma0 = resid.iter().map(|e| e * e).sum::<f64>() / m_f; // ≈ RSS/T
-    let lam2 = long_run_variance(&resid, None); // Newey-West HAC (Bartlett)
+        // Short-run vs long-run residual variance.
+        let gamma0 = resid.iter().map(|e| e * e).sum::<f64>() / m_f; // ≈ RSS/T
+        let lam2 = long_run_variance(&resid, None); // Newey-West HAC (Bartlett)
 
-    if !(gamma0 > 0.0) || !(lam2 > 0.0) || !(s > 0.0) {
-        return Ok((f64::NAN, f64::NAN));
-    }
-    let lam = lam2.sqrt();
+        if !(gamma0 > 0.0) || !(lam2 > 0.0) || !(s > 0.0) {
+            return Ok((f64::NAN, f64::NAN));
+        }
+        let lam = lam2.sqrt();
 
-    // Phillips-Perron Z_t (Hamilton 1994, Prop. 17.6): correct the OLS t-ratio
-    // for serial correlation in the residuals using the long-run variance,
-    //   Z_t = sqrt(γ0/λ²)·t − (λ² − γ0)·T·SE(β) / (2·λ·s),
-    // and evaluate against the Dickey-Fuller distribution (NOT the Normal — the
-    // previous implementation used neither the HAC correction nor the DF CVs).
-    let z_t = (gamma0 / lam2).sqrt() * t_stat - (lam2 - gamma0) * m_f * se_b / (2.0 * lam * s);
-    let p_val = df_pvalue(z_t, n, reg);
+        // Phillips-Perron Z_t (Hamilton 1994, Prop. 17.6): correct the OLS t-ratio
+        // for serial correlation in the residuals using the long-run variance,
+        //   Z_t = sqrt(γ0/λ²)·t − (λ² − γ0)·T·SE(β) / (2·λ·s),
+        // and evaluate against the Dickey-Fuller distribution (NOT the Normal — the
+        // previous implementation used neither the HAC correction nor the DF CVs).
+        let z_t = (gamma0 / lam2).sqrt() * t_stat - (lam2 - gamma0) * m_f * se_b / (2.0 * lam * s);
+        let p_val = df_pvalue(z_t, n, reg);
 
-    Ok((z_t, p_val))
+        Ok((z_t, p_val))
+    })
 }
 
 // ======================
@@ -442,58 +449,60 @@ pub fn pp_test(x: PyReadonlyArray1<f64>, regression: &str) -> PyResult<(f64, f64
 /// Python signature:
 ///     variance_ratio_test(x, lags=2) -> (vr, z_score, pvalue)
 #[pyfunction(signature = (x, lags=2))]
-pub fn variance_ratio_test(x: PyReadonlyArray1<f64>, lags: usize) -> PyResult<(f64, f64, f64)> {
+pub fn variance_ratio_test(py: Python<'_>, x: PyReadonlyArray1<f64>, lags: usize) -> PyResult<(f64, f64, f64)> {
     // `x` is the INCREMENT (return) series — the repo's own tests pass
     // np.diff(levels). The previous implementation differenced again (treating
     // returns as levels), so a random walk's returns came out as MA(1) with
     // VR(2) ≈ 0.5 instead of ≈ 1.
     let r = x.as_slice()?;
-    let n = r.len();
-    let q = lags;
+    py.allow_threads(|| {
+        let n = r.len();
+        let q = lags;
 
-    if q < 2 || n < q + 2 {
-        return Ok((f64::NAN, f64::NAN, f64::NAN));
-    }
+        if q < 2 || n < q + 2 {
+            return Ok((f64::NAN, f64::NAN, f64::NAN));
+        }
 
-    let nf = n as f64;
-    let qf = q as f64;
-    let mu = r.iter().sum::<f64>() / nf;
+        let nf = n as f64;
+        let qf = q as f64;
+        let mu = r.iter().sum::<f64>() / nf;
 
-    // Unbiased 1-period variance.
-    let var1: f64 = r.iter().map(|&v| (v - mu) * (v - mu)).sum::<f64>() / (nf - 1.0);
-    if var1 <= 0.0 || !var1.is_finite() {
-        return Ok((f64::NAN, f64::NAN, f64::NAN));
-    }
+        // Unbiased 1-period variance.
+        let var1: f64 = r.iter().map(|&v| (v - mu) * (v - mu)).sum::<f64>() / (nf - 1.0);
+        if var1 <= 0.0 || !var1.is_finite() {
+            return Ok((f64::NAN, f64::NAN, f64::NAN));
+        }
 
-    // q-period variance from OVERLAPPING q-sums (Lo–MacKinlay 1988) with the
-    // bias-adjusted denominator m = q(n−q+1)(1−q/n). Overlapping is required
-    // for consistency with the asymptotic variance θ below; the old code mixed
-    // a non-overlapping estimator with the overlapping θ, mis-sizing z.
-    let mut window: f64 = r[..q].iter().sum();
-    let target = qf * mu;
-    let mut dev = window - target;
-    let mut acc = dev * dev;
-    for t in q..n {
-        window += r[t] - r[t - q];
-        dev = window - target;
-        acc += dev * dev;
-    }
-    // m already contains the factor q, so varq is the PER-PERIOD variance of
-    // the q-sums and VR is varq/var1 directly (no further /q).
-    let m = qf * (nf - qf + 1.0) * (1.0 - qf / nf);
-    let varq = acc / m;
+        // q-period variance from OVERLAPPING q-sums (Lo–MacKinlay 1988) with the
+        // bias-adjusted denominator m = q(n−q+1)(1−q/n). Overlapping is required
+        // for consistency with the asymptotic variance θ below; the old code mixed
+        // a non-overlapping estimator with the overlapping θ, mis-sizing z.
+        let mut window: f64 = r[..q].iter().sum();
+        let target = qf * mu;
+        let mut dev = window - target;
+        let mut acc = dev * dev;
+        for t in q..n {
+            window += r[t] - r[t - q];
+            dev = window - target;
+            acc += dev * dev;
+        }
+        // m already contains the factor q, so varq is the PER-PERIOD variance of
+        // the q-sums and VR is varq/var1 directly (no further /q).
+        let m = qf * (nf - qf + 1.0) * (1.0 - qf / nf);
+        let varq = acc / m;
 
-    let vr = varq / var1;
+        let vr = varq / var1;
 
-    // Homoscedastic asymptotic variance of VR(q) under the random-walk null.
-    let theta = 2.0 * (2.0 * qf - 1.0) * (qf - 1.0) / (3.0 * qf * nf);
-    let z = (vr - 1.0) / theta.sqrt();
+        // Homoscedastic asymptotic variance of VR(q) under the random-walk null.
+        let theta = 2.0 * (2.0 * qf - 1.0) * (qf - 1.0) / (3.0 * qf * nf);
+        let z = (vr - 1.0) / theta.sqrt();
 
-    use statrs::distribution::{ContinuousCDF, Normal};
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    let p_val = 2.0 * (1.0 - normal.cdf(z.abs()));
+        use statrs::distribution::{ContinuousCDF, Normal};
+        let normal = Normal::new(0.0, 1.0).unwrap();
+        let p_val = 2.0 * (1.0 - normal.cdf(z.abs()));
 
-    Ok((vr, z, p_val))
+        Ok((vr, z, p_val))
+    })
 }
 /// Zivot-Andrews test for unit root with structural break
 ///
@@ -503,154 +512,156 @@ pub fn variance_ratio_test(x: PyReadonlyArray1<f64>, lags: usize) -> PyResult<(f
 /// Python signature:
 ///     zivot_andrews_test(x, max_lag=None) -> (min_stat, breakpoint, pvalue)
 #[pyfunction(signature = (x, max_lag=None))]
-pub fn zivot_andrews_test(x: PyReadonlyArray1<f64>, max_lag: Option<usize>) -> PyResult<(f64, usize, f64)> {
+pub fn zivot_andrews_test(py: Python<'_>, x: PyReadonlyArray1<f64>, max_lag: Option<usize>) -> PyResult<(f64, usize, f64)> {
     use nalgebra::{DMatrix, DVector};
     
     let x = x.as_slice()?;
-    let n = x.len();
+    py.allow_threads(|| {
+        let n = x.len();
     
-    if n < 20 {
-        return Ok((f64::NAN, 0, f64::NAN));
-    }
+        if n < 20 {
+            return Ok((f64::NAN, 0, f64::NAN));
+        }
     
-    // Determine lag length (simplified - use sqrt(n) rule)
-    let p = max_lag.unwrap_or_else(|| {
-        let p_max = ((n as f64).sqrt()).floor() as usize;
-        p_max.min(12).max(1)
-    });
+        // Determine lag length (simplified - use sqrt(n) rule)
+        let p = max_lag.unwrap_or_else(|| {
+            let p_max = ((n as f64).sqrt()).floor() as usize;
+            p_max.min(12).max(1)
+        });
     
-    if n <= p + 5 {
-        return Ok((f64::NAN, 0, f64::NAN));
-    }
+        if n <= p + 5 {
+            return Ok((f64::NAN, 0, f64::NAN));
+        }
     
-    // Trim 15% from each end (standard ZA practice)
-    let trim_pct = 0.15;
-    let start = ((n as f64) * trim_pct).floor() as usize;
-    let end = n - start;
+        // Trim 15% from each end (standard ZA practice)
+        let trim_pct = 0.15;
+        let start = ((n as f64) * trim_pct).floor() as usize;
+        let end = n - start;
     
-    if end <= start + p + 2 {
-        return Ok((f64::NAN, 0, f64::NAN));
-    }
+        if end <= start + p + 2 {
+            return Ok((f64::NAN, 0, f64::NAN));
+        }
     
-    let mut min_stat = f64::INFINITY;
-    let mut min_break = start;
+        let mut min_stat = f64::INFINITY;
+        let mut min_break = start;
     
-    // Try each potential breakpoint
-    for tau in start..end {
-        // Construct regression variables
-        // Model C: Δy_t = μ + β·t + θ·DU_t + γ·DT_t + α·y_{t-1} + Σ φ_i·Δy_{t-i} + ε_t
+        // Try each potential breakpoint
+        for tau in start..end {
+            // Construct regression variables
+            // Model C: Δy_t = μ + β·t + θ·DU_t + γ·DT_t + α·y_{t-1} + Σ φ_i·Δy_{t-i} + ε_t
         
-        let m = n - p - 1;  // Sample size for regression (after lagging)
+            let m = n - p - 1;  // Sample size for regression (after lagging)
         
-        // Build design matrix X and dependent variable y.
-        // Columns: intercept, trend, DU, DT, y_{t-1} (5 base columns) plus p
-        // lagged differences of Δy written at index 4+i for i=1..=p. That is
-        // 5 + p columns; the previous `4 + p` under-counted by one and caused an
-        // out-of-bounds Vec write at `t*n_regressors + 4 + p` on every call
-        // (a guaranteed SIGABRT under panic="abort").
-        let n_regressors = 5 + p;
-        let mut x_mat = vec![0.0; m * n_regressors];
-        let mut y_vec = vec![0.0; m];
+            // Build design matrix X and dependent variable y.
+            // Columns: intercept, trend, DU, DT, y_{t-1} (5 base columns) plus p
+            // lagged differences of Δy written at index 4+i for i=1..=p. That is
+            // 5 + p columns; the previous `4 + p` under-counted by one and caused an
+            // out-of-bounds Vec write at `t*n_regressors + 4 + p` on every call
+            // (a guaranteed SIGABRT under panic="abort").
+            let n_regressors = 5 + p;
+            let mut x_mat = vec![0.0; m * n_regressors];
+            let mut y_vec = vec![0.0; m];
         
-        for t in 0..m {
-            let actual_t = p + 1 + t;  // Actual time index in original series
+            for t in 0..m {
+                let actual_t = p + 1 + t;  // Actual time index in original series
             
-            // Dependent variable: Δy_t
-            y_vec[t] = x[actual_t] - x[actual_t - 1];
+                // Dependent variable: Δy_t
+                y_vec[t] = x[actual_t] - x[actual_t - 1];
             
-            // Regressor 1: Intercept
-            x_mat[t * n_regressors + 0] = 1.0;
+                // Regressor 1: Intercept
+                x_mat[t * n_regressors + 0] = 1.0;
             
-            // Regressor 2: Time trend
-            x_mat[t * n_regressors + 1] = actual_t as f64;
+                // Regressor 2: Time trend
+                x_mat[t * n_regressors + 1] = actual_t as f64;
             
-            // Regressor 3: Level shift dummy DU_t (1 if t > τ, else 0)
-            x_mat[t * n_regressors + 2] = if actual_t > tau { 1.0 } else { 0.0 };
+                // Regressor 3: Level shift dummy DU_t (1 if t > τ, else 0)
+                x_mat[t * n_regressors + 2] = if actual_t > tau { 1.0 } else { 0.0 };
             
-            // Regressor 4: Trend shift dummy DT_t ((t - τ) if t > τ, else 0)
-            x_mat[t * n_regressors + 3] = if actual_t > tau {
-                (actual_t - tau) as f64
-            } else {
-                0.0
+                // Regressor 4: Trend shift dummy DT_t ((t - τ) if t > τ, else 0)
+                x_mat[t * n_regressors + 3] = if actual_t > tau {
+                    (actual_t - tau) as f64
+                } else {
+                    0.0
+                };
+            
+                // Regressor 5: Lagged level y_{t-1}
+                x_mat[t * n_regressors + 4] = x[actual_t - 1];
+            
+                // Regressors 6+: Lagged differences Δy_{t-i} for i=1..p
+                for i in 1..=p {
+                    x_mat[t * n_regressors + 4 + i] = x[actual_t - i] - x[actual_t - i - 1];
+                }
+            }
+        
+            // OLS regression: solve (X'X) β = X'y
+            // x_mat is built row-major (t*n_regressors + col). from_vec reads
+            // COLUMN-major and would scramble every regressor, silently producing
+            // garbage coefficients (breakpoints/t-stats were noise).
+            let x_matrix = DMatrix::from_row_slice(m, n_regressors, &x_mat);
+            let y_vector = DVector::from_vec(y_vec);
+        
+            let xtx = x_matrix.transpose() * &x_matrix;
+            let xty = x_matrix.transpose() * &y_vector;
+        
+            // Solve for coefficients
+    		let beta = match xtx.clone().lu().solve(&xty) {
+    			Some(b) => b,
+    			None => continue,
+    		};       
+            // Calculate residuals and RSS
+            let y_hat = &x_matrix * &beta;
+            let residuals = &y_vector - &y_hat;
+            let rss: f64 = residuals.iter().map(|&e| e * e).sum();
+        
+            // Degrees of freedom
+            let df = m as f64 - n_regressors as f64;
+            if df <= 0.0 {
+                continue;
+            }
+        
+            let sigma2 = rss / df;
+        
+            // Compute (X'X)^-1 for variance-covariance matrix
+            let xtx_inv = match xtx.lu().try_inverse() {
+                Some(inv) => inv,
+                None => continue,  // Skip if singular
             };
-            
-            // Regressor 5: Lagged level y_{t-1}
-            x_mat[t * n_regressors + 4] = x[actual_t - 1];
-            
-            // Regressors 6+: Lagged differences Δy_{t-i} for i=1..p
-            for i in 1..=p {
-                x_mat[t * n_regressors + 4 + i] = x[actual_t - i] - x[actual_t - i - 1];
+        
+            // Standard error of α (coefficient on y_{t-1}, which is regressor index 4)
+            let var_alpha = sigma2 * xtx_inv[(4, 4)];
+            if var_alpha <= 0.0 || !var_alpha.is_finite() {
+                continue;
+            }
+        
+            let se_alpha = var_alpha.sqrt();
+        
+            // t-statistic for H0: α = 0 (unit root)
+            let alpha = beta[4];
+            let t_stat = alpha / se_alpha;
+        
+            // Keep track of minimum (most negative) t-statistic
+            if t_stat < min_stat {
+                min_stat = t_stat;
+                min_break = tau;
             }
         }
-        
-        // OLS regression: solve (X'X) β = X'y
-        // x_mat is built row-major (t*n_regressors + col). from_vec reads
-        // COLUMN-major and would scramble every regressor, silently producing
-        // garbage coefficients (breakpoints/t-stats were noise).
-        let x_matrix = DMatrix::from_row_slice(m, n_regressors, &x_mat);
-        let y_vector = DVector::from_vec(y_vec);
-        
-        let xtx = x_matrix.transpose() * &x_matrix;
-        let xty = x_matrix.transpose() * &y_vector;
-        
-        // Solve for coefficients
-		let beta = match xtx.clone().lu().solve(&xty) {
-			Some(b) => b,
-			None => continue,
-		};       
-        // Calculate residuals and RSS
-        let y_hat = &x_matrix * &beta;
-        let residuals = &y_vector - &y_hat;
-        let rss: f64 = residuals.iter().map(|&e| e * e).sum();
-        
-        // Degrees of freedom
-        let df = m as f64 - n_regressors as f64;
-        if df <= 0.0 {
-            continue;
-        }
-        
-        let sigma2 = rss / df;
-        
-        // Compute (X'X)^-1 for variance-covariance matrix
-        let xtx_inv = match xtx.lu().try_inverse() {
-            Some(inv) => inv,
-            None => continue,  // Skip if singular
+    
+        // P-value from approximate Zivot-Andrews critical values
+        // Model C (both intercept and trend) critical values at n=100:
+        // 1%: -5.57, 5%: -5.08, 10%: -4.82
+        // These are approximate and should be adjusted for sample size
+        let p_val = if min_stat < -5.57 {
+            0.01
+        } else if min_stat < -5.08 {
+            0.05
+        } else if min_stat < -4.82 {
+            0.10
+        } else {
+            0.15  // Greater than 10%
         };
-        
-        // Standard error of α (coefficient on y_{t-1}, which is regressor index 4)
-        let var_alpha = sigma2 * xtx_inv[(4, 4)];
-        if var_alpha <= 0.0 || !var_alpha.is_finite() {
-            continue;
-        }
-        
-        let se_alpha = var_alpha.sqrt();
-        
-        // t-statistic for H0: α = 0 (unit root)
-        let alpha = beta[4];
-        let t_stat = alpha / se_alpha;
-        
-        // Keep track of minimum (most negative) t-statistic
-        if t_stat < min_stat {
-            min_stat = t_stat;
-            min_break = tau;
-        }
-    }
     
-    // P-value from approximate Zivot-Andrews critical values
-    // Model C (both intercept and trend) critical values at n=100:
-    // 1%: -5.57, 5%: -5.08, 10%: -4.82
-    // These are approximate and should be adjusted for sample size
-    let p_val = if min_stat < -5.57 {
-        0.01
-    } else if min_stat < -5.08 {
-        0.05
-    } else if min_stat < -4.82 {
-        0.10
-    } else {
-        0.15  // Greater than 10%
-    };
-    
-    Ok((min_stat, min_break, p_val))
+        Ok((min_stat, min_break, p_val))
+    })
 }
 /// Test for trend stationarity (linear detrending + KPSS)
 ///
@@ -658,9 +669,9 @@ pub fn zivot_andrews_test(x: PyReadonlyArray1<f64>, max_lag: Option<usize>) -> P
 /// Python signature:
 ///     trend_stationarity_test(x) -> (stat, pvalue, is_stationary)
 #[pyfunction]
-pub fn trend_stationarity_test(x: PyReadonlyArray1<f64>) -> PyResult<(f64, f64, bool)> {
+pub fn trend_stationarity_test(py: Python<'_>, x: PyReadonlyArray1<f64>) -> PyResult<(f64, f64, bool)> {
     // Just use KPSS with trend
-    let (stat, pval) = kpss_test(x, "ct", None)?;
+    let (stat, pval) = kpss_test(py, x, "ct", None)?;
     let is_stationary = pval > 0.05;  // Fail to reject null = stationary
     Ok((stat, pval, is_stationary))
 }
@@ -689,7 +700,7 @@ pub fn integration_order_test(
     let x_arr = PyArray1::from_slice_bound(py, x_slice);
     let x_readonly = x_arr.readonly();
     
-    let (stat_level, pval_level) = adf_test(x_readonly, "c", None)?;
+    let (stat_level, pval_level) = adf_test(py, x_readonly, "c", None)?;
     let is_i0 = pval_level < 0.05;  // Reject null = stationary
     
     // First difference
@@ -702,7 +713,7 @@ pub fn integration_order_test(
     let dx_array = PyArray1::from_vec_bound(py, dx);
     let dx_readonly = dx_array.readonly();
     
-    let (stat_diff, pval_diff) = adf_test(dx_readonly, "c", None)?;
+    let (stat_diff, pval_diff) = adf_test(py, dx_readonly, "c", None)?;
     let is_i1 = !is_i0 && pval_diff < 0.05;
     
     Ok((is_i0, is_i1, stat_level, stat_diff))
@@ -738,7 +749,7 @@ pub fn seasonal_diff_test(
     let dx_array = PyArray1::from_vec_bound(py, dx);
     let dx_readonly = dx_array.readonly();
     
-    let (stat, pval) = adf_test(dx_readonly, "c", None)?;
+    let (stat, pval) = adf_test(py, dx_readonly, "c", None)?;
     let is_stationary = pval < 0.05;
     
     Ok((stat, pval, is_stationary))
@@ -771,7 +782,7 @@ pub fn seasonal_unit_root_test(
     let x_arr = PyArray1::from_slice_bound(py, x_slice);
     let x_readonly = x_arr.readonly();
 
-    let (stat1, pval1) = adf_test(x_readonly, "c", None)?;
+    let (stat1, pval1) = adf_test(py, x_readonly, "c", None)?;
     results.push((1, stat1, pval1));
 
     // Test at seasonal lag

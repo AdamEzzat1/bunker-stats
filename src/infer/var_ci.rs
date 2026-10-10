@@ -28,33 +28,36 @@ pub fn var_ci_np(
 ) -> PyResult<Py<PyDict>> {
     let xs = x.as_slice()?;
 
-    if xs.len() < 2 {
-        return Err(PyValueError::new_err("var_ci requires n >= 2"));
-    }
-    if confidence <= 0.0 || confidence >= 1.0 {
-        return Err(PyValueError::new_err("confidence must be in (0, 1)"));
-    }
+    let (s2, df, var_lo, var_hi) = py.allow_threads(|| -> PyResult<_> {
+        if xs.len() < 2 {
+            return Err(PyValueError::new_err("var_ci requires n >= 2"));
+        }
+        if confidence <= 0.0 || confidence >= 1.0 {
+            return Err(PyValueError::new_err("confidence must be in (0, 1)"));
+        }
 
-    reject_nonfinite(xs, "x")?;
+        reject_nonfinite(xs, "x")?;
 
-    let n = xs.len();
-    let m = mean(xs);
-    let s2 = var_sample(xs, m);
+        let n = xs.len();
+        let m = mean(xs);
+        let s2 = var_sample(xs, m);
 
-    if s2 <= 0.0 {
-        return Err(PyValueError::new_err("sample variance is zero"));
-    }
+        if s2 <= 0.0 {
+            return Err(PyValueError::new_err("sample variance is zero"));
+        }
 
-    let df = (n - 1) as f64;
-    let alpha = 1.0 - confidence;
+        let df = (n - 1) as f64;
+        let alpha = 1.0 - confidence;
 
-    let chi2 = ChiSquared::new(df).unwrap();
-    let chi2_lower = chi2.inverse_cdf(alpha / 2.0);
-    let chi2_upper = chi2.inverse_cdf(1.0 - alpha / 2.0);
+        let chi2 = ChiSquared::new(df).unwrap();
+        let chi2_lower = chi2.inverse_cdf(alpha / 2.0);
+        let chi2_upper = chi2.inverse_cdf(1.0 - alpha / 2.0);
 
-    // CI for variance: (df * s^2) / chi2_quantile
-    let var_lo = df * s2 / chi2_upper;
-    let var_hi = df * s2 / chi2_lower;
+        // CI for variance: (df * s^2) / chi2_quantile
+        let var_lo = df * s2 / chi2_upper;
+        let var_hi = df * s2 / chi2_lower;
+        Ok((s2, df, var_lo, var_hi))
+    })?;
 
     let d = PyDict::new_bound(py);
     d.set_item("variance", s2)?;

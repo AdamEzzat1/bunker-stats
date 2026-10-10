@@ -33,52 +33,55 @@ pub fn corr_ci_np(
     let xs = x.as_slice()?;
     let ys = y.as_slice()?;
 
-    if xs.len() != ys.len() {
-        return Err(PyValueError::new_err("x and y must have the same length"));
-    }
-    let n = xs.len();
-    if n < 4 {
-        return Err(PyValueError::new_err("corr_ci requires n >= 4 (n-3 > 0 for Fisher z)"));
-    }
-    if confidence <= 0.0 || confidence >= 1.0 {
-        return Err(PyValueError::new_err("confidence must be in (0, 1)"));
-    }
-
-    reject_nonfinite(xs, "x")?;
-    reject_nonfinite(ys, "y")?;
-
-    // Compute correlation based on method
-    let r = match method.to_lowercase().as_str() {
-        "pearson" => pearson_r(xs, ys)?,
-        "spearman" => {
-            let rx = rankdata_average(xs);
-            let ry = rankdata_average(ys);
-            pearson_r(&rx, &ry)?
+    let (r, z, se, ci_lo, ci_hi) = py.allow_threads(|| -> PyResult<_> {
+        if xs.len() != ys.len() {
+            return Err(PyValueError::new_err("x and y must have the same length"));
         }
-        _ => {
-            return Err(PyValueError::new_err(
-                "method must be 'pearson' or 'spearman'",
-            ))
+        let n = xs.len();
+        if n < 4 {
+            return Err(PyValueError::new_err("corr_ci requires n >= 4 (n-3 > 0 for Fisher z)"));
         }
-    };
+        if confidence <= 0.0 || confidence >= 1.0 {
+            return Err(PyValueError::new_err("confidence must be in (0, 1)"));
+        }
 
-    // Fisher z-transform: z = atanh(r)
-    let r_clamped = r.max(-0.9999999).min(0.9999999);
-    let z = r_clamped.atanh();
+        reject_nonfinite(xs, "x")?;
+        reject_nonfinite(ys, "y")?;
 
-    // SE of z = 1 / sqrt(n - 3)
-    let se = 1.0 / ((n as f64 - 3.0).sqrt());
+        // Compute correlation based on method
+        let r = match method.to_lowercase().as_str() {
+            "pearson" => pearson_r(xs, ys)?,
+            "spearman" => {
+                let rx = rankdata_average(xs);
+                let ry = rankdata_average(ys);
+                pearson_r(&rx, &ry)?
+            }
+            _ => {
+                return Err(PyValueError::new_err(
+                    "method must be 'pearson' or 'spearman'",
+                ))
+            }
+        };
 
-    // z-critical for the given confidence level
-    let alpha = 1.0 - confidence;
-    let norm = Normal::new(0.0, 1.0).unwrap();
-    let z_crit = norm.inverse_cdf(1.0 - alpha / 2.0);
+        // Fisher z-transform: z = atanh(r)
+        let r_clamped = r.max(-0.9999999).min(0.9999999);
+        let z = r_clamped.atanh();
 
-    // CI in z-space, then back-transform
-    let z_lo = z - z_crit * se;
-    let z_hi = z + z_crit * se;
-    let ci_lo = z_lo.tanh();
-    let ci_hi = z_hi.tanh();
+        // SE of z = 1 / sqrt(n - 3)
+        let se = 1.0 / ((n as f64 - 3.0).sqrt());
+
+        // z-critical for the given confidence level
+        let alpha = 1.0 - confidence;
+        let norm = Normal::new(0.0, 1.0).unwrap();
+        let z_crit = norm.inverse_cdf(1.0 - alpha / 2.0);
+
+        // CI in z-space, then back-transform
+        let z_lo = z - z_crit * se;
+        let z_hi = z + z_crit * se;
+        let ci_lo = z_lo.tanh();
+        let ci_hi = z_hi.tanh();
+        Ok((r, z, se, ci_lo, ci_hi))
+    })?;
 
     let d = PyDict::new_bound(py);
     d.set_item("correlation", r)?;

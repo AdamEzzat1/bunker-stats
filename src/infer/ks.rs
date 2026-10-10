@@ -356,50 +356,53 @@ pub fn ks_1samp_np(
     alternative: &str,
 ) -> PyResult<Py<PyDict>> {
     let xs = x.as_slice()?;
-    if xs.is_empty() {
-        return Err(PyValueError::new_err("x must have at least 1 element"));
-    }
-    reject_nonfinite(xs, "x")?;
-    let alt = Alternative::from_str(alternative)?;
-
-    let dist = parse_named_dist(cdf, &params)?;
-
-    let mut v = xs.to_vec();
-    v.sort_by(|a, b| a.total_cmp(b));
-
-    let n = v.len();
-    let nf = n as f64;
-
-    let mut d_plus = 0.0;
-    let mut d_minus = 0.0;
-
-    for (i0, &xi) in v.iter().enumerate() {
-        let i = (i0 + 1) as f64;
-        let f = dist.cdf(xi);
-
-        let fn_i = i / nf;
-        let fn_im1 = (i - 1.0) / nf;
-
-        let dp = fn_i - f;
-        let dm = f - fn_im1;
-
-        if dp > d_plus {
-            d_plus = dp;
+    let (stat, p) = py.allow_threads(|| -> PyResult<_> {
+        if xs.is_empty() {
+            return Err(PyValueError::new_err("x must have at least 1 element"));
         }
-        if dm > d_minus {
-            d_minus = dm;
-        }
-    }
+        reject_nonfinite(xs, "x")?;
+        let alt = Alternative::from_str(alternative)?;
 
-    let (stat, p) = match alt {
-        Alternative::TwoSided => {
-            let d = d_plus.max(d_minus);
-            (d, ks_pvalue_two_sided_finite(n, d))
+        let dist = parse_named_dist(cdf, &params)?;
+
+        let mut v = xs.to_vec();
+        v.sort_by(|a, b| a.total_cmp(b));
+
+        let n = v.len();
+        let nf = n as f64;
+
+        let mut d_plus = 0.0;
+        let mut d_minus = 0.0;
+
+        for (i0, &xi) in v.iter().enumerate() {
+            let i = (i0 + 1) as f64;
+            let f = dist.cdf(xi);
+
+            let fn_i = i / nf;
+            let fn_im1 = (i - 1.0) / nf;
+
+            let dp = fn_i - f;
+            let dm = f - fn_im1;
+
+            if dp > d_plus {
+                d_plus = dp;
+            }
+            if dm > d_minus {
+                d_minus = dm;
+            }
         }
-        // SciPy: "greater" uses D+; "less" uses D-
-        Alternative::Greater => (d_plus, ks_pvalue_one_sided_exact(n, d_plus)),
-        Alternative::Less => (d_minus, ks_pvalue_one_sided_exact(n, d_minus)),
-    };
+
+        let (stat, p) = match alt {
+            Alternative::TwoSided => {
+                let d = d_plus.max(d_minus);
+                (d, ks_pvalue_two_sided_finite(n, d))
+            }
+            // SciPy: "greater" uses D+; "less" uses D-
+            Alternative::Greater => (d_plus, ks_pvalue_one_sided_exact(n, d_plus)),
+            Alternative::Less => (d_minus, ks_pvalue_one_sided_exact(n, d_minus)),
+        };
+        Ok((stat, p))
+    })?;
 
     let dct = PyDict::new_bound(py);
     dct.set_item("statistic", stat)?;

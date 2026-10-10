@@ -20,79 +20,86 @@ pub fn f_test_oneway_np(
     py: Python<'_>,
     groups: Vec<numpy::PyReadonlyArray1<f64>>,
 ) -> PyResult<Py<PyDict>> {
-    if groups.len() < 2 {
-        return Err(PyValueError::new_err("f_test_oneway requires at least 2 groups"));
-    }
-
-    let mut group_data: Vec<Vec<f64>> = Vec::with_capacity(groups.len());
-    let mut n_total = 0usize;
-    
-    // Validate and collect data
-    for g in groups {
-        let xs = g.as_slice()?;
-        if xs.len() < 2 {
-            return Err(PyValueError::new_err("each group must have at least 2 observations"));
+    // Borrow every group's data up front; nothing below touches a Python object.
+    let group_slices = groups
+        .iter()
+        .map(|g| g.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let (df_between, df_within, f_stat, p) = py.allow_threads(|| -> PyResult<_> {
+        if group_slices.len() < 2 {
+            return Err(PyValueError::new_err("f_test_oneway requires at least 2 groups"));
         }
-        reject_nonfinite(xs, "group")?;
-        n_total += xs.len();
-        group_data.push(xs.to_vec());
-    }
 
-    let k = group_data.len();
+        let mut group_data: Vec<Vec<f64>> = Vec::with_capacity(group_slices.len());
+        let mut n_total = 0usize;
     
-    // Compute group means and grand mean
-    let mut group_means = Vec::with_capacity(k);
-    let mut grand_sum = 0.0;
+        // Validate and collect data
+        for &xs in &group_slices {
+            if xs.len() < 2 {
+                return Err(PyValueError::new_err("each group must have at least 2 observations"));
+            }
+            reject_nonfinite(xs, "group")?;
+            n_total += xs.len();
+            group_data.push(xs.to_vec());
+        }
+
+        let k = group_data.len();
     
-    for group in &group_data {
-        let m = mean(group);
-        group_means.push(m);
-        grand_sum += group.iter().sum::<f64>();
-    }
+        // Compute group means and grand mean
+        let mut group_means = Vec::with_capacity(k);
+        let mut grand_sum = 0.0;
     
-    let grand_mean = grand_sum / (n_total as f64);
+        for group in &group_data {
+            let m = mean(group);
+            group_means.push(m);
+            grand_sum += group.iter().sum::<f64>();
+        }
     
-    // Between-group sum of squares
-    let mut ss_between = 0.0;
-    for (i, group) in group_data.iter().enumerate() {
-        let n = group.len() as f64;
-        let diff = group_means[i] - grand_mean;
-        ss_between += n * diff * diff;
-    }
+        let grand_mean = grand_sum / (n_total as f64);
     
-    // Within-group sum of squares with Kahan summation
-    let mut ss_within = 0.0;
-    for (i, group) in group_data.iter().enumerate() {
-        let m = group_means[i];
-        ss_within += sum_of_squares_kahan(group, m);
-    }
+        // Between-group sum of squares
+        let mut ss_between = 0.0;
+        for (i, group) in group_data.iter().enumerate() {
+            let n = group.len() as f64;
+            let diff = group_means[i] - grand_mean;
+            ss_between += n * diff * diff;
+        }
     
-    let df_between = (k - 1) as f64;
-    let df_within = (n_total - k) as f64;
+        // Within-group sum of squares with Kahan summation
+        let mut ss_within = 0.0;
+        for (i, group) in group_data.iter().enumerate() {
+            let m = group_means[i];
+            ss_within += sum_of_squares_kahan(group, m);
+        }
     
-    if df_within <= 0.0 {
-        return Err(PyValueError::new_err("insufficient degrees of freedom"));
-    }
+        let df_between = (k - 1) as f64;
+        let df_within = (n_total - k) as f64;
     
-    let ms_between = ss_between / df_between;
-    let ms_within = ss_within / df_within;
+        if df_within <= 0.0 {
+            return Err(PyValueError::new_err("insufficient degrees of freedom"));
+        }
     
-    let f_stat = if ms_within > 0.0 {
-        ms_between / ms_within
-    } else if ms_between == 0.0 {
-        0.0
-    } else {
-        f64::INFINITY
-    };
+        let ms_between = ss_between / df_between;
+        let ms_within = ss_within / df_within;
     
-    let p = if f_stat.is_finite() && f_stat >= 0.0 {
-        let dist = FisherSnedecor::new(df_between, df_within).unwrap();
-        (1.0 - dist.cdf(f_stat)).clamp(0.0, 1.0)
-    } else if f_stat.is_infinite() {
-        0.0
-    } else {
-        f64::NAN
-    };
+        let f_stat = if ms_within > 0.0 {
+            ms_between / ms_within
+        } else if ms_between == 0.0 {
+            0.0
+        } else {
+            f64::INFINITY
+        };
+    
+        let p = if f_stat.is_finite() && f_stat >= 0.0 {
+            let dist = FisherSnedecor::new(df_between, df_within).unwrap();
+            (1.0 - dist.cdf(f_stat)).clamp(0.0, 1.0)
+        } else if f_stat.is_infinite() {
+            0.0
+        } else {
+            f64::NAN
+        };
+        Ok((df_between, df_within, f_stat, p))
+    })?;
     
     let d = PyDict::new_bound(py);
     d.set_item("statistic", f_stat)?;
@@ -133,55 +140,58 @@ pub fn levene_test_np(
     }
     
     // Run one-way ANOVA on transformed data
-    let mut n_total = 0usize;
-    let mut group_means = Vec::with_capacity(transformed_groups.len());
-    let mut grand_sum = 0.0;
+    let (df_between, df_within, w_stat, p) = py.allow_threads(|| -> PyResult<_> {
+        let mut n_total = 0usize;
+        let mut group_means = Vec::with_capacity(transformed_groups.len());
+        let mut grand_sum = 0.0;
     
-    for group in &transformed_groups {
-        n_total += group.len();
-        let m = mean(group);
-        group_means.push(m);
-        grand_sum += group.iter().sum::<f64>();
-    }
+        for group in &transformed_groups {
+            n_total += group.len();
+            let m = mean(group);
+            group_means.push(m);
+            grand_sum += group.iter().sum::<f64>();
+        }
     
-    let k = transformed_groups.len();
-    let grand_mean = grand_sum / (n_total as f64);
+        let k = transformed_groups.len();
+        let grand_mean = grand_sum / (n_total as f64);
     
-    let mut ss_between = 0.0;
-    for (i, group) in transformed_groups.iter().enumerate() {
-        let n = group.len() as f64;
-        let diff = group_means[i] - grand_mean;
-        ss_between += n * diff * diff;
-    }
+        let mut ss_between = 0.0;
+        for (i, group) in transformed_groups.iter().enumerate() {
+            let n = group.len() as f64;
+            let diff = group_means[i] - grand_mean;
+            ss_between += n * diff * diff;
+        }
     
-    let mut ss_within = 0.0;
-    for (i, group) in transformed_groups.iter().enumerate() {
-        let m = group_means[i];
-        ss_within += sum_of_squares_kahan(group, m);
-    }
+        let mut ss_within = 0.0;
+        for (i, group) in transformed_groups.iter().enumerate() {
+            let m = group_means[i];
+            ss_within += sum_of_squares_kahan(group, m);
+        }
     
-    let df_between = (k - 1) as f64;
-    let df_within = (n_total - k) as f64;
+        let df_between = (k - 1) as f64;
+        let df_within = (n_total - k) as f64;
     
-    if df_within <= 0.0 {
-        return Err(PyValueError::new_err("insufficient degrees of freedom"));
-    }
+        if df_within <= 0.0 {
+            return Err(PyValueError::new_err("insufficient degrees of freedom"));
+        }
     
-    let ms_between = ss_between / df_between;
-    let ms_within = ss_within / df_within;
+        let ms_between = ss_between / df_between;
+        let ms_within = ss_within / df_within;
     
-    let w_stat = if ms_within > 0.0 {
-        ms_between / ms_within
-    } else {
-        0.0
-    };
+        let w_stat = if ms_within > 0.0 {
+            ms_between / ms_within
+        } else {
+            0.0
+        };
     
-    let p = if w_stat.is_finite() && w_stat >= 0.0 {
-        let dist = FisherSnedecor::new(df_between, df_within).unwrap();
-        (1.0 - dist.cdf(w_stat)).clamp(0.0, 1.0)
-    } else {
-        f64::NAN
-    };
+        let p = if w_stat.is_finite() && w_stat >= 0.0 {
+            let dist = FisherSnedecor::new(df_between, df_within).unwrap();
+            (1.0 - dist.cdf(w_stat)).clamp(0.0, 1.0)
+        } else {
+            f64::NAN
+        };
+        Ok((df_between, df_within, w_stat, p))
+    })?;
     
     let d = PyDict::new_bound(py);
     d.set_item("statistic", w_stat)?;

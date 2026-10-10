@@ -27,32 +27,35 @@ pub fn rank_biserial_np(
     let xs = x.as_slice()?;
     let ys = y.as_slice()?;
 
-    if xs.is_empty() || ys.is_empty() {
-        return Err(PyValueError::new_err("x and y must be non-empty"));
-    }
-    reject_nonfinite(xs, "x")?;
-    reject_nonfinite(ys, "y")?;
+    let (u1, rb) = py.allow_threads(|| -> PyResult<_> {
+        if xs.is_empty() || ys.is_empty() {
+            return Err(PyValueError::new_err("x and y must be non-empty"));
+        }
+        reject_nonfinite(xs, "x")?;
+        reject_nonfinite(ys, "y")?;
 
-    let n1 = xs.len();
-    let n2 = ys.len();
-    let n1f = n1 as f64;
-    let n2f = n2 as f64;
+        let n1 = xs.len();
+        let n2 = ys.len();
+        let n1f = n1 as f64;
+        let n2f = n2 as f64;
 
-    // Compute ranks of combined data
-    let mut combined: Vec<f64> = Vec::with_capacity(n1 + n2);
-    combined.extend_from_slice(xs);
-    combined.extend_from_slice(ys);
+        // Compute ranks of combined data
+        let mut combined: Vec<f64> = Vec::with_capacity(n1 + n2);
+        combined.extend_from_slice(xs);
+        combined.extend_from_slice(ys);
 
-    let ranks = common_rankdata(&combined);
+        let ranks = common_rankdata(&combined);
 
-    // Sum of ranks for group x
-    let r1: f64 = ranks[..n1].iter().sum();
-    let u1 = r1 - n1f * (n1f + 1.0) / 2.0;
+        // Sum of ranks for group x
+        let r1: f64 = ranks[..n1].iter().sum();
+        let u1 = r1 - n1f * (n1f + 1.0) / 2.0;
 
-    // Rank-biserial: r = 1 - 2*U / (n1*n2)
-    // Use U = min(U1, U2) for the standard formula,
-    // but for rank-biserial we use U1 directly for directionality.
-    let rb = 1.0 - 2.0 * u1 / (n1f * n2f);
+        // Rank-biserial: r = 1 - 2*U / (n1*n2)
+        // Use U = min(U1, U2) for the standard formula,
+        // but for rank-biserial we use U1 directly for directionality.
+        let rb = 1.0 - 2.0 * u1 / (n1f * n2f);
+        Ok((u1, rb))
+    })?;
 
     let d = PyDict::new_bound(py);
     d.set_item("rank_biserial", rb)?;
@@ -77,41 +80,44 @@ pub fn cliffs_delta_np(
     let xs = x.as_slice()?;
     let ys = y.as_slice()?;
 
-    if xs.is_empty() || ys.is_empty() {
-        return Err(PyValueError::new_err("x and y must be non-empty"));
-    }
-    reject_nonfinite(xs, "x")?;
-    reject_nonfinite(ys, "y")?;
+    let (n_greater, n_less, delta, magnitude) = py.allow_threads(|| -> PyResult<_> {
+        if xs.is_empty() || ys.is_empty() {
+            return Err(PyValueError::new_err("x and y must be non-empty"));
+        }
+        reject_nonfinite(xs, "x")?;
+        reject_nonfinite(ys, "y")?;
 
-    let n1 = xs.len();
-    let n2 = ys.len();
-    let total = (n1 * n2) as f64;
+        let n1 = xs.len();
+        let n2 = ys.len();
+        let total = (n1 * n2) as f64;
 
-    // Count dominance pairs
-    let mut n_greater = 0u64;
-    let mut n_less = 0u64;
+        // Count dominance pairs
+        let mut n_greater = 0u64;
+        let mut n_less = 0u64;
 
-    for &xi in xs {
-        for &yj in ys {
-            if xi > yj {
-                n_greater += 1;
-            } else if xi < yj {
-                n_less += 1;
+        for &xi in xs {
+            for &yj in ys {
+                if xi > yj {
+                    n_greater += 1;
+                } else if xi < yj {
+                    n_less += 1;
+                }
             }
         }
-    }
 
-    let delta = (n_greater as f64 - n_less as f64) / total;
+        let delta = (n_greater as f64 - n_less as f64) / total;
 
-    let magnitude = if delta.abs() < 0.147 {
-        "negligible"
-    } else if delta.abs() < 0.33 {
-        "small"
-    } else if delta.abs() < 0.474 {
-        "medium"
-    } else {
-        "large"
-    };
+        let magnitude = if delta.abs() < 0.147 {
+            "negligible"
+        } else if delta.abs() < 0.33 {
+            "small"
+        } else if delta.abs() < 0.474 {
+            "medium"
+        } else {
+            "large"
+        };
+        Ok((n_greater, n_less, delta, magnitude))
+    })?;
 
     let d = PyDict::new_bound(py);
     d.set_item("delta", delta)?;
@@ -134,64 +140,71 @@ pub fn anova_effect_sizes_np(
     py: Python<'_>,
     groups: Vec<numpy::PyReadonlyArray1<f64>>,
 ) -> PyResult<Py<PyDict>> {
-    if groups.len() < 2 {
-        return Err(PyValueError::new_err("requires at least 2 groups"));
-    }
-
-    let mut group_data: Vec<Vec<f64>> = Vec::with_capacity(groups.len());
-    let mut n_total = 0usize;
-
-    for g in groups {
-        let xs = g.as_slice()?;
-        if xs.len() < 2 {
-            return Err(PyValueError::new_err("each group must have at least 2 observations"));
+    // Borrow every group's data up front; nothing below touches a Python object.
+    let group_slices = groups
+        .iter()
+        .map(|g| g.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let (ss_between, ss_within, ss_total, eta2, omega2) = py.allow_threads(|| -> PyResult<_> {
+        if group_slices.len() < 2 {
+            return Err(PyValueError::new_err("requires at least 2 groups"));
         }
-        reject_nonfinite(xs, "group")?;
-        n_total += xs.len();
-        group_data.push(xs.to_vec());
-    }
 
-    let k = group_data.len();
+        let mut group_data: Vec<Vec<f64>> = Vec::with_capacity(group_slices.len());
+        let mut n_total = 0usize;
 
-    // Grand mean
-    let mut grand_sum = 0.0;
-    for group in &group_data {
-        grand_sum += group.iter().sum::<f64>();
-    }
-    let grand_mean = grand_sum / (n_total as f64);
+        for &xs in &group_slices {
+            if xs.len() < 2 {
+                return Err(PyValueError::new_err("each group must have at least 2 observations"));
+            }
+            reject_nonfinite(xs, "group")?;
+            n_total += xs.len();
+            group_data.push(xs.to_vec());
+        }
 
-    // Group means
-    let group_means: Vec<f64> = group_data.iter().map(|g| mean(g)).collect();
+        let k = group_data.len();
 
-    // SS_between
-    let mut ss_between = 0.0;
-    for (i, group) in group_data.iter().enumerate() {
-        let n = group.len() as f64;
-        let diff = group_means[i] - grand_mean;
-        ss_between += n * diff * diff;
-    }
+        // Grand mean
+        let mut grand_sum = 0.0;
+        for group in &group_data {
+            grand_sum += group.iter().sum::<f64>();
+        }
+        let grand_mean = grand_sum / (n_total as f64);
 
-    // SS_within with Kahan summation
-    let mut ss_within = 0.0;
-    for (i, group) in group_data.iter().enumerate() {
-        ss_within += sum_of_squares_kahan(group, group_means[i]);
-    }
+        // Group means
+        let group_means: Vec<f64> = group_data.iter().map(|g| mean(g)).collect();
 
-    let ss_total = ss_between + ss_within;
-    let df_between = (k - 1) as f64;
-    let df_within = (n_total - k) as f64;
+        // SS_between
+        let mut ss_between = 0.0;
+        for (i, group) in group_data.iter().enumerate() {
+            let n = group.len() as f64;
+            let diff = group_means[i] - grand_mean;
+            ss_between += n * diff * diff;
+        }
 
-    // Eta-squared
-    let eta2 = if ss_total > 0.0 { ss_between / ss_total } else { 0.0 };
+        // SS_within with Kahan summation
+        let mut ss_within = 0.0;
+        for (i, group) in group_data.iter().enumerate() {
+            ss_within += sum_of_squares_kahan(group, group_means[i]);
+        }
 
-    // Omega-squared (less biased)
-    let ms_within = if df_within > 0.0 { ss_within / df_within } else { 0.0 };
-    let omega2 = if ss_total + ms_within > 0.0 {
-        (ss_between - df_between * ms_within) / (ss_total + ms_within)
-    } else {
-        0.0
-    };
-    let omega2 = omega2.max(0.0); // Can be slightly negative with small effects
+        let ss_total = ss_between + ss_within;
+        let df_between = (k - 1) as f64;
+        let df_within = (n_total - k) as f64;
+
+        // Eta-squared
+        let eta2 = if ss_total > 0.0 { ss_between / ss_total } else { 0.0 };
+
+        // Omega-squared (less biased)
+        let ms_within = if df_within > 0.0 { ss_within / df_within } else { 0.0 };
+        let omega2 = if ss_total + ms_within > 0.0 {
+            (ss_between - df_between * ms_within) / (ss_total + ms_within)
+        } else {
+            0.0
+        };
+        let omega2 = omega2.max(0.0); // Can be slightly negative with small effects
+        Ok((ss_between, ss_within, ss_total, eta2, omega2))
+    })?;
 
     let d = PyDict::new_bound(py);
     d.set_item("eta_squared", eta2)?;
@@ -216,70 +229,73 @@ pub fn normality_summary_np(
     x: numpy::PyReadonlyArray1<f64>,
 ) -> PyResult<Py<PyDict>> {
     let xs = x.as_slice()?;
-    let n = xs.len();
+    let (n, skewness, kurtosis, excess_kurtosis, jb, jb_p, ad_star) = py.allow_threads(|| -> PyResult<_> {
+        let n = xs.len();
 
-    if n < 4 {
-        return Err(PyValueError::new_err("normality_summary requires n >= 4"));
-    }
-    reject_nonfinite(xs, "x")?;
+        if n < 4 {
+            return Err(PyValueError::new_err("normality_summary requires n >= 4"));
+        }
+        reject_nonfinite(xs, "x")?;
 
-    let m = mean(xs);
+        let m = mean(xs);
 
-    // Single pass for m2, m3, m4
-    let mut m2 = 0.0;
-    let mut m3 = 0.0;
-    let mut m4 = 0.0;
+        // Single pass for m2, m3, m4
+        let mut m2 = 0.0;
+        let mut m3 = 0.0;
+        let mut m4 = 0.0;
 
-    for &v in xs {
-        let d = v - m;
-        let d2 = d * d;
-        m2 += d2;
-        m3 += d2 * d;
-        m4 += d2 * d2;
-    }
+        for &v in xs {
+            let d = v - m;
+            let d2 = d * d;
+            m2 += d2;
+            m3 += d2 * d;
+            m4 += d2 * d2;
+        }
 
-    let nf = n as f64;
-    m2 /= nf;
-    m3 /= nf;
-    m4 /= nf;
+        let nf = n as f64;
+        m2 /= nf;
+        m3 /= nf;
+        m4 /= nf;
 
-    if m2 <= 0.0 {
-        return Err(PyValueError::new_err("variance is zero"));
-    }
+        if m2 <= 0.0 {
+            return Err(PyValueError::new_err("variance is zero"));
+        }
 
-    let skewness = m3 / m2.powf(1.5);
-    let kurtosis = m4 / (m2 * m2);
-    let excess_kurtosis = kurtosis - 3.0;
+        let skewness = m3 / m2.powf(1.5);
+        let kurtosis = m4 / (m2 * m2);
+        let excess_kurtosis = kurtosis - 3.0;
 
-    // Jarque-Bera
-    let jb = (nf / 6.0) * (skewness * skewness + excess_kurtosis * excess_kurtosis / 4.0);
+        // Jarque-Bera
+        let jb = (nf / 6.0) * (skewness * skewness + excess_kurtosis * excess_kurtosis / 4.0);
 
-    use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
-    let chi2_dist = ChiSquared::new(2.0).unwrap();
-    let jb_p = (1.0 - chi2_dist.cdf(jb)).clamp(0.0, 1.0);
+        use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
+        let chi2_dist = ChiSquared::new(2.0).unwrap();
+        let jb_p = (1.0 - chi2_dist.cdf(jb)).clamp(0.0, 1.0);
 
-    // Anderson-Darling
-    let std_dev = (m2 * nf / (nf - 1.0)).sqrt(); // sample std (ddof=1)
-    let mut z: Vec<f64> = xs.iter().map(|&xi| (xi - m) / std_dev).collect();
-    z.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // Anderson-Darling
+        let std_dev = (m2 * nf / (nf - 1.0)).sqrt(); // sample std (ddof=1)
+        let mut z: Vec<f64> = xs.iter().map(|&xi| (xi - m) / std_dev).collect();
+        z.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let norm = Normal::new(0.0, 1.0).unwrap();
-    let mut a2 = 0.0;
+        let norm = Normal::new(0.0, 1.0).unwrap();
+        let mut a2 = 0.0;
 
-    for i in 0..n {
-        let z_i = z[i];
-        let z_ni = z[n - 1 - i];
-        let if64 = (i + 1) as f64;
+        for i in 0..n {
+            let z_i = z[i];
+            let z_ni = z[n - 1 - i];
+            let if64 = (i + 1) as f64;
 
-        let cdf_i = norm.cdf(z_i).max(1e-300).min(1.0 - 1e-300);
-        let sf_ni = (1.0 - norm.cdf(z_ni)).max(1e-300).min(1.0 - 1e-300);
+            let cdf_i = norm.cdf(z_i).max(1e-300).min(1.0 - 1e-300);
+            let sf_ni = (1.0 - norm.cdf(z_ni)).max(1e-300).min(1.0 - 1e-300);
 
-        a2 += (2.0 * if64 - 1.0) * (cdf_i.ln() + sf_ni.ln());
-    }
-    a2 = -nf - a2 / nf;
+            a2 += (2.0 * if64 - 1.0) * (cdf_i.ln() + sf_ni.ln());
+        }
+        a2 = -nf - a2 / nf;
 
-    // Stephens correction
-    let ad_star = a2 * (1.0 + 4.0 / nf - 25.0 / (nf * nf));
+        // Stephens correction
+        let ad_star = a2 * (1.0 + 4.0 / nf - 25.0 / (nf * nf));
+        Ok((n, skewness, kurtosis, excess_kurtosis, jb, jb_p, ad_star))
+    })?;
 
     let d = PyDict::new_bound(py);
     d.set_item("skewness", skewness)?;

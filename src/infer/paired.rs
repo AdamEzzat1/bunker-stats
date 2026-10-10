@@ -26,49 +26,52 @@ pub fn t_test_paired_np(
     let xs = x.as_slice()?;
     let ys = y.as_slice()?;
 
-    if xs.len() != ys.len() {
-        return Err(PyValueError::new_err("x and y must have the same length"));
-    }
-    let n = xs.len();
-    if n < 2 {
-        return Err(PyValueError::new_err("t_test_paired requires n >= 2"));
-    }
-
-    reject_nonfinite(xs, "x")?;
-    reject_nonfinite(ys, "y")?;
-
-    // Compute differences
-    let diffs: Vec<f64> = xs.iter().zip(ys.iter()).map(|(&a, &b)| a - b).collect();
-
-    // One-sample t-test on differences vs popmean=0
-    let m = mean(&diffs);
-    let v = var_sample(&diffs, m);
-
-    let alt = Alternative::from_str(alternative)?;
-
-    let se = (v / (n as f64)).sqrt();
-    let t = if se == 0.0 {
-        if m == 0.0 { 0.0 } else { f64::INFINITY * m.signum() }
-    } else {
-        m / se
-    };
-
-    let df = (n - 1) as f64;
-
-    let p = if t.is_finite() {
-        let dist = StudentsT::new(0.0, 1.0, df).unwrap();
-        let cdf = dist.cdf(t);
-        match alt {
-            Alternative::TwoSided => {
-                let tail = if cdf < 0.5 { cdf } else { 1.0 - cdf };
-                (2.0 * tail).clamp(0.0, 1.0)
-            }
-            Alternative::Less => cdf.clamp(0.0, 1.0),
-            Alternative::Greater => (1.0 - cdf).clamp(0.0, 1.0),
+    let (m, t, df, p) = py.allow_threads(|| -> PyResult<_> {
+        if xs.len() != ys.len() {
+            return Err(PyValueError::new_err("x and y must have the same length"));
         }
-    } else {
-        0.0
-    };
+        let n = xs.len();
+        if n < 2 {
+            return Err(PyValueError::new_err("t_test_paired requires n >= 2"));
+        }
+
+        reject_nonfinite(xs, "x")?;
+        reject_nonfinite(ys, "y")?;
+
+        // Compute differences
+        let diffs: Vec<f64> = xs.iter().zip(ys.iter()).map(|(&a, &b)| a - b).collect();
+
+        // One-sample t-test on differences vs popmean=0
+        let m = mean(&diffs);
+        let v = var_sample(&diffs, m);
+
+        let alt = Alternative::from_str(alternative)?;
+
+        let se = (v / (n as f64)).sqrt();
+        let t = if se == 0.0 {
+            if m == 0.0 { 0.0 } else { f64::INFINITY * m.signum() }
+        } else {
+            m / se
+        };
+
+        let df = (n - 1) as f64;
+
+        let p = if t.is_finite() {
+            let dist = StudentsT::new(0.0, 1.0, df).unwrap();
+            let cdf = dist.cdf(t);
+            match alt {
+                Alternative::TwoSided => {
+                    let tail = if cdf < 0.5 { cdf } else { 1.0 - cdf };
+                    (2.0 * tail).clamp(0.0, 1.0)
+                }
+                Alternative::Less => cdf.clamp(0.0, 1.0),
+                Alternative::Greater => (1.0 - cdf).clamp(0.0, 1.0),
+            }
+        } else {
+            0.0
+        };
+        Ok((m, t, df, p))
+    })?;
 
     let d = PyDict::new_bound(py);
     d.set_item("statistic", t)?;
