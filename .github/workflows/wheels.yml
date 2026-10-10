@@ -53,6 +53,41 @@ jobs:
           source .venv/bin/activate
           pytest tests -q --ignore=tests/advance
 
+  # The opt-in `gemm` feature is not in any wheel, so nothing above compiles or
+  # runs it. Its kernel is picked from the running CPU, hence both
+  # architectures: x86_64 exercises the FMA/AVX kernels, aarch64 the NEON one.
+  test-gemm:
+    name: tests (gemm feature, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust unit + property tests (gemm)
+        run: cargo test --lib --quiet --features gemm
+      - name: Rust matrix tests (gemm, no rayon)
+        run: "cargo test --lib --quiet --no-default-features --features gemm matrix::"
+      - name: Build and install with gemm (venv + maturin develop)
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin numpy scipy pytest
+          maturin develop --features gemm
+      - name: Python matrix tests (gemm)
+        run: |
+          source .venv/bin/activate
+          pytest tests/test_matrix.py -q
+
   linux:
     runs-on: ubuntu-22.04
     strategy:
