@@ -297,6 +297,67 @@ class TestCovMatrixSkipna:
         assert np.isnan(cov[1, 0])
 
 
+class TestCovMatrixBlockedKernel:
+    """The dense covariance kernels process rows in cache-sized blocks.
+
+    These shapes cross block boundaries (ragged last block, lane tails) and pin
+    the reproducibility contract: same values -> same bytes, whatever the input
+    layout and however many times or from however many threads it is called.
+    """
+
+    @pytest.mark.parametrize("n,p", [(20_003, 3), (9_001, 40), (333, 700)])
+    def test_multi_block_matches_numpy(self, n, p):
+        X = np.random.default_rng(n + p).normal(size=(n, p))
+        want = np.cov(X, rowvar=False)
+        scale = np.sqrt(np.outer(np.diag(want), np.diag(want)))
+
+        # Error in correlation units, so near-zero covariances don't dominate.
+        assert np.max(np.abs(bsr.cov_matrix_np(X) - want) / scale) < 1e-12
+        assert np.max(np.abs(bsr.cov_matrix_bias_np(X) * n / (n - 1) - want) / scale) < 1e-12
+
+        Xc = X - X.mean(axis=0)
+        assert np.max(np.abs(bsr.cov_matrix_centered_np(Xc) - want) / scale) < 1e-12
+
+    def test_exactly_symmetric(self):
+        cov = bsr.cov_matrix_np(np.random.default_rng(1).normal(size=(5_000, 60)))
+        assert np.array_equal(cov, cov.T)
+
+    def test_layout_does_not_change_the_bytes(self):
+        X = np.random.default_rng(2).normal(size=(12_345, 17))
+        wide = np.empty((12_345, 34))
+        wide[:, ::2] = X
+
+        base = bsr.cov_matrix_np(X).tobytes()
+        assert bsr.cov_matrix_np(np.asfortranarray(X)).tobytes() == base
+        assert bsr.cov_matrix_np(wide[:, ::2]).tobytes() == base
+
+    def test_repeated_and_concurrent_calls_are_bit_identical(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        X = np.random.default_rng(3).normal(size=(4_000, 120))
+        base = bsr.cov_matrix_np(X).tobytes()
+        assert bsr.cov_matrix_np(X).tobytes() == base
+
+        # The binding releases the GIL, so these genuinely overlap.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(lambda _: bsr.cov_matrix_np(X).tobytes(), range(8)))
+        assert all(r == base for r in results)
+
+    def test_large_offset_stays_accurate(self):
+        X = np.random.default_rng(4).normal(size=(50_000, 4))
+        want = bsr.cov_matrix_np(X)
+        got = bsr.cov_matrix_np(X + 1.0e8)
+        np.testing.assert_allclose(got, want, rtol=0, atol=1e-7)
+
+    def test_nan_poisons_only_its_own_column(self):
+        X = np.random.default_rng(5).normal(size=(300, 4))
+        X[17, 2] = np.nan
+        nan = np.isnan(bsr.cov_matrix_np(X))
+        expected = np.zeros((4, 4), dtype=bool)
+        expected[2, :] = expected[:, 2] = True
+        assert np.array_equal(nan, expected)
+
+
 # ==============================================================================
 # CORRELATION TESTS
 # ==============================================================================
