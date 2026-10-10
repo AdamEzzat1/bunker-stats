@@ -1545,7 +1545,7 @@ pub fn xtx_matrix_np<'py>(
     }
 
     let mut out = vec![0.0f64; n_cols * n_cols];
-    xtx_matrix_out(xs, n_rows, n_cols, &mut out);
+    py.allow_threads(|| xtx_matrix_out(xs, n_rows, n_cols, &mut out));
 
     let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("xtx_matrix_np: from_shape_vec failed"))?;
@@ -1567,7 +1567,7 @@ pub fn xxt_matrix_np<'py>(
 
     // WARNING: n_rows*n_rows can be huge. We leave sizing responsibility to caller.
     let mut out = vec![0.0f64; n_rows * n_rows];
-    xxt_matrix_out(xs, n_rows, n_cols, &mut out);
+    py.allow_threads(|| xxt_matrix_out(xs, n_rows, n_cols, &mut out));
 
     let out2 = Array2::from_shape_vec((n_rows, n_rows), out)
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("xxt_matrix_np: from_shape_vec failed"))?;
@@ -1588,7 +1588,7 @@ pub fn pairwise_euclidean_cols_np<'py>(
     }
 
     let mut out = vec![0.0f64; n_cols * n_cols];
-    pairwise_euclidean_cols_out(xs, n_rows, n_cols, &mut out);
+    py.allow_threads(|| pairwise_euclidean_cols_out(xs, n_rows, n_cols, &mut out));
 
     let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("pairwise_euclidean_cols_np: from_shape_vec failed"))?;
@@ -1609,7 +1609,7 @@ pub fn pairwise_cosine_cols_np<'py>(
     }
 
     let mut out = vec![0.0f64; n_cols * n_cols];
-    pairwise_cosine_cols_out(xs, n_rows, n_cols, &mut out);
+    py.allow_threads(|| pairwise_cosine_cols_out(xs, n_rows, n_cols, &mut out));
 
     let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("pairwise_cosine_cols_np: from_shape_vec failed"))?;

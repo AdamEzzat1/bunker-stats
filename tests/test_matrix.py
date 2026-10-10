@@ -358,6 +358,69 @@ class TestCovMatrixBlockedKernel:
         assert np.array_equal(nan, expected)
 
 
+class TestGramAndDistanceBlockedKernels:
+    """X^T X, X X^T and the column-distance kernels share the blocked routine."""
+
+    @pytest.mark.parametrize("n,p", [(20_003, 3), (5_001, 24), (500, 300)])
+    def test_multi_block_matches_numpy_and_scipy(self, n, p):
+        X = np.random.default_rng(n + p).normal(size=(n, p)) + 0.25
+
+        xtx = X.T @ X
+        scale = np.sqrt(np.outer(np.diag(xtx), np.diag(xtx)))
+        assert np.max(np.abs(bsr.xtx_matrix_np(X) - xtx) / scale) < 1e-12
+
+        np.testing.assert_allclose(
+            bsr.pairwise_euclidean_cols_np(X), squareform(pdist(X.T, "euclidean")), rtol=1e-12, atol=0
+        )
+        np.testing.assert_allclose(
+            bsr.pairwise_cosine_cols_np(X), squareform(pdist(X.T, "cosine")), rtol=0, atol=1e-12
+        )
+
+    @pytest.mark.parametrize("n,p", [(7, 1), (60, 37), (25, 5_003), (300, 1_200)])
+    def test_xxt_matches_numpy_across_column_blocks(self, n, p):
+        X = np.random.default_rng(n + p).normal(size=(n, p)) + 0.25
+        want = X @ X.T
+        scale = np.sqrt(np.outer(np.diag(want), np.diag(want)))
+        got = bsr.xxt_matrix_np(X)
+        assert np.max(np.abs(got - want) / scale) < 1e-12
+        assert np.array_equal(got, got.T)
+
+    @pytest.mark.parametrize(
+        "name", ["xtx_matrix_np", "xxt_matrix_np", "pairwise_euclidean_cols_np", "pairwise_cosine_cols_np"]
+    )
+    def test_layout_repeats_and_threads_do_not_change_the_bytes(self, name):
+        from concurrent.futures import ThreadPoolExecutor
+
+        fn = getattr(bsr, name)
+        X = np.random.default_rng(6).normal(size=(1_500, 130))
+        wide = np.empty((1_500, 260))
+        wide[:, ::2] = X
+
+        base = fn(X).tobytes()
+        assert fn(X).tobytes() == base
+        assert fn(np.asfortranarray(X)).tobytes() == base
+        assert fn(wide[:, ::2]).tobytes() == base
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            assert all(r == base for r in pool.map(lambda _: fn(X).tobytes(), range(8)))
+
+    def test_identical_columns_are_at_distance_exactly_zero(self):
+        X = np.random.default_rng(7).normal(size=(10_000, 3)) + 1.0e6
+        X[:, 2] = X[:, 0]
+        dist = bsr.pairwise_euclidean_cols_np(X)
+        assert dist[0, 2] == 0.0 and dist[2, 0] == 0.0
+        assert dist[0, 1] > 0.0
+        assert np.array_equal(np.diag(dist), np.zeros(3))
+
+    def test_cosine_zero_norm_column_is_nan(self):
+        X = np.random.default_rng(8).normal(size=(500, 4))
+        X[:, 1] = 0.0
+        nan = np.isnan(bsr.pairwise_cosine_cols_np(X))
+        expected = np.zeros((4, 4), dtype=bool)
+        expected[1, :] = expected[:, 1] = True
+        assert np.array_equal(nan, expected)
+
+
 # ==============================================================================
 # CORRELATION TESTS
 # ==============================================================================
