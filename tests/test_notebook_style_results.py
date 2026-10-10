@@ -653,6 +653,55 @@ class TestSignificanceAndEffect:
         ).metadata["n_significant"]
         assert raw > 0 and adjusted <= raw
 
+    def test_documented_adjust_recipe_survives_nan_pvalues(self):
+        """`correlation_report(pvalues=True)` emits NaN for undefined pairs and
+        `p_adjust` rejects NaN, so the documented recipe adjusts the finite
+        values only. This runs that recipe on the layer's own output."""
+        rng = np.random.default_rng(2)
+        frame = pd.DataFrame(
+            {"a": rng.normal(size=20), "b": rng.normal(size=20), "k": 1.0}
+        )
+        table = nb.correlation_report(frame, pvalues=True)
+        assert table["pvalue"].isna().sum() == 2
+        with pytest.raises(ValueError, match="NaN"):
+            bs.p_adjust(table["pvalue"].to_numpy(), "holm")
+
+        p = table["pvalue"].to_numpy(dtype=float)
+        ok = np.isfinite(p)
+        table["p_adj"] = np.nan
+        table.loc[ok, "p_adj"] = bs.p_adjust(p[ok], "holm")
+
+        result = nb.style_significance(table, pvalue_column="p_adj", rich=True)
+        assert (result.metadata["n_tests"], result.metadata["n_missing"]) == (1, 2)
+        assert "<table" in result.styler.to_html()
+
+    @pytest.mark.parametrize(
+        "alpha", [0.05, np.float64(0.05), np.float32(0.05), np.float16(0.05)]
+    )
+    def test_alpha_accepts_numpy_scalars(self, results, alpha):
+        result = nb.style_significance(results, alpha=alpha, rich=True)
+        assert isinstance(result.metadata["alpha"], float)
+        assert result.metadata["n_significant"] == 3
+
+    @pytest.mark.parametrize("alpha", [0, 1, 1.5, -0.1, True, "0.05", None])
+    def test_alpha_out_of_range_or_wrong_type(self, results, alpha):
+        with pytest.raises(ValueError, match=r"alpha must be in \(0, 1\)"):
+            nb.style_significance(results, alpha=alpha)
+
+    def test_rich_coverage_matches_the_docs(self):
+        """The docs name the helpers without a `rich` option; keep them honest."""
+        import inspect
+
+        without = {
+            name for name in nb.__all__
+            if inspect.isfunction(getattr(nb, name))
+            and "rich" not in inspect.signature(getattr(nb, name)).parameters
+        }
+        assert without == {
+            "describe_fast", "normality_report", "missingness_report",
+            "rolling_report", "available_themes",
+        }
+
     @pytest.mark.parametrize("bad", [-0.01, 1.5])
     def test_out_of_range_pvalues_are_rejected(self, bad):
         with pytest.raises(ValueError, match=r"outside \[0, 1\]"):

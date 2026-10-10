@@ -23,11 +23,15 @@ Suffix            Returns
 ``*_columns``     a :class:`pandas.DataFrame` copy with added/transformed cols
 ================  ==========================================================
 
-Every helper also takes ``rich=True``, which keeps the same numbers but wraps
-them with the context needed to describe or reproduce them: ``*_report`` ->
-:class:`NotebookReport`, stylers -> :class:`StyleResult` (unpacks as ``styler,
-frame, metadata``), transforms -> :class:`TransformResult` (``frame,
-metadata``). All of them have ``.to_dict()``, ``.info()`` and ``.warnings``.
+Most helpers also take ``rich=True``, which keeps the same numbers but wraps
+them with the context needed to describe or reproduce them: every styler ->
+:class:`StyleResult` (unpacks as ``styler, frame, metadata``), every transform
+-> :class:`TransformResult` (``frame, metadata``), and four reports
+(:func:`robust_summary`, :func:`outlier_report`, :func:`correlation_report`,
+:func:`bootstrap_ci_report`) -> :class:`NotebookReport`. All of them have
+``.to_dict()``, ``.info()`` and ``.warnings``. :func:`describe_fast`,
+:func:`normality_report`, :func:`missingness_report` and
+:func:`rolling_report` have no ``rich`` option yet.
 
 Copy semantics
 --------------
@@ -1805,15 +1809,27 @@ def style_significance(
        The p-values are shaded exactly as given -- **no multiple-comparison
        correction is applied**. With ``m`` true nulls you expect about
        ``alpha * m`` rows shaded as significant by chance. Adjust first with
-       :func:`bunker_stats.p_adjust` and style the adjusted column.
+       :func:`bunker_stats.p_adjust` and style the adjusted column. That
+       function rejects NaN, so pass it the finite p-values only::
+
+           p = df["pvalue"].to_numpy(dtype=float)
+           ok = np.isfinite(p)
+           df["p_adj"] = np.nan
+           df.loc[ok, "p_adj"] = bs.p_adjust(p[ok], "holm")
 
     With ``rich=True`` returns a :class:`SignificanceStyleResult` whose
     metadata reports the number of tests, per-tier counts and that expected
     false-positive count.
     """
     p = _check_result_column(df, pvalue_column, "p-value")
-    if not isinstance(alpha, (int, float)) or not 0.0 < alpha < 1.0:
+    # np.number covers numpy scalars such as float32, which are not `float`.
+    if (
+        isinstance(alpha, bool)
+        or not isinstance(alpha, (int, float, np.number))
+        or not 0.0 < alpha < 1.0
+    ):
         raise ValueError(f"alpha must be in (0, 1), got {alpha}")
+    alpha = float(alpha)
     finite = np.isfinite(p)
     with np.errstate(invalid="ignore"):
         out_of_range = finite & ((p < 0.0) | (p > 1.0))
@@ -2588,7 +2604,7 @@ class NotebookReport:
 
 
 class SummaryReport(NotebookReport):
-    """Rich wrapper over :func:`robust_summary` / :func:`describe_fast`."""
+    """Rich wrapper over :func:`robust_summary`."""
 
     _title = "Robust Summary"
 

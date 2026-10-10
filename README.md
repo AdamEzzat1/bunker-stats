@@ -646,8 +646,10 @@ raises a clear `ImportError` naming the command above.
 | `*_style` / `style_*` | `pandas.io.formats.style.Styler`                 |
 | `*_columns`   | `pandas.DataFrame` copy with added/transformed columns    |
 
-Every helper also accepts `rich=True` to get the same output wrapped with its
-context — see [Report objects](#report-objects-and-interactive-plotly-figures)
+Every styler and transform, and four of the reports (`robust_summary`,
+`outlier_report`, `correlation_report`, `bootstrap_ci_report`), also accept
+`rich=True` to get the same output wrapped with its context. `describe_fast`,
+`normality_report`, `missingness_report` and `rolling_report` do not yet. See [Report objects](#report-objects-and-interactive-plotly-figures)
 and [Style results](#style-results-richtrue-on-stylers-and-transforms).
 
 **Copy semantics.** No helper ever modifies the DataFrame it is given, and
@@ -706,7 +708,8 @@ and re-exported from `bunker_stats.pandas` alongside `cov_df` / `corr_df`.
 
 ### Report objects and interactive Plotly figures
 
-Every `*_report` helper also takes **`rich=True`**, returning a report object
+`robust_summary`, `outlier_report`, `correlation_report` and
+`bootstrap_ci_report` also take **`rich=True`**, returning a report object
 instead of a bare DataFrame — same numbers (`report.data`), plus `meta`
 (method, parameters, NaN policy, seeds), misuse-prevention `warnings`, a stable
 `to_dict()` schema (`{"title", "data", "meta", "warnings"}`), `.style()`,
@@ -804,8 +807,20 @@ to keep that visible:
   share of "outliers" is what the rule does to clean data.
 - **`style_significance` applies no multiple-comparison correction.** It
   shades the p-values as given and reports how many would fall below `alpha`
-  by chance. Adjust first, then style:
-  `df["p_adj"] = bs.p_adjust(df["pvalue"].to_numpy(), "holm")`.
+  by chance. Adjust first, then style the adjusted column. `bs.p_adjust`
+  rejects NaN, and `correlation_report(pvalues=True)` emits NaN for undefined
+  pairs, so adjust the finite p-values only:
+
+  ```python
+  p = df["pvalue"].to_numpy(dtype=float)
+  ok = np.isfinite(p)
+  df["p_adj"] = np.nan
+  df.loc[ok, "p_adj"] = bs.p_adjust(p[ok], "holm")
+  nb.style_significance(df, pvalue_column="p_adj")
+  ```
+
+  The result's multiple-comparison warning still appears for an adjusted
+  column: the styler cannot tell that the values were already corrected.
 - **Robust scaling with MAD = 0** (more than half the values identical) is not
   a usable score: the kernel divides by a ~1e-12 floor. The result carries
   `zero_mad=True` and a warning; `scale_compare_style` leaves the column NaN.
