@@ -1524,7 +1524,7 @@ pub fn cov_matrix_skipna_np<'py>(
     }
 
     let mut out = vec![0.0f64; n_cols * n_cols];
-    cov_matrix_skipna_out(xs, n_rows, n_cols, &mut out);
+    py.allow_threads(|| cov_matrix_skipna_out(xs, n_rows, n_cols, &mut out));
 
     let out2 = Array2::from_shape_vec((n_cols, n_cols), out)
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("cov_matrix_skipna_np: from_shape_vec failed"))?;

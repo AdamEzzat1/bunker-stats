@@ -421,6 +421,83 @@ class TestGramAndDistanceBlockedKernels:
         assert np.array_equal(nan, expected)
 
 
+class TestCovMatrixSkipnaBlockedKernel:
+    """Pairwise-complete covariance on the blocked routine."""
+
+    @staticmethod
+    def _holed(n, p, frac, seed):
+        rng = np.random.default_rng(seed)
+        X = rng.normal(size=(n, p)) + 0.25
+        X[rng.random((n, p)) < frac] = np.nan
+        return X
+
+    @staticmethod
+    def _pairwise_cov(X, i, j):
+        """Two-pass covariance over the rows where both columns are finite.
+
+        (np.ma.cov is not a reference here: it centers each column with the
+        mean of all its own values, not the pairwise-complete mean.)
+        """
+        keep = np.isfinite(X[:, i]) & np.isfinite(X[:, j])
+        a, b = X[keep, i], X[keep, j]
+        return np.dot(a - a.mean(), b - b.mean()) / (keep.sum() - 1)
+
+    @pytest.mark.parametrize("n,p", [(20_003, 3), (5_001, 24), (500, 300)])
+    @pytest.mark.parametrize("frac", [0.0, 0.01, 0.3])
+    def test_multi_block_matches_pairwise_reference(self, n, p, frac):
+        X = self._holed(n, p, frac, seed=n + p)
+        got = bsr.cov_matrix_skipna_np(X)
+        assert np.array_equal(got, got.T)
+
+        rng = np.random.default_rng(0)
+        pairs = {(0, 0), (0, p - 1), (p - 1, p - 1)} | {tuple(rng.integers(0, p, 2)) for _ in range(60)}
+        for i, j in pairs:
+            scale = np.sqrt(self._pairwise_cov(X, i, i) * self._pairwise_cov(X, j, j))
+            assert abs(got[i, j] - self._pairwise_cov(X, i, j)) / scale < 1e-12, (i, j)
+
+    def test_corr_skipna_is_cov_skipna_normalized_by_its_diagonal(self):
+        X = self._holed(6_000, 12, 0.05, seed=9)
+        cov = bsr.cov_matrix_skipna_np(X)
+        sd = np.sqrt(np.diag(cov))
+        np.testing.assert_allclose(bsr.corr_matrix_skipna_np(X), cov / np.outer(sd, sd), rtol=0, atol=1e-14)
+
+    def test_inf_is_treated_as_missing(self):
+        X = self._holed(3_000, 5, 0.0, seed=10)
+        with_inf, with_nan = X.copy(), X.copy()
+        with_inf[::9, 1], with_nan[::9, 1] = np.inf, np.nan
+        with_inf[4::11, 3], with_nan[4::11, 3] = -np.inf, np.nan
+        assert bsr.cov_matrix_skipna_np(with_inf).tobytes() == bsr.cov_matrix_skipna_np(with_nan).tobytes()
+
+    def test_nans_in_one_column_do_not_change_other_entries_bytes(self):
+        X = self._holed(25_000, 3, 0.0, seed=11)
+        holed = X.copy()
+        holed[::7, 2] = np.nan
+        a, b = bsr.cov_matrix_skipna_np(X), bsr.cov_matrix_skipna_np(holed)
+        assert a[:2, :2].tobytes() == b[:2, :2].tobytes()
+        assert a[0, 2] != b[0, 2]
+
+    def test_layout_repeats_and_threads_do_not_change_the_bytes(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        X = self._holed(1_500, 130, 0.05, seed=12)
+        wide = np.empty((1_500, 260))
+        wide[:, ::2] = X
+
+        base = bsr.cov_matrix_skipna_np(X).tobytes()
+        assert bsr.cov_matrix_skipna_np(X).tobytes() == base
+        assert bsr.cov_matrix_skipna_np(np.asfortranarray(X)).tobytes() == base
+        assert bsr.cov_matrix_skipna_np(wide[:, ::2]).tobytes() == base
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            assert all(r == base for r in pool.map(lambda _: bsr.cov_matrix_skipna_np(X).tobytes(), range(8)))
+
+    def test_too_few_shared_rows_is_nan(self):
+        X = np.array([[1.0, np.nan], [np.nan, 2.0], [3.0, np.nan], [4.0, 5.0]])
+        cov = bsr.cov_matrix_skipna_np(X)
+        assert np.isnan(cov[0, 1]) and np.isnan(cov[1, 0])
+        np.testing.assert_allclose(np.diag(cov), [7.0 / 3.0, 4.5], rtol=1e-15)
+
+
 # ==============================================================================
 # CORRELATION TESTS
 # ==============================================================================

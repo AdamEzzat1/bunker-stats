@@ -2,7 +2,7 @@
 """
 Benchmark: dense matrix kernels end to end.
 
---kernel selects cov (default), xtx, xxt, euclidean or cosine.
+--kernel selects cov (default), skipna, xtx, xxt, euclidean or cosine.
 
 Every case runs in its own subprocess so that peak memory is attributable to
 one call and so the Rayon pool size can be pinned per run. Timings INCLUDE the
@@ -39,7 +39,8 @@ import time
 from typing import Dict, List
 
 # (name, n, p, layout, data)
-#   layout: c | f | strided | f32        data: normal | offset
+#   layout: c | f | strided | f32        data: normal | offset | nan1 | nan30
+#   (nan1 / nan30: 1% / 30% of entries missing, independently per cell)
 CASES = [
     ("small",        200,       5,    "c",       "normal"),
     ("medium",       10_000,    20,   "c",       "normal"),
@@ -64,9 +65,18 @@ XXT_CASES = [
     ("fortran",   2_000, 200,    "f", "normal"),
 ]
 
+# Pairwise-complete covariance: the same shapes with no, few and many NaNs.
+SKIPNA_CASES = [
+    (f"{name}_{data}", n, p, "c", data)
+    for name, n, p in [("medium", 10_000, 20), ("tall", 1_000_000, 8), ("large", 100_000, 100),
+                       ("wide", 5_000, 500), ("square", 500, 500)]
+    for data in ("normal", "nan1", "nan30")
+] + [("fortran_nan1", 100_000, 20, "f", "nan1"), ("offset_nan1", 100_000, 20, "c", "offset_nan1")]
+
 # kernel -> (binding name, cases, "vectors are rows")
 KERNELS = {
     "cov":       ("cov_matrix_np", CASES, False),
+    "skipna":    ("cov_matrix_skipna_np", SKIPNA_CASES, False),
     "xtx":       ("xtx_matrix_np", CASES, False),
     "xxt":       ("xxt_matrix_np", XXT_CASES, True),
     "euclidean": ("pairwise_euclidean_cols_np", CASES, False),
@@ -79,6 +89,10 @@ def _numpy_equivalent(kernel: str, x):
 
     if kernel == "cov":
         return np.cov(x, rowvar=False)
+    if kernel == "skipna":
+        # Timing context only: np.ma.cov centers with per-column means, which
+        # is a different estimator from pairwise-complete covariance.
+        return np.ma.cov(np.ma.masked_invalid(x), rowvar=False).filled(np.nan)
     if kernel == "xtx":
         return x.T @ x
     if kernel == "xxt":
@@ -95,7 +109,8 @@ def _make(n: int, p: int, layout: str, data: str):
     import numpy as np
 
     rng = np.random.default_rng(12345)
-    loc = 1.0e8 if data == "offset" else 0.0
+    loc = 1.0e8 if data.startswith("offset") else 0.0
+    missing = 0.30 if data.endswith("nan30") else 0.01 if data.endswith("nan1") else 0.0
 
     if layout == "f32":
         return rng.standard_normal((n, p), dtype=np.float32)
@@ -112,7 +127,10 @@ def _make(n: int, p: int, layout: str, data: str):
     step = max(1, 2_000_000 // max(p, 1))
     for r0 in range(0, n, step):
         r1 = min(n, r0 + step)
-        view[r0:r1, :] = rng.standard_normal((r1 - r0, p)) + loc
+        block = rng.standard_normal((r1 - r0, p)) + loc
+        if missing:
+            block[rng.random(block.shape) < missing] = np.nan
+        view[r0:r1, :] = block
     return view
 
 
@@ -164,8 +182,21 @@ def _reference_error(kernel: str, x, out) -> float:
     def dot(i: int, j: int) -> float:
         return math.fsum(vec(i) * vec(j))
 
+    def pairwise_complete(i: int, j: int):
+        """(covariance, sqrt(var_i var_j)) over rows where both columns are finite."""
+        a, b = vec(i), vec(j)
+        keep = np.isfinite(a) & np.isfinite(b)
+        a, b = a[keep], b[keep]
+        k = len(a)
+        a, b = a - math.fsum(a) / k, b - math.fsum(b) / k
+        return math.fsum(a * b) / (k - 1), math.sqrt(math.fsum(a * a) * math.fsum(b * b)) / (k - 1)
+
     worst = 0.0
     for i, j in sorted(pairs):
+        if kernel == "skipna":
+            ref, scale = pairwise_complete(i, j)
+            worst = max(worst, abs(float(out[i, j]) - ref) / scale)
+            continue
         norm = math.sqrt(dot(i, i) * dot(j, j))
         if kernel == "cov":
             ref, scale = dot(i, j) / (len(vec(i)) - 1), norm / (len(vec(i)) - 1)
