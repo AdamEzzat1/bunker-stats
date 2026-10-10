@@ -6,9 +6,8 @@
 // - hot kernels write into a preallocated flat buffer (row-major) via &mut [f64]
 // - symmetric matrices compute upper triangle then mirror
 // - optional Rayon parallelism behind feature="parallel"
-// - the dense kernels (everything except the NaN-skipping covariance) are
-//   cache-blocked and bit-reproducible: the same input gives the same bytes on
-//   every CPU and for every thread count
+// - the matrix kernels are cache-blocked and bit-reproducible: the same input
+//   gives the same bytes on every CPU and for every thread count
 
 use numpy::ndarray::ArrayView2;
 
@@ -252,6 +251,23 @@ pub fn cov_matrix_centered_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
 /// We compute covariance using a stable one-pass formula:\n
 /// cov(i,j) = (sum_xy - sum_x*sum_y / m) / (m-1)\n
 /// where m is the pairwise count. If m < 2, returns NaN.
+///
+/// Rows are processed in blocks like the dense kernels. Each block is stored
+/// column-major twice: shifted values with missing entries zeroed (`w`), and a
+/// 1.0/0.0 "present" mask (`f`). The four pairwise-complete sums then become
+/// branch-free dot products:
+///
+/// ```text
+/// m = f_i . f_j    sum_x = w_i . f_j    sum_y = f_i . w_j    sum_xy = w_i . w_j
+/// ```
+///
+/// When a column has no missing entries in a block its mask is all ones, so
+/// the dots against it collapse to per-column sums computed once per block.
+/// Those shortcuts add the same terms in the same order, so an entry's bytes
+/// never depend on whether *other* columns contain NaNs. Data without NaNs
+/// costs one dot product per pair, the same as `cov_matrix_out`.
+///
+/// Extra memory: one block of scratch plus three f64 per output cell.
 pub fn cov_matrix_skipna_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
     debug_assert_eq!(x.len(), n * p);
     debug_assert_eq!(out.len(), p * p);
@@ -278,84 +294,86 @@ pub fn cov_matrix_skipna_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
             }
         }
     }
-    let offs = &offs;
 
-    #[cfg(feature = "parallel")]
-    {
-        out.par_chunks_mut(p).enumerate().for_each(|(i, row)| {
-            let oi = offs[i];
-            for j in i..p {
-                let oj = offs[j];
-                let mut m: usize = 0;
-                let mut sum_x = 0.0f64;
-                let mut sum_y = 0.0f64;
-                let mut sum_xy = 0.0f64;
+    let block_rows = ((BLOCK_ELEMS / p).max(MIN_BLOCK_ROWS) / LANES * LANES).min(n);
+    let mut w_scratch = vec![0.0f64; block_rows * p];
+    let mut f_scratch = vec![0.0f64; block_rows * p];
+    let mut col_sum = vec![0.0f64; p];
+    let mut col_cnt = vec![0.0f64; p];
+    let mut col_full = vec![false; p];
 
-                for r in 0..n {
-                    let base = r * p;
-                    let xi = x[base + i];
-                    let yj = x[base + j];
-                    if xi.is_finite() && yj.is_finite() {
-                        let xi = xi - oi;
-                        let yj = yj - oj;
-                        m += 1;
-                        sum_x += xi;
-                        sum_y += yj;
-                        sum_xy += xi * yj;
-                    }
-                }
+    // Per pair: [m, sum_x, sum_y]; sum_xy accumulates in `out`. Counts are
+    // sums of 0.0/1.0, exact in f64.
+    let mut aux = vec![[0.0f64; 3]; p * p];
+    out.fill(0.0);
 
-                row[j] = if m < 2 {
-                    f64::NAN
-                } else {
-                    let mf = m as f64;
-                    (sum_xy - (sum_x * sum_y) / mf) / ((m - 1) as f64)
-                };
-            }
-        });
-
-        for i in 0..p {
-            for j in (i + 1)..p {
-                out[idx(j, i, p)] = out[idx(i, j, p)];
+    for rows in x.chunks(block_rows * p) {
+        let m = rows.len() / p;
+        let w = &mut w_scratch[..m * p];
+        let f = &mut f_scratch[..m * p];
+        for (r, row) in rows.chunks_exact(p).enumerate() {
+            for c in 0..p {
+                let v = row[c];
+                let present = v.is_finite();
+                w[c * m + r] = if present { v - offs[c] } else { 0.0 };
+                f[c * m + r] = if present { 1.0 } else { 0.0 };
             }
         }
-        return;
+        let (w, f) = (&*w, &*f);
+
+        for c in 0..p {
+            let fc = &f[c * m..(c + 1) * m];
+            col_cnt[c] = dot_lanes(fc, fc);
+            col_sum[c] = dot_lanes(&w[c * m..(c + 1) * m], fc);
+            col_full[c] = col_cnt[c] == m as f64;
+        }
+        let (col_sum, col_cnt, col_full) = (&col_sum, &col_cnt, &col_full);
+
+        let add_block = |(i, (out_row, aux_row)): (usize, (&mut [f64], &mut [[f64; 3]]))| {
+            let wi = &w[i * m..(i + 1) * m];
+            let fi = &f[i * m..(i + 1) * m];
+            for j in i..p {
+                let wj = &w[j * m..(j + 1) * m];
+                let fj = &f[j * m..(j + 1) * m];
+
+                out_row[j] += dot_lanes(wi, wj);
+
+                let acc = &mut aux_row[j];
+                acc[0] += if col_full[j] {
+                    col_cnt[i]
+                } else if col_full[i] {
+                    col_cnt[j]
+                } else {
+                    dot_lanes(fi, fj)
+                };
+                acc[1] += if col_full[j] { col_sum[i] } else { dot_lanes(wi, fj) };
+                acc[2] += if col_full[i] { col_sum[j] } else { dot_lanes(fi, wj) };
+            }
+        };
+
+        // Up to four dot products per pair, so the serial cutoff is 4x lower.
+        #[cfg(feature = "parallel")]
+        if 4 * m * p * p >= PAR_MIN_WORK {
+            out.par_chunks_mut(p)
+                .zip(aux.par_chunks_mut(p))
+                .enumerate()
+                .with_min_len((p / 32).max(1))
+                .for_each(add_block);
+            continue;
+        }
+        out.chunks_mut(p).zip(aux.chunks_mut(p)).enumerate().for_each(add_block);
     }
 
-    #[cfg(not(feature = "parallel"))]
-    {
-        for i in 0..p {
-            let oi = offs[i];
-            for j in i..p {
-                let oj = offs[j];
-                let mut m: usize = 0;
-                let mut sum_x = 0.0f64;
-                let mut sum_y = 0.0f64;
-                let mut sum_xy = 0.0f64;
-
-                for r in 0..n {
-                    let base = r * p;
-                    let xi = x[base + i];
-                    let yj = x[base + j];
-                    if xi.is_finite() && yj.is_finite() {
-                        let xi = xi - oi;
-                        let yj = yj - oj;
-                        m += 1;
-                        sum_x += xi;
-                        sum_y += yj;
-                        sum_xy += xi * yj;
-                    }
-                }
-
-                let v = if m < 2 {
-                    f64::NAN
-                } else {
-                    let mf = m as f64;
-                    (sum_xy - (sum_x * sum_y) / mf) / ((m - 1) as f64)
-                };
-                out[idx(i, j, p)] = v;
-                out[idx(j, i, p)] = v;
-            }
+    for i in 0..p {
+        for j in i..p {
+            let [m, sum_x, sum_y] = aux[idx(i, j, p)];
+            let v = if m < 2.0 {
+                f64::NAN
+            } else {
+                (out[idx(i, j, p)] - (sum_x * sum_y) / m) / (m - 1.0)
+            };
+            out[idx(i, j, p)] = v;
+            out[idx(j, i, p)] = v;
         }
     }
 }
@@ -882,6 +900,175 @@ mod tests {
             let one = run(1);
             assert_eq!(one, run(2), "{name}");
             assert_eq!(one, run(7), "{name}");
+        }
+    }
+
+    /// The per-pair loop the blocked skipna kernel replaced.
+    fn naive_skipna(x: &[f64], n: usize, p: usize) -> Vec<f64> {
+        let offs: Vec<f64> = (0..p)
+            .map(|c| (0..n).map(|r| x[r * p + c]).find(|v| v.is_finite()).unwrap_or(0.0))
+            .collect();
+        let mut out = vec![0.0f64; p * p];
+        for i in 0..p {
+            for j in i..p {
+                let (mut m, mut sx, mut sy, mut sxy) = (0usize, 0.0f64, 0.0f64, 0.0f64);
+                for r in 0..n {
+                    let (a, b) = (x[r * p + i], x[r * p + j]);
+                    if a.is_finite() && b.is_finite() {
+                        let (a, b) = (a - offs[i], b - offs[j]);
+                        m += 1;
+                        sx += a;
+                        sy += b;
+                        sxy += a * b;
+                    }
+                }
+                let v = if m < 2 { f64::NAN } else { (sxy - sx * sy / m as f64) / (m - 1) as f64 };
+                out[idx(i, j, p)] = v;
+                out[idx(j, i, p)] = v;
+            }
+        }
+        out
+    }
+
+    /// Knock out roughly `one_in`-th of the entries, cycling NaN / +inf / -inf.
+    fn poke_holes(x: &mut [f64], one_in: u64) {
+        let mut s = 0xD1B5_4A32_D192_ED03u64;
+        let mut k = 0usize;
+        for v in x.iter_mut() {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            if s % one_in == 0 {
+                *v = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY][k % 3];
+                k += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn skipna_matches_the_naive_oracle_across_blocks() {
+        for &(n, p) in &[(20_003usize, 3usize), (5_001, 24), (500, 300)] {
+            for &one_in in &[u64::MAX, 100, 3] {
+                let mut x = lcg_data(n * p, 0.25);
+                poke_holes(&mut x, one_in);
+                let mut out = vec![0.0; p * p];
+                cov_matrix_skipna_out(&x, n, p, &mut out);
+                // 1e-11: the one-pass formula subtracts two sums of this size.
+                assert_close(&out, &naive_skipna(&x, n, p), p, 1e-11);
+            }
+        }
+    }
+
+    #[test]
+    fn skipna_agrees_with_dense_covariance_on_complete_data() {
+        let (n, p) = (30_000, 6);
+        let x = lcg_data(n * p, 1.0e6);
+        let mut dense = vec![0.0; p * p];
+        let mut skip = vec![0.0; p * p];
+        cov_matrix_out(&x, n, p, &mut dense);
+        cov_matrix_skipna_out(&x, n, p, &mut skip);
+        assert_close(&skip, &dense, p, 1e-9);
+    }
+
+    #[test]
+    fn skipna_degenerate_shapes_and_sparse_pairs() {
+        let mut out = vec![7.0; 4];
+        cov_matrix_skipna_out(&[], 0, 2, &mut out);
+        assert!(out.iter().all(|v| v.is_nan()), "n == 0 is NaN");
+
+        let mut none: Vec<f64> = vec![];
+        cov_matrix_skipna_out(&[], 4, 0, &mut none);
+
+        // Columns 0 and 1 overlap on exactly one row -> NaN; each has >= 2 own rows.
+        let nan = f64::NAN;
+        let x = [1.0, nan, nan, 2.0, 3.0, nan, 4.0, 5.0];
+        let mut out = vec![0.0; 4];
+        cov_matrix_skipna_out(&x, 4, 2, &mut out);
+        assert!(out[idx(0, 1, 2)].is_nan() && out[idx(1, 0, 2)].is_nan());
+        assert!((out[idx(0, 0, 2)] - 7.0 / 3.0).abs() < 1e-15, "var of 1, 3, 4");
+        assert!((out[idx(1, 1, 2)] - 4.5).abs() < 1e-15, "var of 2, 5");
+
+        // An all-missing column is NaN against everything, itself included.
+        let x = [1.0, nan, 2.0, f64::INFINITY, 4.0, nan];
+        let mut out = vec![0.0; 4];
+        cov_matrix_skipna_out(&x, 3, 2, &mut out);
+        assert!(out[idx(0, 0, 2)].is_finite());
+        assert!(out[idx(0, 1, 2)].is_nan() && out[idx(1, 1, 2)].is_nan());
+    }
+
+    /// The complete-column shortcuts must add the same terms in the same
+    /// order as the general path: punching holes in column 2 may not change a
+    /// single bit of the (0, 1) block.
+    #[test]
+    fn skipna_entry_bytes_ignore_nans_in_other_columns() {
+        let (n, p) = (25_000, 3);
+        let x = lcg_data(n * p, 0.25);
+        let mut holed = x.clone();
+        for r in (0..n).step_by(7) {
+            holed[r * p + 2] = f64::NAN;
+        }
+        let mut a = vec![0.0; p * p];
+        let mut b = vec![0.0; p * p];
+        cov_matrix_skipna_out(&x, n, p, &mut a);
+        cov_matrix_skipna_out(&holed, n, p, &mut b);
+        for &(i, j) in &[(0, 0), (0, 1), (1, 1)] {
+            assert_eq!(a[idx(i, j, p)].to_bits(), b[idx(i, j, p)].to_bits(), "({i},{j})");
+        }
+        assert_ne!(a[idx(0, 2, p)].to_bits(), b[idx(0, 2, p)].to_bits());
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn skipna_result_does_not_depend_on_thread_count() {
+        let (n, p) = (4_000, 120);
+        let mut x = lcg_data(n * p, 0.25);
+        poke_holes(&mut x, 20);
+
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            let mut out = vec![0.0; p * p];
+            pool.install(|| cov_matrix_skipna_out(&x, n, p, &mut out));
+            bits(&out)
+        };
+
+        let one = run(1);
+        assert_eq!(one, run(2));
+        assert_eq!(one, run(7));
+    }
+
+    proptest! {
+        /// Small matrices with arbitrary holes: symmetric, and in agreement
+        /// with the per-pair oracle (NaN pattern included).
+        #[test]
+        fn prop_skipna_matches_naive(
+            n in 1usize..90,
+            p in 1usize..9,
+            vals in proptest::collection::vec(-1e6f64..1e6, 90 * 9),
+            holes in proptest::collection::vec(0u8..12, 90 * 9),
+        ) {
+            let mut x = vals[..n * p].to_vec();
+            for (v, h) in x.iter_mut().zip(&holes) {
+                match h {
+                    0 => *v = f64::NAN,
+                    1 => *v = f64::INFINITY,
+                    _ => {}
+                }
+            }
+            let mut out = vec![0.0f64; p * p];
+            cov_matrix_skipna_out(&x, n, p, &mut out);
+
+            let want = naive_skipna(&x, n, p);
+            for i in 0..p {
+                for j in 0..p {
+                    let (g, w) = (out[idx(i, j, p)], want[idx(i, j, p)]);
+                    prop_assert_eq!(g.to_bits(), out[idx(j, i, p)].to_bits());
+                    prop_assert_eq!(g.is_nan(), w.is_nan(), "({}, {}): {} vs {}", i, j, g, w);
+                    if !w.is_nan() {
+                        // Absolute scale 1e12 = (value range)^2.
+                        prop_assert!((g - w).abs() <= 1e-10 * w.abs() + 1e-3, "({}, {}): {} vs {}", i, j, g, w);
+                    }
+                }
+            }
         }
     }
 
