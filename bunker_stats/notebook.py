@@ -1319,7 +1319,10 @@ _COLOR_CAVEAT = (
 def _blank_css(df):
     """An all-empty CSS frame shaped like `df` -- the base for axis=None styling."""
     pd = _pd()
-    return pd.DataFrame("", index=df.index, columns=df.columns)
+    # object dtype on purpose: pandas 3 infers its new `str` dtype for an
+    # all-string frame, and assigning a length-1 array into such a column
+    # with .loc raises -- which broke every styler on a one-row DataFrame.
+    return pd.DataFrame("", index=df.index, columns=df.columns, dtype=object)
 
 
 def _check_stylable(df) -> None:

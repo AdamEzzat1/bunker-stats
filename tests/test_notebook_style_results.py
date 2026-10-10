@@ -902,6 +902,26 @@ class TestInputHardening:
             assert result.metadata.get("n", 0) == 0
             json.dumps(result.to_dict())
 
+    def test_one_row_frame_renders(self):
+        """pandas 3 infers its `str` dtype for an all-string CSS frame, and a
+        length-1 `.loc` assignment into it raises. Every styler must still
+        handle a single-row DataFrame."""
+        df = pd.DataFrame({"x": [0.0], "pvalue": [0.01], "label": ["a"]})
+        stylers = [
+            nb.zscore_style(df, "x"),
+            nb.demean_style(df, "x"),
+            nb.iqr_outlier_style(df, "x"),
+            nb.outlier_style(df, ["x"]),
+            nb.scale_compare_style(df, "x"),
+            nb.missingness_style(df),
+            nb.style_significance(df, highlight_row=False),
+            nb.style_significance(df, highlight_row=True),
+            nb.style_effect_size(df, "x"),
+        ]
+        for styler in stylers:
+            assert "<table" in styler.to_html()
+        assert count_painted(nb.demean_style(df, "x"), "#e0e0e0") == 1
+
     def test_non_string_and_multiindex_labels(self):
         ints = pd.DataFrame({0: [1.0, 2.0, 3.0, 40.0]})
         assert nb.zscore_style(ints, 0, rich=True).metadata["derived_column"] == "0_zscore"
