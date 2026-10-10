@@ -23,6 +23,20 @@ Suffix            Returns
 ``*_columns``     a :class:`pandas.DataFrame` copy with added/transformed cols
 ================  ==========================================================
 
+Every helper also takes ``rich=True``, which keeps the same numbers but wraps
+them with the context needed to describe or reproduce them: ``*_report`` ->
+:class:`NotebookReport`, stylers -> :class:`StyleResult` (unpacks as ``styler,
+frame, metadata``), transforms -> :class:`TransformResult` (``frame,
+metadata``). All of them have ``.to_dict()``, ``.info()`` and ``.warnings``.
+
+Copy semantics
+--------------
+No helper ever modifies the DataFrame it is given. Helpers that add columns
+(``*_columns``, :func:`demean_style`, :func:`zscore_style`,
+:func:`scale_compare_style`) work on a copy. Helpers that only color existing
+cells style the input frame directly without copying it. There is no
+``inplace`` option.
+
 NaN and infinity policy
 -----------------------
 The Rust kernels are *strict*: a single NaN anywhere in the input poisons the
@@ -45,6 +59,7 @@ uses the rows where both are finite.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -73,12 +88,28 @@ __all__ = [
     "demean_style",
     "zscore_style",
     "iqr_outlier_style",
+    "missingness_style",
+    "scale_compare_style",
+    "available_themes",
     # --- report objects (returned by *_report(..., rich=True)) -------------
     "NotebookReport",
     "SummaryReport",
     "OutlierReport",
     "CorrelationReport",
     "BootstrapCIReport",
+    # --- style / transform objects (returned by <helper>(..., rich=True)) --
+    "StyleResult",
+    "OutlierStyleResult",
+    "IQROutlierStyleResult",
+    "DemeanStyleResult",
+    "ZScoreStyleResult",
+    "ScaleCompareStyleResult",
+    "CorrelationHeatmapResult",
+    "MissingnessStyleResult",
+    "SignificanceStyleResult",
+    "EffectSizeStyleResult",
+    "TransformResult",
+    "RobustScaleResult",
 ]
 
 _INSTALL_HINT = (
@@ -115,6 +146,43 @@ def _check_frame(df: Any) -> None:
         raise TypeError(f"Expected a pandas DataFrame, got {type(df).__name__}")
 
 
+def _check_unique_labels(df, cols: Sequence[Any]) -> None:
+    """Reject column labels that select more than one column.
+
+    With duplicate labels ``df[label]`` is a DataFrame, not a Series, and the
+    float conversion below would silently pool several columns into one
+    sample. ``get_loc`` returns an int only for a unique, fully-specified
+    label (it returns a slice/mask for duplicates and partial MultiIndex keys).
+    """
+    ambiguous = [
+        c for c in dict.fromkeys(cols)
+        if not isinstance(df.columns.get_loc(c), (int, np.integer))
+    ]
+    if ambiguous:
+        raise ValueError(
+            f"Column label(s) {ambiguous} match more than one column. "
+            "Make the column labels unique (or pass full MultiIndex keys) first."
+        )
+
+
+def _is_real_numeric(series) -> bool:
+    """Numeric and safely representable as float64 (so: not complex)."""
+    pd = _pd()
+    return pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_complex_dtype(
+        series
+    )
+
+
+def _check_positive(value: Any, name: str) -> float:
+    """A finite float > 0, or a clear error (NaN slips past a bare ``<= 0``)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.number)):
+        raise TypeError(f"{name} must be a number, got {type(value).__name__}")
+    value = float(value)
+    if not np.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be > 0, got {value}")
+    return value
+
+
 def _resolve_columns(
     df,
     columns: Sequence[Any] | None,
@@ -133,11 +201,20 @@ def _resolve_columns(
     if columns is None:
         if not numeric_only:
             return list(df.columns)
-        cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        # Positional scan rather than select_dtypes(np.number): that selector
+        # also returns timedelta64 and complex columns, neither of which can
+        # be cast to float64, and it mishandles duplicate labels.
+        cols = [
+            label
+            for i, label in enumerate(df.columns)
+            if _is_real_numeric(df.iloc[:, i])
+            and not pd.api.types.is_bool_dtype(df.iloc[:, i])
+        ]
         if not cols:
             raise ValueError(
                 "DataFrame has no numeric columns; pass `columns=[...]` explicitly."
             )
+        _check_unique_labels(df, cols)
         return cols
 
     if isinstance(columns, str) or not isinstance(columns, Iterable):
@@ -161,19 +238,29 @@ def _resolve_columns(
     if duplicates:
         raise ValueError(f"`columns` contains duplicates: {duplicates}")
 
+    _check_unique_labels(df, cols)
+
     if numeric_only:
-        bad = [c for c in cols if not pd.api.types.is_numeric_dtype(df[c])]
+        bad = [c for c in cols if not _is_real_numeric(df[c])]
         if bad:
             raise TypeError(
                 f"Column(s) are not numeric: {bad}. "
-                "Only numeric columns can be summarized; drop them or cast first."
+                "Only real-valued numeric columns can be summarized; "
+                "drop them or cast first."
             )
     return cols
 
 
 def _as_float(series) -> np.ndarray:
-    """1-D float64 view of a numeric Series (nullable dtypes -> NaN)."""
-    return np.ascontiguousarray(series.astype("float64").to_numpy(), dtype=np.float64)
+    """1-D float64 copy of a numeric Series (nullable dtypes: pd.NA -> NaN).
+
+    ``to_numpy(na_value=...)`` rather than ``astype("float64")``: the latter
+    raises on masked ``Int64``/``boolean`` columns holding ``pd.NA`` in older
+    pandas releases still inside the supported range.
+    """
+    return np.ascontiguousarray(
+        series.to_numpy(dtype="float64", na_value=np.nan), dtype=np.float64
+    )
 
 
 def _finite(values: np.ndarray) -> np.ndarray:
@@ -362,23 +449,32 @@ def _outlier_bounds(
     if x.size == 0:
         return (np.nan, np.nan)
 
+    p = _outlier_params(x, method)
+    if method == "iqr":
+        return (p["q1"] - k * p["iqr"], p["q3"] + k * p["iqr"])
+    return (
+        p["center"] - z_threshold * p["scale"],
+        p["center"] + z_threshold * p["scale"],
+    )
+
+
+def _outlier_params(x: np.ndarray, method: str) -> dict[str, float]:
+    """The fitted quantities each outlier rule builds its fences from."""
     if method == "iqr":
         q1 = _safe(_bs.percentile, x, 25.0)
         q3 = _safe(_bs.percentile, x, 75.0)
-        width = q3 - q1
-        return (q1 - k * width, q3 + k * width)
+        return {"q1": q1, "q3": q3, "iqr": q3 - q1}
 
     if method == "zscore":
-        center = _safe(_bs.mean, x)
-        spread = _safe(_bs.std, x)
-        return (center - z_threshold * spread, center + z_threshold * spread)
+        return {"center": _safe(_bs.mean, x), "scale": _safe(_bs.std, x)}
 
     # robust_zscore: median +/- z * (1.4826 * MAD) -- the breakdown-resistant
     # analogue of the mean/std rule, so a few extreme points cannot inflate the
     # cutoffs enough to hide themselves.
-    center = _safe(_bs.median, x)
-    spread = _safe(_bs.mad, x) * _MAD_TO_SIGMA
-    return (center - z_threshold * spread, center + z_threshold * spread)
+    return {
+        "center": _safe(_bs.median, x),
+        "scale": _safe(_bs.mad, x) * _MAD_TO_SIGMA,
+    }
 
 
 def _outlier_mask(
@@ -426,10 +522,8 @@ def outlier_report(
     pd = _pd()
     _check_choice(method, _OUTLIER_METHODS, "method")
     cols = _resolve_columns(df, columns)
-    if k <= 0:
-        raise ValueError(f"k must be > 0, got {k}")
-    if z_threshold <= 0:
-        raise ValueError(f"z_threshold must be > 0, got {z_threshold}")
+    k = _check_positive(k, "k")
+    z_threshold = _check_positive(z_threshold, "z_threshold")
 
     rows = []
     for col in cols:
@@ -465,8 +559,8 @@ def outlier_report(
         ]
         if degenerate:
             warnings.append(
-                f"zero spread in column(s): {', '.join(degenerate)} — "
-                "outlier fences collapse to a point, so nothing can be flagged"
+                f"zero spread in column(s): {', '.join(degenerate)} — the fences "
+                "collapse to a point, so every value that differs from it is flagged"
             )
         return OutlierReport(
             out,
@@ -630,8 +724,8 @@ def missingness_report(df):
 
     n_rows = int(len(df))
     rows = []
-    for col in df.columns:
-        series = df[col]
+    for i in range(df.shape[1]):
+        series = df.iloc[:, i]  # positional: survives duplicate column labels
         n_missing = int(series.isna().sum())
         row = {
             "dtype": str(series.dtype),
@@ -827,6 +921,34 @@ def bootstrap_ci_report(
 # Column transforms  ->  DataFrame
 # ======================================================================
 
+_COPY_POLICY = "input DataFrame is never modified; the result is a copy"
+
+
+def _scale_params(x: np.ndarray, method: str, scale_factor: float) -> dict[str, Any]:
+    """Fitted parameters of one scaling method on a finite sample."""
+    if x.size == 0:
+        return {}
+    if method == "robust":
+        mad = float(_safe(_bs.mad, x))
+        return {
+            "median": float(_safe(_bs.median, x)),
+            "mad": mad,
+            "scale": scale_factor * mad,
+            "zero_mad": mad == 0.0,
+        }
+    if method == "zscore":
+        return {"mean": float(_safe(_bs.mean, x)), "std": float(_safe(_bs.std, x)), "ddof": 1}
+    lo, hi = float(np.min(x)), float(np.max(x))
+    return {"min": lo, "max": hi, "range": hi - lo}
+
+
+_ZERO_MAD_BEHAVIOR = (
+    "when MAD is 0 the kernel divides by a ~1e-12 floor: values equal to the "
+    "median map to 0 and every other value to a huge magnitude, so the output "
+    "is not a usable robust score"
+)
+
+
 def scale_columns(
     df,
     columns: Sequence[Any] | None = None,
@@ -835,6 +957,7 @@ def scale_columns(
     suffix: str | None = None,
     scale_factor: float = _MAD_TO_SIGMA,
     replace: bool = False,
+    rich: bool = False,
 ):
     """Batch-scale numeric columns with the Rust scaling kernels.
 
@@ -848,7 +971,12 @@ def scale_columns(
         Appended to the source name for the new column. Defaults to
         ``"_" + method``. Ignored when ``replace=True``.
     replace : bool
-        Overwrite the source columns in place of adding new ones.
+        Overwrite the source columns *in the returned copy* instead of adding
+        new ones. The input DataFrame is never modified either way.
+    rich : bool
+        Return a :class:`TransformResult` (``frame, metadata``) carrying the
+        fitted parameters per column, so the transform can be reported or
+        re-applied to new data.
 
     Returns
     -------
@@ -863,8 +991,7 @@ def scale_columns(
         raise ValueError("`suffix` cannot be empty unless replace=True")
 
     if method == "robust":
-        if not np.isfinite(scale_factor) or scale_factor <= 0:
-            raise ValueError(f"scale_factor must be a positive float, got {scale_factor}")
+        scale_factor = _check_positive(scale_factor, "scale_factor")
         kernel = lambda x: _bs.robust_scale(x, scale_factor)  # noqa: E731
     elif method == "zscore":
         kernel = _bs.zscore
@@ -872,10 +999,57 @@ def scale_columns(
         kernel = _bs.minmax_scale
 
     out = df.copy()
+    targets = {col: col if replace else f"{col}{suffix}" for col in cols}
+    per_column: dict[Any, dict] = {}
     for col in cols:
-        scaled = _fit_scatter(_as_float(df[col]), kernel)
-        out[col if replace else f"{col}{suffix}"] = scaled
-    return out
+        values = _as_float(df[col])
+        out[targets[col]] = _fit_scatter(values, kernel)
+        if rich:
+            x = _finite(values)
+            per_column[col] = {
+                "derived_column": targets[col],
+                "n": int(x.size),
+                "n_missing": int(values.size - x.size),
+                **_scale_params(x, method, scale_factor),
+            }
+    if not rich:
+        return out
+
+    warnings = []
+    empty = [str(c) for c, d in per_column.items() if d["n"] == 0]
+    if empty:
+        warnings.append(f"no finite values in column(s): {', '.join(empty)}")
+    zero_mad = [str(c) for c, d in per_column.items() if d.get("zero_mad")]
+    if zero_mad:
+        warnings.append(
+            f"MAD is 0 in column(s): {', '.join(zero_mad)} — " + _ZERO_MAD_BEHAVIOR
+        )
+    zero_std = [str(c) for c, d in per_column.items() if d.get("std") == 0.0]
+    if zero_std:
+        warnings.append(
+            f"zero variance in column(s): {', '.join(zero_std)} — z-scores are NaN"
+        )
+    zero_range = [str(c) for c, d in per_column.items() if d.get("range") == 0.0]
+    if zero_range:
+        warnings.append(
+            f"zero range in column(s): {', '.join(zero_range)} — min-max output is all 0"
+        )
+    overwrote = [t for t in targets.values() if not replace and t in df.columns]
+    if overwrote:
+        warnings.append(_overwrite_warning(overwrote))
+    meta = {
+        "method": method,
+        "columns": list(cols),
+        "replace": bool(replace),
+        "scale_factor": scale_factor if method == "robust" else None,
+        "per_column": per_column,
+        "zero_mad_behavior": _ZERO_MAD_BEHAVIOR if method == "robust" else None,
+        "nan_policy": "fit on finite values; non-finite inputs stay NaN in place",
+        "copy_policy": _COPY_POLICY,
+        "frame_is_copy": True,
+        "overwrote_existing_column": bool(overwrote),
+    }
+    return TransformResult(out, meta, warnings)
 
 
 def winsorize_columns(
@@ -886,6 +1060,7 @@ def winsorize_columns(
     upper_q: float = 0.95,
     suffix: str = "_winsor",
     replace: bool = False,
+    rich: bool = False,
 ):
     """Batch-winsorize numeric columns (clip tails at the given quantiles).
 
@@ -893,7 +1068,11 @@ def winsorize_columns(
     :func:`bunker_stats.winsorize` rather than percentile units.
 
     Quantiles are computed on the finite values only; non-finite inputs stay
-    NaN in the output and row order is preserved.
+    NaN in the output and row order is preserved. The input DataFrame is never
+    modified; ``replace=True`` overwrites the source columns in the copy.
+
+    With ``rich=True`` returns a :class:`TransformResult` whose metadata gives,
+    per column, the clipping bounds and how many values each tail changed.
     """
     cols = _resolve_columns(df, columns)
     for name, q in (("lower_q", lower_q), ("upper_q", upper_q)):
@@ -907,10 +1086,56 @@ def winsorize_columns(
     kernel = lambda x: _bs.winsorize(x, lower_q=lower_q, upper_q=upper_q)  # noqa: E731
 
     out = df.copy()
+    targets = {col: col if replace else f"{col}{suffix}" for col in cols}
+    per_column: dict[Any, dict] = {}
     for col in cols:
-        clipped = _fit_scatter(_as_float(df[col]), kernel)
-        out[col if replace else f"{col}{suffix}"] = clipped
-    return out
+        values = _as_float(df[col])
+        clipped = _fit_scatter(values, kernel)
+        out[targets[col]] = clipped
+        if rich:
+            finite = np.isfinite(values)
+            n = int(finite.sum())
+            with np.errstate(invalid="ignore"):
+                raised = int((finite & (clipped > values)).sum())
+                lowered = int((finite & (clipped < values)).sum())
+            per_column[col] = {
+                "derived_column": targets[col],
+                "n": n,
+                "n_missing": int(values.size) - n,
+                "lower_bound": float(np.min(clipped[finite])) if n else float("nan"),
+                "upper_bound": float(np.max(clipped[finite])) if n else float("nan"),
+                "n_clipped_low": raised,
+                "n_clipped_high": lowered,
+                "pct_clipped": (100.0 * (raised + lowered) / n) if n else float("nan"),
+            }
+    if not rich:
+        return out
+
+    warnings = []
+    empty = [str(c) for c, d in per_column.items() if d["n"] == 0]
+    if empty:
+        warnings.append(f"no finite values in column(s): {', '.join(empty)}")
+    overwrote = [t for t in targets.values() if not replace and t in df.columns]
+    if overwrote:
+        warnings.append(_overwrite_warning(overwrote))
+    meta = {
+        "method": "winsorize",
+        "columns": list(cols),
+        "lower_q": float(lower_q),
+        "upper_q": float(upper_q),
+        "replace": bool(replace),
+        "per_column": per_column,
+        "bounds": "smallest / largest value remaining after clipping",
+        "nan_policy": "quantiles from finite values; non-finite inputs stay NaN in place",
+        "caveat": (
+            "winsorizing changes the data: report it, and note that variances "
+            "and tests computed afterwards understate tail variability"
+        ),
+        "copy_policy": _COPY_POLICY,
+        "frame_is_copy": True,
+        "overwrote_existing_column": bool(overwrote),
+    }
+    return TransformResult(out, meta, warnings)
 
 
 def robust_scale_column(
@@ -919,29 +1144,268 @@ def robust_scale_column(
     *,
     scale_factor: float = _MAD_TO_SIGMA,
     add_suffix: str = "_robust",
+    rich: bool = False,
 ):
     """Single-column robust scaling. Kept for backwards compatibility.
 
     Prefer :func:`scale_columns` for new code -- it handles many columns, other
     methods, and NaN-preserving scatter-back in one call.
+
+    Returns a copy of ``df`` with ``{column}{add_suffix}`` added; the input is
+    never modified. With ``rich=True`` returns a :class:`RobustScaleResult`
+    (``frame, metadata``) whose flat metadata has ``median``, ``mad``,
+    ``scale_factor``, ``scale`` and ``zero_mad``.
     """
-    return scale_columns(
+    result = scale_columns(
         df,
         [column],
         method="robust",
         suffix=add_suffix,
         scale_factor=scale_factor,
+        rich=rich,
     )
+    if not rich:
+        return result
+    multi = result.metadata
+    meta = {
+        "source_column": column,
+        **multi["per_column"][column],
+        "scale_factor": multi["scale_factor"],
+        "zero_mad_behavior": multi["zero_mad_behavior"],
+        "nan_policy": multi["nan_policy"],
+        "copy_policy": multi["copy_policy"],
+        "frame_is_copy": True,
+        "overwrote_existing_column": multi["overwrote_existing_column"],
+    }
+    return RobustScaleResult(result.frame, meta, result.warnings)
 
 
 # ======================================================================
-# Stylers  ->  Styler
+# Themes
 # ======================================================================
+# Every styled cell sets BOTH a background and a text color. Setting only the
+# background leaves the notebook's own text color in place, which is light in
+# dark-mode Jupyter/VS Code and unreadable on a pastel cell.
+#
+# ``default`` keeps the colors these helpers have always used. ``colorblind``
+# swaps the red/green above/below pairing for blue/orange tints and uses
+# lightness-ordered single-hue ramps for the tiered roles.
+_THEMES: dict[str, dict[str, Any]] = {
+    "default": {
+        "text": "#1a1a1a",
+        "above": "#c8e6c9",
+        "below": "#ffcdd2",
+        "at_center": "#e0e0e0",
+        "high": "#ffcc80",
+        "low": "#bbdefb",
+        "inlier": "#f5f5f5",
+        "outlier": "#ff8a80",
+        "missing": "#cfd8dc",
+        "infinite": "#ffe082",
+        "significance": ("#66bb6a", "#a5d6a7", "#e8f5e9"),
+        "not_significant": "#f5f5f5",
+        "effect": ("#f5f5f5", "#fff9c4", "#ffe082", "#ffab91"),
+    },
+    "colorblind": {
+        "text": "#1a1a1a",
+        "above": "#b3d9f2",
+        "below": "#f7cf9a",
+        "at_center": "#e6e6e6",
+        "high": "#f7cf9a",
+        "low": "#b3d9f2",
+        "inlier": "#f5f5f5",
+        "outlier": "#f4b6a0",
+        "missing": "#d9d9d9",
+        "infinite": "#f5e58c",
+        "significance": ("#6baed6", "#bdd7e7", "#eff3ff"),
+        "not_significant": "#f5f5f5",
+        "effect": ("#f5f5f5", "#fee8c8", "#fdbb84", "#ef8a62"),
+    },
+}
+_THEME_ROLES = tuple(_THEMES["default"])
+_TIERED_ROLES = {"significance": 3, "effect": 4}
+
+
+def available_themes() -> dict:
+    """Named color themes accepted by every styler's ``theme=`` argument.
+
+    Returns a copy of ``{theme_name: {role: color}}``. ``theme=`` also accepts
+    a mapping of ``role -> color`` to override individual roles of the default
+    theme, e.g. ``theme={"outlier": "#ffd54f"}``.
+    """
+    return {name: dict(roles) for name, roles in _THEMES.items()}
+
+
+def _check_color(value: Any, role: str) -> str:
+    # Colors are interpolated into CSS that ends up in exported HTML reports,
+    # so refuse anything that could close the declaration or the style block.
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or any(ch in value for ch in ";{}<>\"'")
+    ):
+        raise ValueError(f"Invalid CSS color for {role!r}: {value!r}")
+    return value.strip()
+
+
+def _resolve_theme(theme: Any, **overrides: Any) -> tuple[str, dict[str, Any]]:
+    """Resolve ``theme`` (name or role mapping) plus explicit color overrides."""
+    if isinstance(theme, str):
+        if theme not in _THEMES:
+            raise ValueError(
+                f"Unknown theme {theme!r}; choose from {sorted(_THEMES)} "
+                "or pass a mapping of role -> color."
+            )
+        name, roles = theme, dict(_THEMES[theme])
+    elif isinstance(theme, Mapping):
+        unknown = [k for k in theme if k not in _THEME_ROLES]
+        if unknown:
+            raise ValueError(
+                f"Unknown theme role(s) {unknown}; valid roles: {list(_THEME_ROLES)}"
+            )
+        name, roles = "custom", {**_THEMES["default"], **theme}
+    else:
+        raise TypeError(
+            f"theme must be a theme name or a mapping, got {type(theme).__name__}"
+        )
+
+    for role, value in overrides.items():
+        if value is not None:
+            roles[role] = value
+            name = "custom"
+
+    for role, value in roles.items():
+        if role in _TIERED_ROLES:
+            tiers = tuple(value) if not isinstance(value, str) else (value,)
+            if len(tiers) != _TIERED_ROLES[role]:
+                raise ValueError(
+                    f"Theme role {role!r} needs {_TIERED_ROLES[role]} colors, "
+                    f"got {len(tiers)}"
+                )
+            roles[role] = tuple(_check_color(c, role) for c in tiers)
+        else:
+            roles[role] = _check_color(value, role)
+    return name, roles
+
+
+def _theme_meta(name: str, roles: Mapping[str, Any], used: Sequence[str]) -> dict:
+    """The part of a theme a helper actually painted with, for metadata."""
+    colors = {role: roles[role] for role in ("text", *used)}
+    return {
+        "name": name,
+        "colors": {k: list(v) if isinstance(v, tuple) else v for k, v in colors.items()},
+    }
+
+
+def _cell(background: str, text: str) -> str:
+    return f"background-color: {background}; color: {text}"
+
+
+# ======================================================================
+# Stylers  ->  Styler   (or a StyleResult with rich=True)
+# ======================================================================
+
+_STYLER_HINT = (
+    "pandas Styler needs jinja2. "
+    'Install it with: pip install "bunker-stats-rs[notebook]"'
+)
+
+_COLOR_CAVEAT = (
+    "highlighting marks values that are unusual under the stated rule; "
+    "it is not evidence that a value is an error"
+)
+
 
 def _blank_css(df):
     """An all-empty CSS frame shaped like `df` -- the base for axis=None styling."""
     pd = _pd()
     return pd.DataFrame("", index=df.index, columns=df.columns)
+
+
+def _check_stylable(df) -> None:
+    """Fail early, with a fix, on frames pandas Styler cannot render.
+
+    ``Styler.apply`` raises a bare KeyError for non-unique labels -- and only
+    at *render* time, i.e. when the notebook cell displays, far from the call.
+    """
+    if not df.index.is_unique:
+        raise ValueError(
+            "Styling needs a unique index, but this DataFrame's index has "
+            "duplicate labels. Use df.reset_index(drop=True) first."
+        )
+    if not df.columns.is_unique:
+        raise ValueError(
+            "Styling needs unique column labels, but this DataFrame has duplicates."
+        )
+
+
+def _base_styler(frame):
+    try:
+        return frame.style
+    except (ImportError, AttributeError) as exc:
+        raise ImportError(_STYLER_HINT) from exc
+
+
+def _apply_css(frame, css):
+    return _base_styler(frame).apply(lambda _: css, axis=None)
+
+
+def _derived_name(column: Any, suffix: Any, name: str = "add_suffix") -> str:
+    if not isinstance(suffix, str) or not suffix:
+        raise ValueError(
+            f"`{name}` must be a non-empty string so the derived column does "
+            "not overwrite its source"
+        )
+    return f"{column}{suffix}"
+
+
+def _normal_two_sided_pct(z: float) -> float:
+    """Percent of a normal distribution beyond +/- z standard deviations."""
+    return 100.0 * math.erfc(z / math.sqrt(2.0))
+
+
+def _outlier_detail(
+    values: np.ndarray, method: str, k: float, z_threshold: float
+) -> tuple[np.ndarray, dict]:
+    """Outlier mask plus the per-column numbers a rich result reports."""
+    mask, lower, upper = _outlier_mask(values, method, k, z_threshold)
+    x = _finite(values)
+    n = int(x.size)
+    params = _outlier_params(x, method) if n else {}
+    with np.errstate(invalid="ignore"):
+        n_low = int((mask & (values < lower)).sum())
+        n_high = int((mask & (values > upper)).sum())
+    detail: dict[str, Any] = {"n": n, "n_missing": int(values.size) - n}
+    if method == "iqr":
+        detail.update(
+            q1=float(params.get("q1", np.nan)),
+            q3=float(params.get("q3", np.nan)),
+            iqr=float(params.get("iqr", np.nan)),
+        )
+    else:
+        detail.update(
+            center=float(params.get("center", np.nan)),
+            scale=float(params.get("scale", np.nan)),
+        )
+    detail.update(
+        lower_fence=float(lower),
+        upper_fence=float(upper),
+        n_outliers=n_low + n_high,
+        n_low=n_low,
+        n_high=n_high,
+        pct_outliers=(100.0 * (n_low + n_high) / n) if n else float("nan"),
+    )
+    return mask, detail
+
+
+def _expected_outlier_pct(method: str, k: float, z_threshold: float) -> float:
+    """Share of an exactly normal sample the rule would flag, in percent.
+
+    For Tukey fences the quartiles sit at +/-0.6745 sigma and the IQR is
+    1.349 sigma, so the fences are at +/-(0.6745 + 1.349 k) sigma.
+    """
+    z = (0.6745 + 1.349 * k) if method == "iqr" else z_threshold
+    return _normal_two_sided_pct(z)
 
 
 def outlier_style(
@@ -951,12 +1415,25 @@ def outlier_style(
     method: str = "iqr",
     k: float = 1.5,
     z_threshold: float = 3.0,
-    outlier_color: str = "#ff8a80",
+    outlier_color: str | None = None,
+    theme: Any = "default",
+    rich: bool = False,
 ):
     """Highlight outlier cells across **many** numeric columns.
 
     Same detection rules as :func:`outlier_report`. Non-flagged and non-finite
-    cells are left unstyled.
+    cells are left unstyled. The input frame is styled as-is: nothing is added
+    to it and it is not copied.
+
+    Parameters
+    ----------
+    outlier_color : str, optional
+        Overrides the theme's ``outlier`` color.
+    theme : str or mapping
+        A name from :func:`available_themes` or a ``role -> color`` mapping.
+    rich : bool
+        Return an :class:`OutlierStyleResult` (``styler, frame, metadata``)
+        with per-column fences and counts instead of the bare Styler.
 
     Returns
     -------
@@ -965,13 +1442,96 @@ def outlier_style(
     """
     _check_choice(method, _OUTLIER_METHODS, "method")
     cols = _resolve_columns(df, columns)
+    _check_stylable(df)
+    k = _check_positive(k, "k")
+    z_threshold = _check_positive(z_threshold, "z_threshold")
+    theme_name, roles = _resolve_theme(theme, outlier=outlier_color)
+    flagged = _cell(roles["outlier"], roles["text"])
 
     css = _blank_css(df)
+    per_column: dict[Any, dict] = {}
     for col in cols:
-        mask, _, _ = _outlier_mask(_as_float(df[col]), method, k, z_threshold)
-        css.loc[:, col] = np.where(mask, f"background-color: {outlier_color}", "")
+        mask, detail = _outlier_detail(_as_float(df[col]), method, k, z_threshold)
+        css.loc[:, col] = np.where(mask, flagged, "")
+        per_column[col] = detail
 
-    return df.style.apply(lambda _: css, axis=None)
+    styler = _apply_css(df, css)
+    if not rich:
+        return styler
+
+    warnings = []
+    empty = [str(c) for c, d in per_column.items() if d["n"] == 0]
+    if empty:
+        warnings.append(f"no finite values in column(s): {', '.join(empty)}")
+    flat = [
+        str(c) for c, d in per_column.items()
+        if d["n"] > 0 and d["lower_fence"] == d["upper_fence"]
+    ]
+    if flat:
+        warnings.append(
+            f"zero spread in column(s): {', '.join(flat)} — the fences collapse "
+            "to a point, so every value that differs from it is flagged"
+        )
+    meta = {
+        "method": method,
+        "k": k if method == "iqr" else None,
+        "z_threshold": z_threshold if method != "iqr" else None,
+        "columns": list(cols),
+        "n_rows": int(len(df)),
+        "n_outliers_total": int(sum(d["n_outliers"] for d in per_column.values())),
+        "expected_pct_if_normal": _expected_outlier_pct(method, k, z_threshold),
+        "per_column": per_column,
+        "quantile_method": "linear interpolation" if method == "iqr" else None,
+        "nan_policy": "non-finite never flagged; counted in n_missing",
+        "caveat": (
+            "mean/std fences are inflated by the extreme values they are meant "
+            "to catch (masking); compare with method='robust_zscore'. "
+            if method == "zscore" else ""
+        ) + _COLOR_CAVEAT,
+        "theme": _theme_meta(theme_name, roles, ["outlier"]),
+        "frame_is_copy": False,
+    }
+    return OutlierStyleResult(styler, df, meta, warnings)
+
+
+def iqr_outlier_style(
+    df,
+    column: Any,
+    *,
+    k: float = 1.5,
+    outlier_color: str | None = None,
+    theme: Any = "default",
+    rich: bool = False,
+):
+    """Highlight IQR (Tukey fence) outliers in a single column.
+
+    Thin wrapper over :func:`outlier_style` with ``method="iqr"``. With
+    ``rich=True`` returns an :class:`IQROutlierStyleResult` whose metadata is
+    flat: ``q1``, ``q3``, ``iqr``, ``k``, ``lower_fence``, ``upper_fence``,
+    ``n_outliers``, ``n_low``, ``n_high``, ``n``, ``n_missing``.
+    """
+    result = outlier_style(
+        df, [column], method="iqr", k=k,
+        outlier_color=outlier_color, theme=theme, rich=rich,
+    )
+    if not rich:
+        return result
+    multi = result.metadata
+    detail = dict(multi["per_column"][column])
+    meta = {
+        "source_column": column,
+        "n": detail.pop("n"),
+        "n_missing": detail.pop("n_missing"),
+        "k": multi["k"],
+        **detail,
+        "expected_pct_if_normal": multi["expected_pct_if_normal"],
+        "quantile_method": multi["quantile_method"],
+        "nan_policy": multi["nan_policy"],
+        "caveat": multi["caveat"],
+        "theme": multi["theme"],
+        "frame_is_copy": False,
+    }
+    return IQROutlierStyleResult(result.styler, result.frame, meta, result.warnings)
 
 
 def corr_heatmap(
@@ -980,11 +1540,20 @@ def corr_heatmap(
     *,
     method: str = "pearson",
     cmap: str = "coolwarm",
+    theme: Any = "default",
+    rich: bool = False,
 ):
     """Correlation matrix rendered as a background-gradient Styler.
 
     Uses :func:`correlation_report` for the numbers, so NaN handling is the
-    same pairwise-complete rule.
+    same pairwise-complete rule. The color scale is pinned to [-1, 1], so the
+    same color means the same correlation in every heatmap. Undefined cells
+    (a constant column, or fewer than 3 overlapping rows) are painted with the
+    theme's ``missing`` color instead of a point on the gradient.
+
+    With ``rich=True`` returns a :class:`CorrelationHeatmapResult`; ``frame``
+    is the correlation matrix and the metadata lists the strongest pairs, the
+    pairwise sample sizes, and any constant / all-missing columns.
 
     .. note::
        ``Styler.background_gradient`` requires ``matplotlib``, which ships in
@@ -992,7 +1561,222 @@ def corr_heatmap(
        need the values.
     """
     corr = correlation_report(df, columns, method=method, pvalues=False)
-    return corr.style.background_gradient(cmap=cmap, vmin=-1.0, vmax=1.0)
+    theme_name, roles = _resolve_theme(theme)
+    undefined = _cell(roles["missing"], roles["text"])
+    matrix = corr.to_numpy(dtype=float)
+
+    # Applied after the gradient so it wins: matplotlib maps NaN to its "bad"
+    # color, which pandas renders as a solid black cell.
+    css = _pd().DataFrame(
+        np.where(np.isfinite(matrix), "", undefined),
+        index=corr.index, columns=corr.columns,
+    )
+    styler = (
+        _base_styler(corr)
+        .background_gradient(cmap=cmap, vmin=-1.0, vmax=1.0)
+        .apply(lambda _: css, axis=None)
+    )
+    if not rich:
+        return styler
+
+    cols = list(corr.columns)
+    values = np.column_stack([_as_float(df[c]) for c in cols])
+    finite = np.isfinite(values)
+    pair_n = finite.astype(np.int64).T @ finite.astype(np.int64)
+
+    upper = np.triu_indices(len(cols), k=1)
+    off = matrix[upper]
+    defined = np.isfinite(off)
+    order = np.argsort(-np.abs(off[defined]), kind="stable")[:5]
+    rows_i, rows_j = upper[0][defined], upper[1][defined]
+    strongest = [
+        {
+            "x": cols[rows_i[o]],
+            "y": cols[rows_j[o]],
+            "correlation": float(off[defined][o]),
+            "n": int(pair_n[rows_i[o], rows_j[o]]),
+        }
+        for o in order
+    ]
+
+    all_missing, constant = [], []
+    for j, col in enumerate(cols):
+        x = values[finite[:, j], j]
+        if x.size == 0:
+            all_missing.append(str(col))
+        elif np.min(x) == np.max(x):
+            constant.append(str(col))
+
+    pair_counts = pair_n[upper]
+    warnings = []
+    if all_missing:
+        warnings.append(f"no finite values in column(s): {', '.join(all_missing)}")
+    if constant:
+        warnings.append(
+            f"constant column(s): {', '.join(constant)} — correlation with a "
+            "constant is undefined (shown as missing)"
+        )
+    if pair_counts.size and pair_counts.min() != pair_counts.max():
+        warnings.append(
+            "pairwise deletion: cells are computed from different row subsets "
+            f"(n from {int(pair_counts.min())} to {int(pair_counts.max())}), so "
+            "they are not directly comparable"
+        )
+    if pair_counts.size and 3 <= pair_counts.min() < 10:
+        warnings.append(
+            f"small overlap (min pairwise n = {int(pair_counts.min())}): "
+            "correlations from few rows are noisy"
+        )
+
+    meta = {
+        "method": method,
+        "columns": cols,
+        "shape": tuple(corr.shape),
+        "n_rows": int(len(df)),
+        "missing_policy": "pairwise-complete (each pair uses rows finite in both)",
+        "pairwise_n_min": int(pair_counts.min()) if pair_counts.size else None,
+        "pairwise_n_max": int(pair_counts.max()) if pair_counts.size else None,
+        "n_pairs": int(off.size),
+        "n_undefined_pairs": int((~defined).sum()),
+        "min_correlation": float(off[defined].min()) if defined.any() else float("nan"),
+        "max_offdiag_correlation": (
+            float(off[defined].max()) if defined.any() else float("nan")
+        ),
+        "max_abs_offdiag_correlation": (
+            float(np.abs(off[defined]).max()) if defined.any() else float("nan")
+        ),
+        "strongest_pairs": strongest,
+        "constant_columns": constant,
+        "all_missing_columns": all_missing,
+        "caveat": (
+            "color encodes the sign and size of r only, not its statistical "
+            "significance; use correlation_report(pvalues=True) for tests"
+        ),
+        "theme": {
+            "name": theme_name,
+            "cmap": cmap,
+            "vmin": -1.0,
+            "vmax": 1.0,
+            "colors": {"text": roles["text"], "missing": roles["missing"]},
+        },
+        "frame_is_copy": True,
+    }
+    return CorrelationHeatmapResult(styler, corr, meta, warnings)
+
+
+def missingness_style(
+    df,
+    columns: Sequence[Any] | None = None,
+    *,
+    missing_color: str | None = None,
+    infinite_color: str | None = None,
+    theme: Any = "default",
+    rich: bool = False,
+):
+    """Highlight missing and infinite cells, to see *where* the gaps are.
+
+    The styled companion to :func:`missingness_report`. Missing cells (NaN,
+    ``None``, ``pd.NA``, ``NaT``) get the theme's ``missing`` color; ``+/-inf``
+    in numeric columns get the ``infinite`` color. ``columns=None`` covers
+    every column, numeric or not. The input frame is styled as-is.
+
+    With ``rich=True`` returns a :class:`MissingnessStyleResult` with per-column
+    counts, the number of fully complete rows, and warnings for columns that
+    are entirely missing.
+    """
+    pd = _pd()
+    cols = _resolve_columns(df, columns, numeric_only=False)
+    _check_stylable(df)
+    theme_name, roles = _resolve_theme(
+        theme, missing=missing_color, infinite=infinite_color
+    )
+    missing_css = _cell(roles["missing"], roles["text"])
+    infinite_css = _cell(roles["infinite"], roles["text"])
+
+    n_rows = int(len(df))
+    css = _blank_css(df)
+    incomplete = np.zeros(n_rows, dtype=bool)
+    per_column: dict[Any, dict] = {}
+    for col in cols:
+        series = df[col]
+        is_missing = series.isna().to_numpy(dtype=bool)
+        is_infinite = np.zeros(n_rows, dtype=bool)
+        if _is_real_numeric(series) and not pd.api.types.is_bool_dtype(series):
+            is_infinite = np.isinf(_as_float(series))
+        css.loc[:, col] = np.where(
+            is_missing, missing_css, np.where(is_infinite, infinite_css, "")
+        )
+        incomplete |= is_missing | is_infinite
+        per_column[col] = {
+            "dtype": str(series.dtype),
+            "n_missing": int(is_missing.sum()),
+            "n_infinite": int(is_infinite.sum()),
+            "pct_missing": (100.0 * is_missing.sum() / n_rows) if n_rows else float("nan"),
+        }
+
+    styler = _apply_css(df, css)
+    if not rich:
+        return styler
+
+    n_missing = int(sum(d["n_missing"] for d in per_column.values()))
+    n_infinite = int(sum(d["n_infinite"] for d in per_column.values()))
+    n_cells = n_rows * len(cols)
+    warnings = []
+    hollow = [
+        str(c) for c, d in per_column.items() if n_rows and d["n_missing"] == n_rows
+    ]
+    if hollow:
+        warnings.append(f"entirely missing column(s): {', '.join(hollow)}")
+    if n_rows and not (~incomplete).any():
+        warnings.append(
+            "no row is complete across the selected columns — listwise "
+            "deletion would discard every row"
+        )
+    meta = {
+        "columns": list(cols),
+        "n_rows": n_rows,
+        "n_cells": n_cells,
+        "n_missing_cells": n_missing,
+        "n_infinite_cells": n_infinite,
+        "pct_missing_cells": (100.0 * n_missing / n_cells) if n_cells else float("nan"),
+        "n_complete_rows": int((~incomplete).sum()),
+        "n_incomplete_rows": int(incomplete.sum()),
+        "per_column": per_column,
+        "definition": (
+            "missing = null per pandas (NaN/None/NA/NaT); infinite = +/-inf in "
+            "numeric columns; a complete row has neither in the selected columns"
+        ),
+        "theme": _theme_meta(theme_name, roles, ["missing", "infinite"]),
+        "frame_is_copy": False,
+    }
+    return MissingnessStyleResult(styler, df, meta, warnings)
+
+
+def _tiered_css(df, column: Any, cell_css: np.ndarray, highlight_row: bool):
+    """CSS frame painting one column, or whole rows, from per-row styles."""
+    pd = _pd()
+    if highlight_row:
+        return pd.DataFrame(
+            np.repeat(cell_css[:, None], df.shape[1], axis=1),
+            index=df.index, columns=df.columns,
+        )
+    css = _blank_css(df)
+    css.loc[:, column] = cell_css
+    return css
+
+
+def _check_result_column(df, column: Any, what: str) -> np.ndarray:
+    _check_frame(df)
+    if column not in df.columns:
+        raise KeyError(
+            f"{what} column {column!r} not in DataFrame. "
+            f"Available: {list(df.columns)}"
+        )
+    _check_unique_labels(df, [column])
+    if not _is_real_numeric(df[column]):
+        raise TypeError(f"Column {column!r} is not numeric")
+    _check_stylable(df)
+    return _as_float(df[column])
 
 
 def style_significance(
@@ -1001,6 +1785,8 @@ def style_significance(
     pvalue_column: Any = "pvalue",
     alpha: float = 0.05,
     highlight_row: bool = True,
+    theme: Any = "default",
+    rich: bool = False,
 ):
     """Shade a results table by statistical significance.
 
@@ -1009,40 +1795,80 @@ def style_significance(
     otherwise only the p-value cell is.
 
     NaN p-values are left unstyled, so a table mixing computable and
-    non-computable rows renders without error.
+    non-computable rows renders without error. P-values outside [0, 1] raise:
+    that is almost always the wrong column.
+
+    .. warning::
+       The p-values are shaded exactly as given -- **no multiple-comparison
+       correction is applied**. With ``m`` true nulls you expect about
+       ``alpha * m`` rows shaded as significant by chance. Adjust first with
+       :func:`bunker_stats.p_adjust` and style the adjusted column.
+
+    With ``rich=True`` returns a :class:`SignificanceStyleResult` whose
+    metadata reports the number of tests, per-tier counts and that expected
+    false-positive count.
     """
-    pd = _pd()
-    _check_frame(df)
-    if pvalue_column not in df.columns:
-        raise KeyError(
-            f"p-value column {pvalue_column!r} not in DataFrame. "
-            f"Available: {list(df.columns)}"
-        )
-    if not pd.api.types.is_numeric_dtype(df[pvalue_column]):
-        raise TypeError(f"Column {pvalue_column!r} is not numeric")
-    if not 0.0 < alpha < 1.0:
+    p = _check_result_column(df, pvalue_column, "p-value")
+    if not isinstance(alpha, (int, float)) or not 0.0 < alpha < 1.0:
         raise ValueError(f"alpha must be in (0, 1), got {alpha}")
+    finite = np.isfinite(p)
+    with np.errstate(invalid="ignore"):
+        out_of_range = finite & ((p < 0.0) | (p > 1.0))
+    if out_of_range.any():
+        raise ValueError(
+            f"Column {pvalue_column!r} has {int(out_of_range.sum())} value(s) "
+            "outside [0, 1]; it does not look like a p-value column."
+        )
 
-    tiers = ((alpha / 50.0, "#66bb6a"), (alpha / 5.0, "#a5d6a7"), (alpha, "#e8f5e9"))
-    ns_color = "#f5f5f5"
+    theme_name, roles = _resolve_theme(theme)
+    cutoffs = (alpha / 50.0, alpha / 5.0, alpha)
+    with np.errstate(invalid="ignore"):
+        conditions = [finite & (p < c) for c in cutoffs] + [finite]
+    styles = [_cell(c, roles["text"]) for c in roles["significance"]]
+    styles.append(_cell(roles["not_significant"], roles["text"]))
+    cell_css = np.select(conditions, styles, default="")
 
-    def _css_for(p: float) -> str:
-        if p is None or not np.isfinite(p):
-            return ""
-        for cutoff, color in tiers:
-            if p < cutoff:
-                return f"background-color: {color}"
-        return f"background-color: {ns_color}"
+    styler = _apply_css(df, _tiered_css(df, pvalue_column, cell_css, highlight_row))
+    if not rich:
+        return styler
 
-    css = _blank_css(df)
-    for idx, p in df[pvalue_column].items():
-        style = _css_for(p)
-        if highlight_row:
-            css.loc[idx, :] = style
-        else:
-            css.loc[idx, pvalue_column] = style
+    n_tests = int(finite.sum())
+    tier = np.select(conditions, [0, 1, 2, 3], default=-1)
+    n_significant = int((tier >= 0).sum() - (tier == 3).sum())
+    warnings = []
+    if n_tests > 1:
+        warnings.append(
+            f"{n_tests} tests shaded with no multiple-comparison correction; "
+            f"about {alpha * n_tests:.3g} would fall below alpha={alpha:g} by "
+            "chance if every null were true — consider bunker_stats.p_adjust"
+        )
+    meta = {
+        "pvalue_column": pvalue_column,
+        "alpha": float(alpha),
+        "tier_cutoffs": [float(c) for c in cutoffs],
+        "n_tests": n_tests,
+        "n_missing": int(p.size) - n_tests,
+        "n_significant": n_significant,
+        "n_per_tier": {
+            f"p < {cutoffs[0]:g}": int((tier == 0).sum()),
+            f"p < {cutoffs[1]:g}": int((tier == 1).sum()),
+            f"p < {cutoffs[2]:g}": int((tier == 2).sum()),
+            "not significant": int((tier == 3).sum()),
+        },
+        "multiple_comparison_correction": "none (p-values shaded as given)",
+        "expected_false_positives_if_all_null": float(alpha * n_tests),
+        "highlight_row": bool(highlight_row),
+        "caveat": (
+            "shading reflects p-value thresholds only; a small p-value says "
+            "nothing about the size or importance of an effect"
+        ),
+        "theme": _theme_meta(theme_name, roles, ["significance", "not_significant"]),
+        "frame_is_copy": False,
+    }
+    return SignificanceStyleResult(styler, df, meta, warnings)
 
-    return df.style.apply(lambda _: css, axis=None)
+
+_EFFECT_LABELS = ("negligible", "small", "medium", "large")
 
 
 def style_effect_size(
@@ -1051,6 +1877,8 @@ def style_effect_size(
     *,
     thresholds: Sequence[float] = (0.2, 0.5, 0.8),
     highlight_row: bool = False,
+    theme: Any = "default",
+    rich: bool = False,
 ):
     """Shade an effect-size column by magnitude.
 
@@ -1059,17 +1887,14 @@ def style_effect_size(
     ascending thresholds for other measures -- e.g. ``(0.147, 0.33, 0.474)`` for
     Cliff's delta, or ``(0.1, 0.3, 0.5)`` for rank-biserial.
 
-    NaN effects are left unstyled.
+    NaN effects are left unstyled. The default cutoffs are Cohen's conventions
+    for standardized mean differences; they are not universal and what counts
+    as "large" depends on the field.
+
+    With ``rich=True`` returns an :class:`EffectSizeStyleResult` with the count
+    in each bucket.
     """
-    pd = _pd()
-    _check_frame(df)
-    if effect_column not in df.columns:
-        raise KeyError(
-            f"Effect column {effect_column!r} not in DataFrame. "
-            f"Available: {list(df.columns)}"
-        )
-    if not pd.api.types.is_numeric_dtype(df[effect_column]):
-        raise TypeError(f"Column {effect_column!r} is not numeric")
+    effect = _check_result_column(df, effect_column, "Effect")
 
     cuts = [float(t) for t in thresholds]
     if len(cuts) != 3:
@@ -1077,42 +1902,81 @@ def style_effect_size(
     if not all(a < b for a, b in zip(cuts, cuts[1:])):
         raise ValueError(f"`thresholds` must be strictly ascending, got {cuts}")
 
-    palette = ("#f5f5f5", "#fff9c4", "#ffe082", "#ffab91")
+    theme_name, roles = _resolve_theme(theme)
+    finite = np.isfinite(effect)
+    with np.errstate(invalid="ignore"):
+        magnitude = np.abs(effect)
+        conditions = [finite & (magnitude < c) for c in cuts] + [finite]
+    styles = [_cell(c, roles["text"]) for c in roles["effect"]]
+    cell_css = np.select(conditions, styles, default="")
 
-    def _css_for(v: float) -> str:
-        if v is None or not np.isfinite(v):
-            return ""
-        magnitude = abs(v)
-        for cutoff, color in zip(cuts, palette):
-            if magnitude < cutoff:
-                return f"background-color: {color}"
-        return f"background-color: {palette[3]}"
+    styler = _apply_css(df, _tiered_css(df, effect_column, cell_css, highlight_row))
+    if not rich:
+        return styler
 
-    css = _blank_css(df)
-    for idx, v in df[effect_column].items():
-        style = _css_for(v)
-        if highlight_row:
-            css.loc[idx, :] = style
-        else:
-            css.loc[idx, effect_column] = style
+    bucket = np.select(conditions, [0, 1, 2, 3], default=-1)
+    meta = {
+        "effect_column": effect_column,
+        "thresholds": cuts,
+        "n": int(finite.sum()),
+        "n_missing": int(effect.size - finite.sum()),
+        "n_per_bucket": {
+            label: int((bucket == i).sum()) for i, label in enumerate(_EFFECT_LABELS)
+        },
+        "bucketing": "absolute value; lower bound inclusive",
+        "highlight_row": bool(highlight_row),
+        "caveat": (
+            "negligible/small/medium/large are conventions for the chosen "
+            "thresholds, not properties of the data"
+        ),
+        "theme": _theme_meta(theme_name, roles, ["effect"]),
+        "frame_is_copy": False,
+    }
+    return EffectSizeStyleResult(styler, df, meta, [])
 
-    return df.style.apply(lambda _: css, axis=None)
+
+def _attach(df, target: str, values: np.ndarray):
+    """Copy `df` and set one derived column; report whether it replaced one."""
+    overwrote = target in df.columns
+    out = df.copy()
+    out[target] = values
+    return out, overwrote
+
+
+def _overwrite_warning(targets: Sequence[str]) -> str:
+    return (
+        f"derived column(s) {', '.join(map(str, targets))} already existed in "
+        "the input and were replaced in the returned frame"
+    )
 
 
 def demean_style(
     df,
     column: Any,
     *,
-    above_color: str = "#c8e6c9",
-    below_color: str = "#ffcdd2",
-    zero_color: str = "#e0e0e0",
+    above_color: str | None = None,
+    below_color: str | None = None,
+    zero_color: str | None = None,
     add_suffix: str = "_demeaned",
+    theme: Any = "default",
+    rich: bool = False,
 ):
     """Add a demeaned column and color it above / below / at the mean.
 
-    Non-finite inputs are excluded from the mean and left unstyled.
+    Non-finite inputs are excluded from the mean and left unstyled. The input
+    DataFrame is never modified: the styled frame is a copy with
+    ``{column}{add_suffix}`` added.
+
+    With ``rich=True`` returns a :class:`DemeanStyleResult`; its metadata has
+    ``mean``, ``n``, ``n_missing`` and the ``n_above`` / ``n_below`` /
+    ``n_at_mean`` counts (``n_at_mean`` counts exact equality with the mean).
     """
     _resolve_columns(df, [column])
+    _check_stylable(df)
+    target = _derived_name(column, add_suffix)
+    theme_name, roles = _resolve_theme(
+        theme, above=above_color, below=below_color, at_center=zero_color
+    )
     values = _as_float(df[column])
 
     # One fused kernel call returns both outputs; scatter each back separately
@@ -1125,21 +1989,67 @@ def demean_style(
         demeaned[mask] = np.asarray(d, dtype=np.float64)
         signs[mask] = np.asarray(s, dtype=np.float64)
 
-    target = f"{column}{add_suffix}"
-    out = df.copy()
-    out[target] = demeaned
+    out, overwrote = _attach(df, target, demeaned)
 
-    colors = np.where(
-        ~np.isfinite(signs), "",
-        np.where(
-            signs > 0, f"background-color: {above_color}",
-            np.where(signs < 0, f"background-color: {below_color}",
-                     f"background-color: {zero_color}"),
-        ),
-    )
+    text = roles["text"]
+    with np.errstate(invalid="ignore"):
+        colors = np.select(
+            [signs > 0, signs < 0, signs == 0],
+            [_cell(roles["above"], text), _cell(roles["below"], text),
+             _cell(roles["at_center"], text)],
+            default="",
+        )
     css = _blank_css(out)
     css.loc[:, target] = colors
-    return out.style.apply(lambda _: css, axis=None)
+    styler = _apply_css(out, css)
+    if not rich:
+        return styler
+
+    n = int(mask.sum())
+    with np.errstate(invalid="ignore"):
+        n_above, n_below, n_at = (
+            int((signs > 0).sum()), int((signs < 0).sum()), int((signs == 0).sum())
+        )
+    warnings = []
+    if n == 0:
+        warnings.append(f"no finite values in column: {column}")
+    if overwrote:
+        warnings.append(_overwrite_warning([target]))
+    meta = {
+        "source_column": column,
+        "derived_column": target,
+        "n": n,
+        "n_missing": int(values.size) - n,
+        "mean": float(_safe(_bs.mean, values[mask])) if n else float("nan"),
+        "n_above": n_above,
+        "n_below": n_below,
+        "n_at_mean": n_at,
+        "nan_policy": "non-finite excluded from the mean; left NaN and unstyled",
+        "caveat": (
+            "the mean is not robust: a few extreme values move it, and with "
+            "it which rows read as above or below"
+        ),
+        "theme": _theme_meta(theme_name, roles, ["above", "below", "at_center"]),
+        "frame_is_copy": True,
+        "overwrote_existing_column": overwrote,
+    }
+    return DemeanStyleResult(styler, out, meta, warnings)
+
+
+def _zscore_cells(z: np.ndarray, threshold: float, roles: Mapping[str, Any]):
+    """CSS per z-score plus the high/low flag masks (|z| >= threshold)."""
+    text = roles["text"]
+    with np.errstate(invalid="ignore"):
+        finite = np.isfinite(z)
+        high = finite & (z >= threshold)
+        low = finite & (z <= -threshold)
+    css = np.select(
+        [high, low, finite],
+        [_cell(roles["high"], text), _cell(roles["low"], text),
+         _cell(roles["inlier"], text)],
+        default="",
+    )
+    return css, high, low
 
 
 def zscore_style(
@@ -1147,52 +2057,451 @@ def zscore_style(
     column: Any,
     *,
     threshold: float = 2.0,
-    high_color: str = "#ffcc80",
-    low_color: str = "#bbdefb",
-    zero_color: str = "#f5f5f5",
+    high_color: str | None = None,
+    low_color: str | None = None,
+    zero_color: str | None = None,
     add_suffix: str = "_zscore",
+    theme: Any = "default",
+    rich: bool = False,
 ):
     """Add a z-score column and highlight scores beyond +/- ``threshold``.
 
-    Non-finite inputs are excluded from the mean/std and left unstyled.
+    Z-scores use the sample mean and sample standard deviation (ddof=1).
+    Non-finite inputs are excluded from both and left unstyled. The input
+    DataFrame is never modified: the styled frame is a copy with
+    ``{column}{add_suffix}`` added.
+
+    With ``rich=True`` returns a :class:`ZScoreStyleResult`; its metadata has
+    ``mean``, ``std``, ``threshold``, ``n_high`` / ``n_low`` / ``n_flagged``
+    and, for calibration, the share a normal sample would flag.
+
+    .. note::
+       The mean and std are themselves inflated by extreme values, which can
+       hide exactly the points you are looking for (masking). In a sample of
+       size ``n`` no z-score can exceed ``(n - 1) / sqrt(n)``, so small samples
+       cannot reach large thresholds at all. :func:`scale_compare_style` puts
+       the classical and robust scores side by side.
     """
     _resolve_columns(df, [column])
-    if threshold <= 0:
-        raise ValueError(f"threshold must be > 0, got {threshold}")
-
-    z = _fit_scatter(_as_float(df[column]), _bs.zscore)
-
-    target = f"{column}{add_suffix}"
-    out = df.copy()
-    out[target] = z
-
-    with np.errstate(invalid="ignore"):
-        extreme = np.isfinite(z) & (np.abs(z) >= threshold)
-    colors = np.where(
-        ~np.isfinite(z), "",
-        np.where(
-            extreme & (z > 0), f"background-color: {high_color}",
-            np.where(extreme, f"background-color: {low_color}",
-                     f"background-color: {zero_color}"),
-        ),
+    _check_stylable(df)
+    threshold = _check_positive(threshold, "threshold")
+    target = _derived_name(column, add_suffix)
+    theme_name, roles = _resolve_theme(
+        theme, high=high_color, low=low_color, inlier=zero_color
     )
+    values = _as_float(df[column])
+
+    z = _fit_scatter(values, _bs.zscore)
+    out, overwrote = _attach(df, target, z)
+
+    colors, high, low = _zscore_cells(z, threshold, roles)
     css = _blank_css(out)
     css.loc[:, target] = colors
-    return out.style.apply(lambda _: css, axis=None)
+    styler = _apply_css(out, css)
+    if not rich:
+        return styler
+
+    x = _finite(values)
+    n = int(x.size)
+    std = float(_safe(_bs.std, x)) if n else float("nan")
+    n_high, n_low = int(high.sum()), int(low.sum())
+    warnings = []
+    if n == 0:
+        warnings.append(f"no finite values in column: {column}")
+    elif n == 1 or std == 0.0:
+        warnings.append(
+            f"zero variance in column: {column} — z-scores are undefined (NaN)"
+        )
+    elif (n - 1) / math.sqrt(n) < threshold:
+        warnings.append(
+            f"with n = {n} no z-score can reach {threshold:g} "
+            f"(maximum possible is {(n - 1) / math.sqrt(n):.3g}), so nothing "
+            "can be flagged"
+        )
+    if overwrote:
+        warnings.append(_overwrite_warning([target]))
+    meta = {
+        "source_column": column,
+        "derived_column": target,
+        "n": n,
+        "n_missing": int(values.size) - n,
+        "mean": float(_safe(_bs.mean, x)) if n else float("nan"),
+        "std": std,
+        "ddof": 1,
+        "threshold": threshold,
+        "n_high": n_high,
+        "n_low": n_low,
+        "n_flagged": n_high + n_low,
+        "pct_flagged": (100.0 * (n_high + n_low) / n) if n else float("nan"),
+        "expected_pct_if_normal": _normal_two_sided_pct(threshold),
+        "flag_rule": "|z| >= threshold",
+        "nan_policy": "non-finite excluded from mean/std; left NaN and unstyled",
+        "caveat": (
+            "mean and std are not robust; extreme values inflate both and can "
+            "mask themselves. " + _COLOR_CAVEAT
+        ),
+        "theme": _theme_meta(theme_name, roles, ["high", "low", "inlier"]),
+        "frame_is_copy": True,
+        "overwrote_existing_column": overwrote,
+    }
+    return ZScoreStyleResult(styler, out, meta, warnings)
 
 
-def iqr_outlier_style(
+def scale_compare_style(
     df,
     column: Any,
     *,
-    k: float = 1.5,
-    outlier_color: str = "#ff8a80",
+    threshold: float = 3.0,
+    scale_factor: float = _MAD_TO_SIGMA,
+    suffixes: Sequence[str] = ("_zscore", "_robust_z"),
+    theme: Any = "default",
+    rich: bool = False,
 ):
-    """Highlight IQR outliers in a single column.
+    """Classical and robust standard scores side by side, flagged alike.
 
-    Thin wrapper over :func:`outlier_style` with ``method="iqr"``.
+    Adds ``{column}_zscore`` = ``(x - mean) / std`` and ``{column}_robust_z`` =
+    ``(x - median) / (scale_factor * MAD)``, and highlights scores at or beyond
+    +/- ``threshold`` in each. Rows flagged by the robust score but not the
+    classical one are the signature of *masking*: extreme values inflating the
+    mean and std enough to hide themselves.
+
+    The input DataFrame is never modified. When the MAD is 0 (more than half
+    the values are identical) the robust score is undefined and its column is
+    all NaN, rather than the huge finite values a division by ~0 would give.
+
+    With ``rich=True`` returns a :class:`ScaleCompareStyleResult` with both
+    fits and the agreement counts (``n_flagged_both``, ``n_robust_only``,
+    ``n_classical_only``).
     """
-    return outlier_style(df, [column], method="iqr", k=k, outlier_color=outlier_color)
+    _resolve_columns(df, [column])
+    _check_stylable(df)
+    threshold = _check_positive(threshold, "threshold")
+    scale_factor = _check_positive(scale_factor, "scale_factor")
+    suffixes = tuple(suffixes)
+    if len(suffixes) != 2 or suffixes[0] == suffixes[1]:
+        raise ValueError(
+            f"`suffixes` must be two different strings, got {suffixes!r}"
+        )
+    z_col = _derived_name(column, suffixes[0], "suffixes")
+    r_col = _derived_name(column, suffixes[1], "suffixes")
+    theme_name, roles = _resolve_theme(theme)
+
+    values = _as_float(df[column])
+    x = _finite(values)
+    n = int(x.size)
+    median = float(_safe(_bs.median, x)) if n else float("nan")
+    mad = float(_safe(_bs.mad, x)) if n else float("nan")
+    zero_mad = n > 0 and mad == 0.0
+
+    z = _fit_scatter(values, _bs.zscore)
+    if zero_mad:
+        robust = np.full(values.shape, np.nan, dtype=np.float64)
+    else:
+        robust = _fit_scatter(values, lambda v: _bs.robust_scale(v, scale_factor))
+
+    overwrote = [c for c in (z_col, r_col) if c in df.columns]
+    out = df.copy()
+    out[z_col] = z
+    out[r_col] = robust
+
+    z_css, z_high, z_low = _zscore_cells(z, threshold, roles)
+    r_css, r_high, r_low = _zscore_cells(robust, threshold, roles)
+    css = _blank_css(out)
+    css.loc[:, z_col] = z_css
+    css.loc[:, r_col] = r_css
+    styler = _apply_css(out, css)
+    if not rich:
+        return styler
+
+    classical, robust_flag = z_high | z_low, r_high | r_low
+    n_robust_only = int((robust_flag & ~classical).sum())
+    std = float(_safe(_bs.std, x)) if n else float("nan")
+    warnings = []
+    if n == 0:
+        warnings.append(f"no finite values in column: {column}")
+    if zero_mad:
+        warnings.append(
+            f"MAD is 0 in column: {column} (more than half the values equal "
+            "the median) — the robust score is undefined and left NaN"
+        )
+    if n > 1 and std == 0.0:
+        warnings.append(
+            f"zero variance in column: {column} — z-scores are undefined (NaN)"
+        )
+    if n_robust_only:
+        warnings.append(
+            f"{n_robust_only} value(s) flagged by the robust score but not the "
+            "classical z-score — consistent with masking by extreme values"
+        )
+    if overwrote:
+        warnings.append(_overwrite_warning(overwrote))
+    meta = {
+        "source_column": column,
+        "derived_columns": {"zscore": z_col, "robust_z": r_col},
+        "n": n,
+        "n_missing": int(values.size) - n,
+        "threshold": threshold,
+        "mean": float(_safe(_bs.mean, x)) if n else float("nan"),
+        "std": std,
+        "median": median,
+        "mad": mad,
+        "scale_factor": scale_factor,
+        "robust_scale": scale_factor * mad if n else float("nan"),
+        "zero_mad": bool(zero_mad),
+        "n_flagged_classical": int(classical.sum()),
+        "n_flagged_robust": int(robust_flag.sum()),
+        "n_flagged_both": int((classical & robust_flag).sum()),
+        "n_robust_only": n_robust_only,
+        "n_classical_only": int((classical & ~robust_flag).sum()),
+        "flag_rule": "|score| >= threshold",
+        "nan_policy": "non-finite excluded from both fits; left NaN and unstyled",
+        "caveat": (
+            "the two scores share a scale only for roughly normal data "
+            "(scale_factor 1.4826 makes MAD estimate sigma under normality); "
+            "for skewed data the robust score flags the long tail by design"
+        ),
+        "theme": _theme_meta(theme_name, roles, ["high", "low", "inlier"]),
+        "frame_is_copy": True,
+        "overwrote_existing_column": bool(overwrote),
+    }
+    return ScaleCompareStyleResult(styler, out, meta, warnings)
+
+
+# ======================================================================
+# Style / transform result objects  (returned with rich=True)
+# ======================================================================
+
+def _jsonable(value: Any) -> Any:
+    """Plain-Python copy of a metadata value (numpy scalars, tuples, nesting)."""
+    if isinstance(value, Mapping):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _fmt_meta(value: Any) -> str:
+    if isinstance(value, bool) or value is None:
+        return str(value)
+    if isinstance(value, (float, np.floating)):
+        return f"{float(value):.6g}"
+    if isinstance(value, Mapping):
+        return ", ".join(f"{k}={_fmt_meta(v)}" for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return ", ".join(_fmt_meta(v) for v in value)
+    return str(value)
+
+
+def _meta_lines(meta: Mapping[Any, Any], indent: int = 0) -> list[str]:
+    """Render metadata for ``info()``: nested mappings indent, lists of
+    mappings (e.g. ``strongest_pairs``) get one line per entry."""
+    pad = " " * indent
+    width = max((len(str(k)) for k in meta), default=0) + 3
+    lines = []
+    for key, value in meta.items():
+        label = f"{key}:"
+        if isinstance(value, Mapping) and any(isinstance(v, Mapping) for v in value.values()):
+            lines.append(f"{pad}{label}")
+            lines += _meta_lines(value, indent + 2)
+        elif (
+            isinstance(value, (list, tuple))
+            and value
+            and all(isinstance(v, Mapping) for v in value)
+        ):
+            lines.append(f"{pad}{label}")
+            lines += [f"{pad}  {_fmt_meta(v)}" for v in value]
+        else:
+            lines.append(f"{pad}{label:<{width}}{_fmt_meta(value)}")
+    return lines
+
+
+class StyleResult:
+    """A styled table together with the numbers behind the styling.
+
+    Returned by the ``*_style`` / ``style_*`` helpers and :func:`corr_heatmap`
+    when called with ``rich=True`` (the default return stays a bare Styler).
+
+    Attributes
+    ----------
+    styler : pandas.io.formats.style.Styler
+        What the helper returns without ``rich=True``.
+    frame : pandas.DataFrame
+        The table being styled. For helpers that add columns this is a copy of
+        the input with the derived columns; otherwise it is the input itself.
+        ``metadata["frame_is_copy"]`` says which.
+    metadata : dict
+        Sample sizes, fitted values, thresholds, counts and the colors used --
+        everything needed to describe or reproduce the highlighting in prose.
+
+    Unpacks as ``styler, frame, metadata = result``. Displays as the styled
+    table in Jupyter.
+    """
+
+    _title = "Style Result"
+    _fields: tuple[str, ...] = ("styler", "frame", "metadata")
+
+    def __init__(self, styler, frame, metadata: Mapping[str, Any],
+                 warnings: Sequence[str] | None = None):
+        self._styler = styler
+        self.frame = frame
+        self.metadata = dict(metadata)
+        self._warnings = list(warnings or [])
+
+    @property
+    def styler(self):
+        return self._styler
+
+    @property
+    def meta(self) -> dict:
+        """Alias of ``metadata`` (the name the ``*_report`` objects use)."""
+        return self.metadata
+
+    @property
+    def warnings(self) -> list:
+        """Misuse-prevention warnings attached to this result (may be empty)."""
+        return list(self._warnings)
+
+    def add_warning(self, message: str) -> None:
+        """Attach a warning shown by ``info()`` and included in ``to_dict()``."""
+        self._warnings.append(message)
+
+    # -- tuple-like access ------------------------------------------------
+    def __iter__(self):
+        return (getattr(self, name) for name in self._fields)
+
+    def __len__(self) -> int:
+        return len(self._fields)
+
+    def __getitem__(self, index):
+        return [getattr(self, name) for name in self._fields][index]
+
+    # -- serialization ----------------------------------------------------
+    def to_dict(self, *, frame: bool = False) -> dict:
+        """Stable dict schema: ``{"title", "metadata", "warnings"}``.
+
+        Values are plain Python (no numpy scalars), so the dict goes straight
+        into ``json.dumps`` as long as the column labels are strings. The
+        table itself is left out by default because it can be the whole input
+        frame; pass ``frame=True`` to add it as ``DataFrame.to_dict("list")``.
+        """
+        out = {
+            "title": self._title,
+            "metadata": _jsonable(self.metadata),
+            "warnings": list(self._warnings),
+        }
+        if frame:
+            out["frame"] = self.frame.to_dict(orient="list")
+        return out
+
+    def info(self) -> str:
+        """Pretty, multi-line human summary of the metadata and warnings."""
+        lines = [self._title, "=" * 60]
+        lines += _meta_lines(self.metadata)
+        if self._warnings:
+            lines.append("")
+            lines += [f"Warning: {w}" for w in self._warnings]
+        return "\n".join(lines)
+
+    def _repr_html_(self):
+        return self.styler._repr_html_()
+
+    def __repr__(self) -> str:
+        scalars = [
+            f"{k}={_fmt_meta(v)}"
+            for k, v in self.metadata.items()
+            # counts and fitted values only; prose fields belong in info()
+            if not isinstance(v, (Mapping, list, tuple))
+            and not (isinstance(v, str) and len(v) > 24)
+        ]
+        return f"{type(self).__name__}({', '.join(scalars[:6])})"
+
+
+class OutlierStyleResult(StyleResult):
+    """Rich result of :func:`outlier_style` (per-column fences and counts)."""
+
+    _title = "Outlier Style"
+
+
+class IQROutlierStyleResult(OutlierStyleResult):
+    """Rich result of :func:`iqr_outlier_style` (flat, single-column metadata)."""
+
+    _title = "IQR Outlier Style"
+
+
+class DemeanStyleResult(StyleResult):
+    """Rich result of :func:`demean_style`."""
+
+    _title = "Demean Style"
+
+
+class ZScoreStyleResult(StyleResult):
+    """Rich result of :func:`zscore_style`."""
+
+    _title = "Z-Score Style"
+
+
+class ScaleCompareStyleResult(StyleResult):
+    """Rich result of :func:`scale_compare_style`."""
+
+    _title = "Classical vs Robust Scores"
+
+
+class CorrelationHeatmapResult(StyleResult):
+    """Rich result of :func:`corr_heatmap`; ``frame`` is the correlation matrix."""
+
+    _title = "Correlation Heatmap"
+
+
+class MissingnessStyleResult(StyleResult):
+    """Rich result of :func:`missingness_style`."""
+
+    _title = "Missingness Style"
+
+
+class SignificanceStyleResult(StyleResult):
+    """Rich result of :func:`style_significance`."""
+
+    _title = "Significance Style"
+
+
+class EffectSizeStyleResult(StyleResult):
+    """Rich result of :func:`style_effect_size`."""
+
+    _title = "Effect Size Style"
+
+
+class TransformResult(StyleResult):
+    """A transformed frame together with the fitted parameters.
+
+    Returned by :func:`scale_columns` / :func:`winsorize_columns` with
+    ``rich=True``. Unpacks as ``frame, metadata = result``. ``.styler`` is a
+    plain Styler over the frame, built on first access (it needs jinja2; the
+    rest of the object does not).
+    """
+
+    _title = "Column Transform"
+    _fields = ("frame", "metadata")
+
+    def __init__(self, frame, metadata: Mapping[str, Any],
+                 warnings: Sequence[str] | None = None):
+        super().__init__(None, frame, metadata, warnings)
+
+    @property
+    def styler(self):
+        if self._styler is None:
+            self._styler = _base_styler(self.frame)
+        return self._styler
+
+    def _repr_html_(self):
+        return self.frame._repr_html_()
+
+
+class RobustScaleResult(TransformResult):
+    """Rich result of :func:`robust_scale_column` (flat, single-column metadata)."""
+
+    _title = "Robust Scale"
 
 
 # ======================================================================

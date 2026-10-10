@@ -1167,6 +1167,7 @@ class TestPublicSurface:
         assert set(stylers) == {
             "outlier_style", "style_significance", "style_effect_size",
             "demean_style", "zscore_style", "iqr_outlier_style",
+            "missingness_style", "scale_compare_style",
         }
         assert set(transforms) == {"scale_columns", "winsorize_columns"}
 

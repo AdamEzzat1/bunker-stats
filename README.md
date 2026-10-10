@@ -23,6 +23,39 @@ License: See LICENSE file
 
 ---
 
+## Release Notes — Unreleased
+
+Notebook layer hardening (`bunker_stats.notebook`). No Rust changes.
+
+- **`rich=True` on every styler and transform.** Stylers return a
+  `StyleResult` that unpacks as `styler, frame, metadata`; `scale_columns`,
+  `winsorize_columns` and `robust_scale_column` return a `TransformResult`
+  (`frame, metadata`). Metadata carries sample sizes, fitted values, fences,
+  counts and the colors used. The default return types are unchanged.
+- **New helpers:** `missingness_style` (where the gaps are),
+  `scale_compare_style` (classical vs robust scores side by side, to expose
+  masking) and `available_themes`.
+- **Themes.** `theme="default" | "colorblind"` or a `role -> color` mapping on
+  every styler. Styled cells now set a text color as well as a background, so
+  they stay legible in dark-mode notebooks.
+
+Behavior changes (each replaces a wrong or late-failing result):
+
+- Duplicate column labels raise `ValueError`. They used to be pooled into one
+  sample — `robust_summary` reported `n=6` for a 3-row frame.
+- Complex columns raise `TypeError` instead of dropping the imaginary part
+  behind a NumPy warning; `columns=None` no longer selects timedelta columns
+  (which then crashed).
+- Stylers raise `ValueError` for a non-unique index at the call, instead of a
+  bare `KeyError` when the notebook cell renders.
+- `corr_heatmap` paints undefined correlations with the theme's `missing`
+  color. pandas rendered them solid black, the visually strongest cell.
+- `threshold`, `k` and `z_threshold` must be finite and `> 0` everywhere
+  (`NaN` and, in `outlier_style`, negative values used to be accepted).
+- `style_significance` rejects p-values outside `[0, 1]`.
+- The `outlier_report(rich=True)` zero-spread warning said "nothing can be
+  flagged"; when the fences collapse, every value off that point *is* flagged.
+
 ## Release Notes — 0.3.1
 
 The first release whose PyPI artifacts actually ship the documented Python
@@ -613,6 +646,16 @@ raises a clear `ImportError` naming the command above.
 | `*_style` / `style_*` | `pandas.io.formats.style.Styler`                 |
 | `*_columns`   | `pandas.DataFrame` copy with added/transformed columns    |
 
+Every helper also accepts `rich=True` to get the same output wrapped with its
+context — see [Report objects](#report-objects-and-interactive-plotly-figures)
+and [Style results](#style-results-richtrue-on-stylers-and-transforms).
+
+**Copy semantics.** No helper ever modifies the DataFrame it is given, and
+there is no `inplace` option. Helpers that add columns (`*_columns`,
+`demean_style`, `zscore_style`, `scale_compare_style`) return or style a copy;
+`replace=True` overwrites the source column *in that copy*. Helpers that only
+color existing cells style your frame directly without copying it.
+
 ### Quick tour
 
 ```python
@@ -622,6 +665,7 @@ from bunker_stats.notebook import (
     normality_report, correlation_report, corr_heatmap, missingness_report,
     scale_columns, winsorize_columns, rolling_report, bootstrap_ci_report,
     style_significance, style_effect_size,
+    missingness_style, scale_compare_style,
 )
 
 # --- Profiling ---------------------------------------------------------
@@ -629,11 +673,13 @@ robust_summary(df)                 # count, mean, std, median, MAD, IQR, Qn,
                                    # trimmed mean, skew, kurtosis
 describe_fast(df)                  # a faster, richer df.describe().T
 missingness_report(df)             # NaN vs +/-inf vs finite, per column
+missingness_style(df)              # the same, painted onto the table
 
 # --- Outliers ----------------------------------------------------------
 outlier_report(df, method="iqr", k=1.5)             # counts, %, bounds
 outlier_report(df, method="robust_zscore")          # median/MAD fences
 outlier_style(df)                                   # highlight across columns
+scale_compare_style(df, "price")                    # z-score vs robust score
 
 # --- Distribution & association ----------------------------------------
 normality_report(df)                                # Jarque-Bera + A-D
@@ -695,6 +741,78 @@ Plotly ships with the `notebook` extra; calling a plot method without it raises
 `Install with pip install bunker-stats-rs[notebook] to use Plotly
 visualizations.` Everything else on a report object works without Plotly.
 
+### Style results (`rich=True` on stylers and transforms)
+
+A highlighted table shows *which* cells stand out but not *why*. With
+`rich=True` every styler returns the Styler together with the numbers behind
+it, so the highlighting can be described in a report or reproduced later:
+
+```python
+from bunker_stats import notebook as nb
+
+result = nb.zscore_style(df, "price", threshold=3, rich=True)
+result                      # displays the styled table in Jupyter
+styler, frame, meta = result   # frame = copy of df + "price_zscore"
+
+meta["mean"], meta["std"], meta["n"], meta["n_missing"]
+meta["n_high"], meta["n_low"], meta["n_flagged"]
+meta["expected_pct_if_normal"]   # 0.27 for threshold=3: a calibration point
+
+print(result.info())        # the same, as aligned text, plus any warnings
+result.to_dict()            # {"title", "metadata", "warnings"}, JSON-safe
+result.warnings             # e.g. "with n = 5 no z-score can reach 3 ..."
+```
+
+| Helper | `rich=True` returns | Metadata highlights |
+|--------|--------------------|---------------------|
+| `demean_style` | `DemeanStyleResult` | `mean`, `n_above`, `n_below`, `n_at_mean` |
+| `zscore_style` | `ZScoreStyleResult` | `mean`, `std`, `threshold`, `n_high`, `n_low`, `n_flagged` |
+| `iqr_outlier_style` | `IQROutlierStyleResult` | `q1`, `q3`, `iqr`, `k`, `lower_fence`, `upper_fence`, `n_low`, `n_high` |
+| `outlier_style` | `OutlierStyleResult` | the same per column, under `per_column` |
+| `scale_compare_style` | `ScaleCompareStyleResult` | both fits, `n_flagged_both`, `n_robust_only`, `n_classical_only` |
+| `corr_heatmap` | `CorrelationHeatmapResult` | `strongest_pairs`, `pairwise_n_min/max`, `constant_columns` |
+| `missingness_style` | `MissingnessStyleResult` | `n_missing_cells`, `n_infinite_cells`, `n_complete_rows`, `per_column` |
+| `style_significance` | `SignificanceStyleResult` | `n_tests`, `n_per_tier`, `expected_false_positives_if_all_null` |
+| `style_effect_size` | `EffectSizeStyleResult` | `thresholds`, `n_per_bucket` |
+| `scale_columns`, `winsorize_columns` | `TransformResult` | fitted parameters / clipping bounds per column |
+| `robust_scale_column` | `RobustScaleResult` | `median`, `mad`, `scale`, `zero_mad` |
+
+Style results unpack as `styler, frame, metadata`; transform results as
+`frame, metadata` (their `.styler` is built on demand and is the only part
+that needs jinja2). Every result records `n` and `n_missing`, the NaN policy,
+and `frame_is_copy`. Without `rich=True` the helpers return exactly what they
+always did.
+
+**Themes.** Every styler takes `theme=`: `"default"`, `"colorblind"` (blue /
+orange instead of green / red), or a mapping that overrides single roles —
+`theme={"outlier": "#ffd54f"}`. `nb.available_themes()` lists the roles. The
+older per-color keywords (`outlier_color=`, `high_color=`, ...) still work and
+take precedence. Each styled cell sets a text color along with its background,
+so tables stay readable in dark-mode notebooks.
+
+**What the colors do not mean.** These helpers mark values that are unusual
+under a stated rule; they do not identify errors, and the metadata is written
+to keep that visible:
+
+- **z-scores mask.** The mean and standard deviation are inflated by the very
+  values they are meant to catch, and in a sample of size *n* no z-score can
+  exceed (*n* − 1)/√*n*. In `[1, 2, 3, 4, 100]` the value 100 has z = 1.79 and
+  is not flagged at 2. `scale_compare_style` puts the robust score (65 here)
+  next to it and counts the disagreements in `n_robust_only`.
+- **`expected_pct_if_normal`** is how much of an exactly normal sample the
+  rule would flag — 0.7% for 1.5 × IQR fences, 4.6% for |z| ≥ 2. Finding that
+  share of "outliers" is what the rule does to clean data.
+- **`style_significance` applies no multiple-comparison correction.** It
+  shades the p-values as given and reports how many would fall below `alpha`
+  by chance. Adjust first, then style:
+  `df["p_adj"] = bs.p_adjust(df["pvalue"].to_numpy(), "holm")`.
+- **Robust scaling with MAD = 0** (more than half the values identical) is not
+  a usable score: the kernel divides by a ~1e-12 floor. The result carries
+  `zero_mad=True` and a warning; `scale_compare_style` leaves the column NaN.
+- **`corr_heatmap` colors encode the size of r, not its significance**, and
+  with missing data each cell can come from a different set of rows
+  (`pairwise_n_min` / `pairwise_n_max`).
+
 ### NaN and infinity policy
 
 The Rust kernels are *strict*: one NaN anywhere poisons the whole result. That
@@ -706,7 +824,7 @@ layer makes the choice explicit rather than inheriting it:
 | `*_report`, `robust_summary`, `describe_fast` | Dropped **per column** before the kernel runs; the count appears in `n_missing`. A column with no finite values yields an all-NaN row, not an exception. |
 | `correlation_report`, `corr_heatmap` | Dropped **pairwise** — each pair uses rows where both columns are finite. `n` per pair is reported when `pvalues=True`. |
 | `*_columns` | The transform is fit on finite values only, then results are scattered back into their original positions. Non-finite in ⇒ NaN out; **row alignment is always preserved**. |
-| `*_style`, `style_*` | Never raise; NaN cells simply receive no background color. |
+| `*_style`, `style_*` | Never raise on NaN; non-finite cells receive no background color (except in `missingness_style`, whose job is to show them). |
 | `missingness_report` | The exception — it *counts* rather than drops, and separates NaN from ±inf. |
 
 Two behaviours worth calling out explicitly:
