@@ -33,8 +33,19 @@ const MIN_BLOCK_ROWS: usize = 64;
 /// Per-block work (rows * p * p) below which Rayon dispatch costs more than it
 /// saves; with full blocks this means matrices narrower than 64 columns stay
 /// serial.
-#[cfg(feature = "parallel")]
+#[cfg(any(feature = "parallel", feature = "gemm"))]
 const PAR_MIN_WORK: usize = 1 << 22;
+
+/// Centering blocks handed to the thread pool per dispatch on the GEMM path.
+#[cfg(feature = "gemm")]
+const SUPER_BLOCKS: usize = 16;
+
+/// Whether `work` multiply-adds are worth spreading over the thread pool.
+#[cfg(feature = "gemm")]
+#[inline]
+fn worth_threads(work: usize) -> bool {
+    cfg!(feature = "parallel") && work >= PAR_MIN_WORK
+}
 
 /// Dot product with `LANES` fixed accumulators.
 ///
@@ -169,6 +180,121 @@ fn blocked_pair_sums_out<F>(
     }
 }
 
+/// Columns at or above which the Gram kernels use the packed GEMM.
+#[cfg(feature = "gemm")]
+const GEMM_MIN_COLS: usize = 64;
+
+/// Rows-times-columns centered per task on the GEMM path.
+#[cfg(feature = "gemm")]
+const GEMM_BLOCK_ELEMS: usize = 1 << 16;
+
+/// Upper triangle of `sum over rows of (x_i - mean_i) * (x_j - mean_j)`.
+///
+/// Default build: `blocked_pair_sums_out` with `dot_lanes`, bit-identical on
+/// every CPU. With the `gemm` feature, wide inputs go through a packed GEMM
+/// instead (see `gemm_gram_out`).
+fn blocked_gram_out(x: &[f64], n: usize, p: usize, means: Option<&[f64]>, out: &mut [f64]) {
+    #[cfg(feature = "gemm")]
+    if p >= GEMM_MIN_COLS {
+        gemm_gram_out(x, n, p, means, out);
+        return;
+    }
+    blocked_pair_sums_out(x, n, p, means, out, dot_lanes);
+}
+
+/// `blocked_gram_out` on matrixmultiply's GEMM.
+///
+/// Rows are taken in batches `W` (centered into a row-major scratch, or the
+/// whole input borrowed as-is when there is nothing to subtract), and each
+/// batch contributes `W^T W` to `out`. The output is cut into bands of rows;
+/// band `I` is one call `out[I, I.start..] += W[:, I]^T * W[:, I.start..]`, so
+/// only (a little more than) the upper triangle is computed and bands can run
+/// on separate threads.
+///
+/// Every output cell is still one in-order sum over the rows, so the result
+/// does not depend on the thread count. It DOES depend on the CPU: the GEMM
+/// kernel is chosen at run time (FMA, AVX, SSE2, NEON), and FMA rounds
+/// differently. Cells below the diagonal inside a band hold partial garbage
+/// until `finish_symmetric` mirrors the upper triangle over them.
+#[cfg(feature = "gemm")]
+fn gemm_gram_out(x: &[f64], n: usize, p: usize, means: Option<&[f64]>, out: &mut [f64]) {
+    debug_assert!(n >= 1 && p >= 1);
+
+    let threaded = worth_threads(n.saturating_mul(p).saturating_mul(p));
+    let block_rows = (GEMM_BLOCK_ELEMS / p).max(MIN_BLOCK_ROWS).min(n);
+    let batch_rows = match means {
+        Some(_) => (block_rows * if threaded { SUPER_BLOCKS } else { 1 }).min(n),
+        None => n,
+    };
+    let band_rows = (p / 16).clamp(8, 64);
+    let mut scratch = match means {
+        Some(_) => vec![0.0f64; batch_rows * p],
+        None => Vec::new(),
+    };
+    out.fill(0.0);
+
+    for batch in x.chunks(batch_rows * p) {
+        let w: &[f64] = match means {
+            Some(mu) => {
+                let w = &mut scratch[..batch.len()];
+                let center_block = |(dst, src): (&mut [f64], &[f64])| {
+                    for (d, s) in dst.chunks_exact_mut(p).zip(src.chunks_exact(p)) {
+                        for c in 0..p {
+                            d[c] = s[c] - mu[c];
+                        }
+                    }
+                };
+                if threaded {
+                    #[cfg(feature = "parallel")]
+                    w.par_chunks_mut(block_rows * p).zip(batch.par_chunks(block_rows * p)).for_each(center_block);
+                } else {
+                    w.chunks_mut(block_rows * p).zip(batch.chunks(block_rows * p)).for_each(center_block);
+                }
+                w
+            }
+            None => batch,
+        };
+        let m = w.len() / p;
+
+        let add_band = |(band, out_band): (usize, &mut [f64])| {
+            let i0 = band * band_rows;
+            let rows_here = out_band.len() / p;
+            let cols = p - i0;
+            // SAFETY: `w` holds m*p elements. A = W[:, i0..i0+rows_here]^T is
+            // read at w[r*p + i0 + i] and B = W[:, i0..] at w[r*p + i0 + j],
+            // with r < m, i < rows_here <= cols and j < cols, so the largest
+            // index is m*p - 1. C starts at out_band[i0] with row stride p and
+            // spans rows_here x cols, ending at rows_here*p - 1, inside
+            // `out_band`, which this closure borrows exclusively.
+            unsafe {
+                matrixmultiply::dgemm(
+                    rows_here,
+                    m,
+                    cols,
+                    1.0,
+                    w.as_ptr().add(i0),
+                    1,
+                    p as isize,
+                    w.as_ptr().add(i0),
+                    p as isize,
+                    1,
+                    1.0,
+                    out_band.as_mut_ptr().add(i0),
+                    p as isize,
+                    1,
+                );
+            }
+        };
+
+        if threaded {
+            #[cfg(feature = "parallel")]
+            out.par_chunks_mut(band_rows * p).enumerate().for_each(add_band);
+        } else {
+            out.chunks_mut(band_rows * p).enumerate().for_each(add_band);
+        }
+    }
+}
+
 /// Map every upper-triangle entry through `finish` and mirror it below the diagonal.
 fn finish_symmetric(out: &mut [f64], p: usize, finish: impl Fn(f64) -> f64) {
     for i in 0..p {
@@ -200,7 +326,7 @@ pub fn cov_matrix_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
 
     let means = column_means(x, n, p);
     let denom = (n - 1) as f64;
-    blocked_pair_sums_out(x, n, p, Some(&means), out, dot_lanes);
+    blocked_gram_out(x, n, p, Some(&means), out);
     finish_symmetric(out, p, |v| v / denom);
 }
 
@@ -221,7 +347,7 @@ pub fn cov_matrix_bias_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
 
     let means = column_means(x, n, p);
     let denom = n as f64;
-    blocked_pair_sums_out(x, n, p, Some(&means), out, dot_lanes);
+    blocked_gram_out(x, n, p, Some(&means), out);
     finish_symmetric(out, p, |v| v / denom);
 }
 
@@ -241,7 +367,7 @@ pub fn cov_matrix_centered_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
     }
 
     let denom = (n - 1) as f64;
-    blocked_pair_sums_out(x, n, p, None, out, dot_lanes);
+    blocked_gram_out(x, n, p, None, out);
     finish_symmetric(out, p, |v| v / denom);
 }
 
@@ -393,7 +519,7 @@ pub fn xtx_matrix_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
         return;
     }
 
-    blocked_pair_sums_out(x, n, p, None, out, dot_lanes);
+    blocked_gram_out(x, n, p, None, out);
     finish_symmetric(out, p, |v| v);
 }
 
@@ -479,7 +605,7 @@ pub fn pairwise_cosine_cols_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) 
     }
 
     // Upper triangle of X^T X; its diagonal holds the squared column norms.
-    blocked_pair_sums_out(x, n, p, None, out, dot_lanes);
+    blocked_gram_out(x, n, p, None, out);
     let norms: Vec<f64> = (0..p).map(|i| out[idx(i, i, p)].sqrt()).collect();
 
     for i in 0..p {

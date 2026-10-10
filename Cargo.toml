@@ -27,6 +27,9 @@ rand_pcg = "0.3"
 rustfft = "6.2"
 # NEW v0.2.9: Bitflags for StatsMask in rolling module
 bitflags = "2.4"
+# Packed GEMM for the wide dense Gram kernels (see the `gemm` feature). Already
+# in the dependency tree through nalgebra/ndarray, so this adds no new crate.
+matrixmultiply = { version = "0.3", optional = true }
 
 [dev-dependencies]
 proptest = "1"
@@ -40,6 +43,11 @@ bolero = "0.13"
 default = ["parallel", "extension-module"]
 parallel = ["rayon"]                       # rayon-backed parallel loops
 extension-module = ["pyo3/extension-module"]  # enabled by maturin for wheel builds
+# EXPERIMENTAL, off by default: route wide (>= 64 column) cov / X^T X / cosine
+# through matrixmultiply's GEMM. Faster, but its kernels are picked from the
+# running CPU (FMA/AVX), so results are reproducible per machine, not across
+# machines; without this feature every CPU produces the same bytes.
+gemm = ["matrixmultiply"]
 
 [profile.release]
 opt-level = 3
