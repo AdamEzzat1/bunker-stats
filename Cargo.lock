@@ -145,6 +145,7 @@ dependencies = [
  "bitflags",
  "bolero",
  "libm",
+ "matrixmultiply",
  "nalgebra",
  "numpy",
  "proptest",
