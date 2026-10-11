@@ -725,13 +725,24 @@ def _ad_pvalue(a_star: float, n: int) -> float:
     D'Agostino & Stephens (1986), Table 4.9, for mean and variance both
     estimated; valid for n >= 8. Their formulas are in terms of
     ``A^2 (1 + 0.75/n + 2.25/n^2)``, whereas the kernel returns
-    ``A^2 (1 + 4/n - 25/n^2)``, so convert first. The fit stops at a
-    statistic of 13 (p ~ 5e-31); anything larger reports that floor.
+    ``A^2 (1 + 4/n - 25/n^2)``, so convert first.
+
+    The fit covers statistics up to 13 (p ~ 5e-31). Its quadratic term turns
+    the curve back upward further out (past 1 eventually), so beyond 13 the
+    tail is continued log-linearly at the slope it has there. That keeps the
+    p-value decreasing in the statistic, so stronger departures still rank as
+    stronger, and it reaches 0 only by underflow. Out there it is an
+    extrapolation: read it as an order of magnitude, not as digits.
     """
     if n < 8 or not np.isfinite(a_star):
         return float("nan")
     a2 = a_star / (1.0 + 4.0 / n - 25.0 / (n * n))
-    z = min(a2 * (1.0 + 0.75 / n + 2.25 / (n * n)), 13.0)
+    z = a2 * (1.0 + 0.75 / n + 2.25 / (n * n))
+    if z > _AD_FIT_LIMIT:
+        edge = 1.2937 - 5.709 * _AD_FIT_LIMIT + 0.0186 * _AD_FIT_LIMIT ** 2
+        slope = -5.709 + 2.0 * 0.0186 * _AD_FIT_LIMIT
+        log_p = edge + slope * (z - _AD_FIT_LIMIT)
+        return math.exp(log_p) if log_p > -745.0 else 0.0
     if z < 0.2:
         p = 1.0 - math.exp(-13.436 + 101.14 * z - 223.73 * z * z)
     elif z < 0.34:
@@ -743,6 +754,7 @@ def _ad_pvalue(a_star: float, n: int) -> float:
     return min(max(p, 0.0), 1.0)
 
 
+_AD_FIT_LIMIT = 13.0
 _NORMALITY_MIN_N = 8
 _NORMALITY_LARGE_N = 5000
 
@@ -767,7 +779,7 @@ def normality_report(
     below a few hundred observations; the Jarque-Bera columns are reported for
     reference. ``ad_statistic`` is A-squared times the small-sample factor
     ``1 + 4/n - 25/n^2`` and ``ad_pvalue`` is the D'Agostino-Stephens
-    approximation.
+    approximation (extrapolated below about 1e-30).
 
     ``normal`` is ``None`` when no verdict is possible: fewer than 8 finite
     values, or a constant column. With thousands of observations the tests
@@ -1644,7 +1656,8 @@ def robust_scale_column(
     column: Any,
     *,
     scale_factor: float = _MAD_TO_SIGMA,
-    add_suffix: str = "_robust",
+    suffix: str | None = None,
+    add_suffix: str | None = None,
     rich: bool = False,
 ):
     """Single-column robust scaling. Kept for backwards compatibility.
@@ -1652,8 +1665,9 @@ def robust_scale_column(
     Prefer :func:`scale_columns` for new code -- it handles many columns, other
     methods, and NaN-preserving scatter-back in one call.
 
-    Returns a copy of ``df`` with ``{column}{add_suffix}`` added; the input is
-    never modified. With ``rich=True`` returns a :class:`RobustScaleResult`
+    Returns a copy of ``df`` with ``{column}{suffix}`` added (default
+    ``"_robust"``; ``add_suffix`` is the older name for ``suffix``); the input
+    is never modified. With ``rich=True`` returns a :class:`RobustScaleResult`
     (``frame, metadata``) whose flat metadata has ``median``, ``mad``,
     ``scale_factor``, ``scale`` and ``zero_mad``.
     """
@@ -1661,7 +1675,7 @@ def robust_scale_column(
         df,
         [column],
         method="robust",
-        suffix=add_suffix,
+        suffix=_one_suffix(suffix, add_suffix, "_robust"),
         scale_factor=scale_factor,
         rich=rich,
     )
@@ -1884,7 +1898,24 @@ def _apply_css(frame, css):
     return _base_styler(frame).apply(lambda _: css, axis=None)
 
 
-def _derived_name(column: Any, suffix: Any, name: str = "add_suffix") -> Any:
+def _one_suffix(suffix: Any, add_suffix: Any, default: str) -> Any:
+    """Resolve ``suffix=`` against its older spelling ``add_suffix=``.
+
+    ``suffix`` is the keyword every helper takes; ``add_suffix`` is kept so
+    existing calls keep working. Passing both with different values is a
+    mistake rather than something to guess at.
+    """
+    if suffix is None:
+        return default if add_suffix is None else add_suffix
+    if add_suffix is not None and add_suffix != suffix:
+        raise TypeError(
+            f"got both suffix={suffix!r} and add_suffix={add_suffix!r}; "
+            "they are the same option, pass only `suffix`"
+        )
+    return suffix
+
+
+def _derived_name(column: Any, suffix: Any, name: str = "suffix") -> Any:
     if not isinstance(suffix, str) or not suffix:
         raise ValueError(
             f"`{name}` must be a non-empty string so the derived column does "
@@ -1924,6 +1955,9 @@ def _outlier_detail(
     detail.update(
         lower_fence=float(lower),
         upper_fence=float(upper),
+        # the names outlier_report uses for the same two numbers
+        lower_bound=float(lower),
+        upper_bound=float(upper),
         n_outliers=n_low + n_high,
         n_low=n_low,
         n_high=n_high,
@@ -2047,8 +2081,10 @@ def iqr_outlier_style(
 
     Thin wrapper over :func:`outlier_style` with ``method="iqr"``. With
     ``rich=True`` returns an :class:`IQROutlierStyleResult` whose metadata is
-    flat: ``q1``, ``q3``, ``iqr``, ``k``, ``lower_fence``, ``upper_fence``,
-    ``n_outliers``, ``n_low``, ``n_high``, ``n``, ``n_missing``.
+    flat: ``q1``, ``q3``, ``iqr``, ``k``, ``lower_fence``, ``upper_fence``
+    (also as ``lower_bound`` / ``upper_bound``, the names
+    :func:`outlier_report` uses), ``n_outliers``, ``n_low``, ``n_high``,
+    ``n``, ``n_missing``.
     """
     result = outlier_style(
         df, [column], method="iqr", k=k,
@@ -2498,7 +2534,8 @@ def demean_style(
     above_color: str | None = None,
     below_color: str | None = None,
     zero_color: str | None = None,
-    add_suffix: str = "_demeaned",
+    suffix: str | None = None,
+    add_suffix: str | None = None,
     theme: Any = "default",
     rich: bool = False,
 ):
@@ -2506,7 +2543,8 @@ def demean_style(
 
     Non-finite inputs are excluded from the mean and left unstyled. The input
     DataFrame is never modified: the styled frame is a copy with
-    ``{column}{add_suffix}`` added.
+    ``{column}{suffix}`` added (default ``"_demeaned"``; ``add_suffix`` is the
+    older name for ``suffix``).
 
     With ``rich=True`` returns a :class:`DemeanStyleResult`; its metadata has
     ``mean``, ``n``, ``n_missing`` and the ``n_above`` / ``n_below`` /
@@ -2514,7 +2552,7 @@ def demean_style(
     """
     _resolve_columns(df, [column])
     _check_stylable(df)
-    target = _derived_name(column, add_suffix)
+    target = _derived_name(column, _one_suffix(suffix, add_suffix, "_demeaned"))
     theme_name, roles = _resolve_theme(
         theme, above=above_color, below=below_color, at_center=zero_color
     )
@@ -2603,7 +2641,8 @@ def zscore_style(
     high_color: str | None = None,
     low_color: str | None = None,
     zero_color: str | None = None,
-    add_suffix: str = "_zscore",
+    suffix: str | None = None,
+    add_suffix: str | None = None,
     theme: Any = "default",
     rich: bool = False,
 ):
@@ -2612,7 +2651,8 @@ def zscore_style(
     Z-scores use the sample mean and sample standard deviation (ddof=1).
     Non-finite inputs are excluded from both and left unstyled. The input
     DataFrame is never modified: the styled frame is a copy with
-    ``{column}{add_suffix}`` added.
+    ``{column}{suffix}`` added (default ``"_zscore"``; ``add_suffix`` is the
+    older name for ``suffix``).
 
     With ``rich=True`` returns a :class:`ZScoreStyleResult`; its metadata has
     ``mean``, ``std``, ``threshold``, ``n_high`` / ``n_low`` / ``n_flagged``
@@ -2628,7 +2668,7 @@ def zscore_style(
     _resolve_columns(df, [column])
     _check_stylable(df)
     threshold = _check_positive(threshold, "threshold")
-    target = _derived_name(column, add_suffix)
+    target = _derived_name(column, _one_suffix(suffix, add_suffix, "_zscore"))
     theme_name, roles = _resolve_theme(
         theme, high=high_color, low=low_color, inlier=zero_color
     )
@@ -2709,6 +2749,9 @@ def scale_compare_style(
     +/- ``threshold`` in each. Rows flagged by the robust score but not the
     classical one are the signature of *masking*: extreme values inflating the
     mean and std enough to hide themselves.
+
+    ``suffixes`` is a pair because this helper adds two columns (as in
+    ``pandas.merge``); the single-column helpers take ``suffix``.
 
     The input DataFrame is never modified. When the MAD is 0 (more than half
     the values are identical) the robust score is undefined and its column is

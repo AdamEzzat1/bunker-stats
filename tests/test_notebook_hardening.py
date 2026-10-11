@@ -18,6 +18,12 @@
                               were accepted.
 * ``TestResultInterfaces``  - reports and style results had different part
                               names and four reports had no ``rich``.
+* ``TestAndersonDarlingFarTail`` - every strong departure reported the same
+                              floor p-value.
+* ``TestOneNamePerOption``  - ``suffix`` / ``add_suffix`` and ``*_bound`` /
+                              ``*_fence`` named the same things.
+* ``TestLabeledMatrices``   - ``corr_df`` / ``cov_df`` returned all-NaN for a
+                              frame with one NaN.
 
 References are independent of this module (statsmodels, numpy, the flat-frame
 result); comparisons of small quantities use ``close`` (no absolute
@@ -131,13 +137,13 @@ class TestNormalityReport:
         row = nb.normality_report(pd.DataFrame({"x": x})).loc["x"]
         assert (row["n"], row["n_missing"]) == (20, 3)
 
-    def test_pvalue_floor_is_not_zero_or_above_one(self):
-        """The fitted formula turns upward for huge statistics; it must stay a
-        small positive number rather than 0 or > 1."""
+    def test_pvalue_for_a_huge_statistic_is_tiny_not_above_one(self):
+        """The fitted formula turns upward for huge statistics (see
+        TestAndersonDarlingFarTail); the result must stay a tiny p-value."""
         x = np.r_[np.zeros(500), np.full(500, 1e6), 3.0]
         row = nb.normality_report(pd.DataFrame({"x": x})).loc["x"]
         assert row["ad_statistic"] > 100
-        assert 0.0 < row["ad_pvalue"] < 1e-25
+        assert 0.0 <= row["ad_pvalue"] < 1e-100
 
     def test_rich_result_and_its_warnings(self):
         rng = np.random.default_rng(3)
@@ -641,3 +647,126 @@ class TestResultInterfaces:
             gappy, "a", 5, nan_policy="ignore", min_periods=3, rich=True
         )
         assert fixed.warnings == [] and fixed.meta["n_missing"] == 1
+
+
+# ======================================================================
+# Follow-ups: one name per option, pairwise corr_df, the A-D far tail
+# ======================================================================
+
+class TestAndersonDarlingFarTail:
+    def test_pvalue_never_increases_with_the_statistic(self):
+        """The published fit turns back upward past its range; the p-value
+        must keep falling so that stronger departures rank as stronger."""
+        grid = np.r_[np.linspace(0.05, 13.0, 400), np.linspace(13.0, 400.0, 800)]
+        p = np.array([nb._ad_pvalue(a, 1000) for a in grid])
+        assert np.all((p >= 0.0) & (p <= 1.0))
+        assert np.all(np.diff(p) <= 0.0)
+        assert p[0] > 0.99 and p[-1] == 0.0          # underflow only at the far end
+
+    def test_no_plateau_beyond_the_fitted_range(self):
+        beyond = [nb._ad_pvalue(a, 1000) for a in (14.0, 20.0, 50.0, 100.0)]
+        assert all(b > 0.0 for b in beyond)
+        assert all(later < earlier * 1e-10 for earlier, later in zip(beyond, beyond[1:]))
+
+    def test_continuous_where_the_extrapolation_starts(self):
+        n = 1000
+        scale = (1.0 + 0.75 / n + 2.25 / n**2) / (1.0 + 4.0 / n - 25.0 / n**2)
+        edge = 13.0 / scale                           # a_star whose z is 13
+        below, above = nb._ad_pvalue(edge * (1 - 1e-9), n), nb._ad_pvalue(edge * (1 + 1e-9), n)
+        assert close(above, below, 1e-6)
+
+    def test_stronger_bimodality_gets_a_smaller_pvalue(self):
+        rng = np.random.default_rng(0)
+        pvalues = []
+        for gap in (4.0, 10.0, 50.0):
+            x = np.r_[rng.normal(size=400), rng.normal(gap, 1.0, 400)]
+            pvalues.append(nb.normality_report(pd.DataFrame({"x": x})).loc["x", "ad_pvalue"])
+        assert pvalues[0] > pvalues[1] > pvalues[2] > 0.0
+
+
+class TestOneNamePerOption:
+    @pytest.fixture
+    def frame(self):
+        return pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0, 40.0]})
+
+    def test_suffix_everywhere(self, frame):
+        assert "a_s" in nb.scale_columns(frame, suffix="_s").columns
+        assert "a_s" in nb.winsorize_columns(frame, suffix="_s").columns
+        assert "a_s" in nb.robust_scale_column(frame, "a", suffix="_s").columns
+        assert nb.zscore_style(frame, "a", suffix="_s", rich=True).metadata["derived_column"] == "a_s"
+        assert nb.demean_style(frame, "a", suffix="_s", rich=True).metadata["derived_column"] == "a_s"
+
+    def test_add_suffix_still_works_and_defaults_are_unchanged(self, frame):
+        assert "a_old" in nb.robust_scale_column(frame, "a", add_suffix="_old").columns
+        assert nb.zscore_style(frame, "a", add_suffix="_old", rich=True).metadata["derived_column"] == "a_old"
+        assert nb.demean_style(frame, "a", add_suffix="_old", rich=True).metadata["derived_column"] == "a_old"
+        assert "a_robust" in nb.robust_scale_column(frame, "a").columns
+        assert nb.zscore_style(frame, "a", rich=True).metadata["derived_column"] == "a_zscore"
+        assert nb.demean_style(frame, "a", rich=True).metadata["derived_column"] == "a_demeaned"
+
+    def test_conflicting_spellings_are_rejected(self, frame):
+        for call in (nb.zscore_style, nb.demean_style, nb.robust_scale_column):
+            with pytest.raises(TypeError, match="pass only `suffix`"):
+                call(frame, "a", suffix="_x", add_suffix="_y")
+            call(frame, "a", suffix="_x", add_suffix="_x")      # same value: fine
+        with pytest.raises(ValueError, match="`suffix` must be a non-empty string"):
+            nb.zscore_style(frame, "a", suffix="")
+
+    def test_bounds_and_fences_are_the_same_numbers(self, frame):
+        report = nb.outlier_report(frame).loc["a"]
+        flat = nb.iqr_outlier_style(frame, "a", rich=True).metadata
+        nested = nb.outlier_style(frame, rich=True).metadata["per_column"]["a"]
+        for meta in (flat, nested):
+            assert meta["lower_bound"] == meta["lower_fence"] == report["lower_bound"]
+            assert meta["upper_bound"] == meta["upper_fence"] == report["upper_bound"]
+
+
+class TestLabeledMatrices:
+    @pytest.fixture
+    def frame(self):
+        frame = pd.DataFrame(
+            np.random.default_rng(0).normal(size=(40, 4)), columns=list("abcd")
+        )
+        frame.iloc[3, 0] = np.nan
+        frame.iloc[7, 1] = np.nan
+        frame.iloc[9, 2] = np.inf
+        frame["k"] = 1.0
+        frame["e"] = np.nan
+        return frame
+
+    def test_corr_df_is_pairwise_complete_like_pandas(self, frame):
+        import bunker_stats.pandas as bsp
+
+        ref = frame.replace([np.inf, -np.inf], np.nan).corr()
+        got = bsp.corr_df(frame)
+        assert list(got.columns) == list(ref.columns) == list(got.index)
+        np.testing.assert_array_equal(got.isna().to_numpy(), ref.isna().to_numpy())
+        np.testing.assert_allclose(got.to_numpy(), ref.to_numpy(), rtol=1e-12, atol=1e-15)
+        # and it agrees with the notebook layer's own pairwise report
+        report = nb.correlation_report(frame[list("abcd")])
+        np.testing.assert_allclose(
+            got.loc[list("abcd"), list("abcd")].to_numpy(), report.to_numpy(), rtol=1e-12
+        )
+
+    def test_cov_df_is_pairwise_complete_like_pandas(self, frame):
+        import bunker_stats.pandas as bsp
+
+        ref = frame.replace([np.inf, -np.inf], np.nan).cov()
+        got = bsp.cov_df(frame)
+        np.testing.assert_array_equal(got.isna().to_numpy(), ref.isna().to_numpy())
+        np.testing.assert_allclose(got.to_numpy(), ref.to_numpy(), rtol=1e-12, atol=1e-15)
+
+    def test_strict_mode_is_still_available(self, frame):
+        import bunker_stats.pandas as bsp
+
+        assert bsp.corr_df(frame[["a", "b"]], skipna=False).isna().all().all()
+        assert bsp.cov_df(frame[["a", "b"]], skipna=False).isna().all().all()
+
+    def test_complete_data_is_the_same_either_way(self):
+        import bunker_stats.pandas as bsp
+
+        frame = pd.DataFrame(np.random.default_rng(1).normal(size=(30, 3)), columns=list("abc"))
+        np.testing.assert_allclose(
+            bsp.corr_df(frame).to_numpy(), bsp.corr_df(frame, skipna=False).to_numpy(), rtol=1e-12
+        )
+        np.testing.assert_allclose(bsp.corr_df(frame).to_numpy(), frame.corr().to_numpy(), rtol=1e-12)

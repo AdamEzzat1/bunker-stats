@@ -178,6 +178,21 @@ Further notebook-layer fixes:
   `TypeError` naming the argument; `bootstrap_ci_report` rejects
   `n_resamples < 1`; `style_effect_size` rejects thresholds that are not
   finite and > 0 (negative ones silently put every row in "large").
+- **`bunker_stats.pandas.corr_df` / `cov_df` default to `skipna=True`.** One
+  NaN used to make the whole matrix NaN. They are now pairwise-complete, like
+  `DataFrame.corr()` / `.cov()` and `correlation_report`, and ±inf is skipped
+  along with NaN. `skipna=False` keeps the strict behaviour. `corr_df` takes
+  both standard deviations from the pair's own rows; `corr_matrix(skipna=True)`
+  does not (it uses each column's own rows), so the two can differ in the
+  third decimal when columns are missing in different places.
+- **One name per option.** `suffix=` works on every helper that adds a column;
+  `add_suffix=` (on `zscore_style`, `demean_style`, `robust_scale_column`) is
+  kept as an alias. Outlier style metadata carries `lower_bound` /
+  `upper_bound` as well as `lower_fence` / `upper_fence`, matching
+  `outlier_report`. `scale_compare_style` keeps `suffixes`, since it adds two.
+- The Anderson-Darling p-value no longer flattens out at 5e-31: beyond the
+  published fit it is continued log-linearly, so stronger departures still
+  get smaller p-values. Treat values that small as an order of magnitude.
 - `describe_fast` is no longer described as faster than `df.describe()`. With
   `robust=False` it is (about 2x at 100,000 rows); the default adds six robust
   statistics and is about 10x slower there, mostly `qn_scale`.
