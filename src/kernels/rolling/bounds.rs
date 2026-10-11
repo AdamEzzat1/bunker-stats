@@ -67,22 +67,32 @@ impl WindowBoundsCalculator for TrailingBounds {
 ///
 /// Output length: n (same as input, "pandas-like")
 /// Position k corresponds to input[k].
-/// Window at k: [max(0, k - w/2), min(n, k + w/2 + 1))
-/// where w = window size.
+/// Window at k: [max(0, k - w/2), min(n, k + (w-1)/2 + 1))
+/// where w = window size. That is exactly `w` points away from the edges, for
+/// odd and even `w` alike; an even window takes the extra point on the left,
+/// as pandas `rolling(w, center=True)` does.
 ///
 /// Near edges, window is truncated but centered as much as possible.
 pub struct CenteredBounds;
+
+/// `[start, end)` of the centered window at position `k`.
+///
+/// The right reach is `(w-1)/2`, not `w/2`: with `w/2` on both sides an even
+/// window silently covered `w + 1` points.
+#[inline]
+pub fn centered_range(k: usize, n: usize, window: usize) -> (usize, usize) {
+    let start = k.saturating_sub(window / 2);
+    let end = (k + (window - 1) / 2 + 1).min(n);
+    (start, end)
+}
 
 impl WindowBoundsCalculator for CenteredBounds {
     #[inline]
     fn bounds(&self, k: usize, n: usize, window: usize) -> WindowBounds {
         debug_assert!(window > 0);
         debug_assert!(k < n);
-        
-        let half = window / 2;
-        let start = k.saturating_sub(half);
-        let end = (k + half + 1).min(n);
-        
+
+        let (start, end) = centered_range(k, n, window);
         WindowBounds::new(start, end)
     }
 }
@@ -143,6 +153,27 @@ mod tests {
         
         // k=9: [7, 10) (truncated on right)
         assert_eq!(calc.bounds(9, 10, 5), WindowBounds::new(7, 10));
+    }
+
+    /// An even window must cover `window` points, not `window + 1`, and sit
+    /// where pandas `rolling(4, center=True)` puts it: [k-2, k+1].
+    #[test]
+    fn test_centered_bounds_even_window() {
+        let calc = CenteredBounds;
+
+        assert_eq!(calc.bounds(2, 10, 4), WindowBounds::new(0, 4));
+        assert_eq!(calc.bounds(5, 10, 4), WindowBounds::new(3, 7));
+        assert_eq!(calc.bounds(8, 10, 4), WindowBounds::new(6, 10));
+        // truncated at the edges
+        assert_eq!(calc.bounds(0, 10, 4), WindowBounds::new(0, 2));
+        assert_eq!(calc.bounds(9, 10, 4), WindowBounds::new(7, 10));
+
+        for window in 1..=9 {
+            for k in window..(20 - window) {
+                assert_eq!(calc.bounds(k, 20, window).len(), window);
+            }
+        }
+        assert_eq!(calc.bounds(3, 10, 1), WindowBounds::new(3, 4));
     }
     
     #[test]

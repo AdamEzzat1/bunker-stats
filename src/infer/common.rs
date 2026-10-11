@@ -24,6 +24,58 @@ impl Alternative {
     }
 }
 
+/// Upper tail `P(T > t)` of a Student-t with `df` degrees of freedom, `t >= 0`.
+///
+/// Evaluated as the lower tail at `-t` (the distribution is symmetric), never
+/// as `1 - cdf(t)`: that subtraction cancels to exactly 0.0 once the tail
+/// drops below ~1e-16.
+///
+/// The incomplete beta in statrs also returns exactly 0 once
+/// `x = df / (df + t^2)` is below machine epsilon, which for small `df`
+/// happens while the true tail is still far from underflow (df = 1, t = 7e7:
+/// 4.5e-9). There the tail is taken from the leading terms of the series
+/// `I_x(a, 1/2) = x^a / (a B(a, 1/2)) * (1 + a x / (2 (a + 1)) + O(x^2))`,
+/// `a = df / 2`, evaluated in log space.
+fn t_upper_tail(t: f64, df: f64) -> f64 {
+    use statrs::distribution::{ContinuousCDF, StudentsT};
+    use statrs::function::gamma::ln_gamma;
+
+    if t.is_infinite() {
+        return 0.0;
+    }
+    let x = df / (df + t * t);
+    if x < 1e-10 {
+        let a = 0.5 * df;
+        let ln_beta = ln_gamma(a) + ln_gamma(0.5) - ln_gamma(a + 0.5);
+        let ln_lead = a * x.ln() - a.ln() - ln_beta;
+        return 0.5 * ln_lead.exp() * (1.0 + a * x / (2.0 * (a + 1.0)));
+    }
+    StudentsT::new(0.0, 1.0, df).unwrap().cdf(-t)
+}
+
+/// p-value of a Student-t statistic with `df` degrees of freedom.
+///
+/// Handles every statistic a caller can produce: NaN gives NaN, and +/-Inf
+/// (zero standard error) gives 0 or 1 according to the alternative -- an
+/// infinite statistic in the direction *opposite* to a one-sided alternative
+/// is no evidence at all, so its p-value is 1, not 0.
+pub fn t_pvalue(t: f64, df: f64, alt: Alternative) -> f64 {
+    if t.is_nan() || df.is_nan() {
+        return f64::NAN;
+    }
+    let tail = t_upper_tail(t.abs(), df);
+    let p = match alt {
+        Alternative::TwoSided => 2.0 * tail,
+        Alternative::Less => {
+            if t < 0.0 { tail } else { 1.0 - tail }
+        }
+        Alternative::Greater => {
+            if t > 0.0 { tail } else { 1.0 - tail }
+        }
+    };
+    p.clamp(0.0, 1.0)
+}
+
 /// Reject NaN / Inf inputs (v0.3 contract).
 #[inline]
 pub fn reject_nonfinite(xs: &[f64], name: &str) -> PyResult<()> {
@@ -251,5 +303,105 @@ mod tests {
         
         let ys = vec![1.0, 2.0, 3.0, 4.0];
         assert_eq!(median(&ys), 2.5);
+    }
+}
+
+#[cfg(test)]
+mod t_pvalue_tests {
+    use super::*;
+
+    fn rel(a: f64, b: f64) -> f64 {
+        ((a - b) / b).abs()
+    }
+
+    /// `scipy.stats.t.sf(t, df)`. The rows with t >= 7e7 at small df are the
+    /// ones the statrs incomplete beta returns exactly 0 for.
+    const SF: &[(f64, f64, f64)] = &[
+        (1e3, 1.0, 0.00031830978008055887),
+        (1e6, 1.0, 3.1830988618368455e-07),
+        (7e7, 1.0, 4.547284088339866e-09),
+        (1e8, 1.0, 3.1830988618379066e-09),
+        (1e10, 1.0, 3.1830988618379065e-11),
+        (1e3, 2.0, 4.9999925000125e-07),
+        (1e6, 2.0, 4.999999999992501e-13),
+        (7e7, 2.0, 1.0204081632653057e-16),
+        (1e8, 2.0, 4.999999999999999e-17),
+        (1e10, 2.0, 5e-21),
+        (1e3, 3.0, 1.1026538212882999e-09),
+        (1e6, 3.0, 1.1026577908396162e-18),
+        (7e7, 3.0, 3.214745745899666e-24),
+        (1e10, 3.0, 1.1026577908435765e-30),
+        (1e3, 5.0, 9.490065565989865e-15),
+        (1e6, 5.0, 9.490167245460652e-30),
+        (7e7, 5.0, 5.6465563429298997e-39),
+        (1e10, 5.0, 9.490167245562447e-50),
+        (1e3, 10.0, 1.2304123550866324e-26),
+        (1e6, 10.0, 1.2304687499436141e-56),
+        (1e8, 10.0, 1.2304687500000114e-76),
+        (1e10, 10.0, 1.230468750000001e-96),
+        (1e3, 30.0, 1.0360017415558858e-69),
+        (1e6, 30.0, 1.0364534648044268e-159),
+        (1e8, 30.0, 1.0364534652562334e-219),
+        (1e10, 30.0, 1.0364534652561783e-279),
+    ];
+
+    #[test]
+    fn far_tail_matches_scipy() {
+        for &(t, df, sf) in SF {
+            let greater = t_pvalue(t, df, Alternative::Greater);
+            assert!(rel(greater, sf) < 1e-9, "greater t={t} df={df}: {greater} vs {sf}");
+            let less = t_pvalue(-t, df, Alternative::Less);
+            assert!(rel(less, sf) < 1e-9, "less t={t} df={df}: {less} vs {sf}");
+            for sign in [1.0, -1.0] {
+                let two = t_pvalue(sign * t, df, Alternative::TwoSided);
+                assert!(rel(two, 2.0 * sf) < 1e-9, "two-sided t={t} df={df}: {two}");
+            }
+            // The opposite one-sided tail is the complement.
+            assert!((t_pvalue(t, df, Alternative::Less) - (1.0 - sf)).abs() < 1e-15);
+        }
+    }
+
+    /// The series branch and the statrs branch must agree where they meet
+    /// (x = df / (df + t^2) = 1e-10): evaluate both formulas at the same t.
+    #[test]
+    fn branches_agree_at_the_switch() {
+        use statrs::distribution::{ContinuousCDF, StudentsT};
+        for df in [1.0f64, 2.0, 5.0, 30.0] {
+            // just inside the series branch
+            let t = (df * (1.0 / 0.99e-10 - 1.0)).sqrt();
+            let series = t_upper_tail(t, df);
+            let direct = StudentsT::new(0.0, 1.0, df).unwrap().cdf(-t);
+            assert!(series > 0.0 && direct > 0.0, "df={df}");
+            assert!(rel(series, direct) < 1e-9, "df={df}: {series} vs {direct}");
+        }
+    }
+
+    #[test]
+    fn ordinary_values() {
+        // scipy.stats.t.sf(2.0, 10)
+        let sf = 0.036694017385370196;
+        assert!(rel(t_pvalue(2.0, 10.0, Alternative::Greater), sf) < 1e-12);
+        assert!(rel(t_pvalue(2.0, 10.0, Alternative::TwoSided), 2.0 * sf) < 1e-12);
+        assert!(rel(t_pvalue(-2.0, 10.0, Alternative::Less), sf) < 1e-12);
+        assert!(rel(t_pvalue(2.0, 10.0, Alternative::Less), 1.0 - sf) < 1e-12);
+        assert_eq!(t_pvalue(0.0, 7.0, Alternative::TwoSided), 1.0);
+        assert_eq!(t_pvalue(0.0, 7.0, Alternative::Less), 0.5);
+        assert_eq!(t_pvalue(0.0, 7.0, Alternative::Greater), 0.5);
+    }
+
+    #[test]
+    fn infinite_and_nan_statistics() {
+        let inf = f64::INFINITY;
+        assert_eq!(t_pvalue(inf, 3.0, Alternative::TwoSided), 0.0);
+        assert_eq!(t_pvalue(-inf, 3.0, Alternative::TwoSided), 0.0);
+        assert_eq!(t_pvalue(inf, 3.0, Alternative::Greater), 0.0);
+        assert_eq!(t_pvalue(inf, 3.0, Alternative::Less), 1.0);
+        assert_eq!(t_pvalue(-inf, 3.0, Alternative::Less), 0.0);
+        assert_eq!(t_pvalue(-inf, 3.0, Alternative::Greater), 1.0);
+        for alt in [Alternative::TwoSided, Alternative::Less, Alternative::Greater] {
+            assert!(t_pvalue(f64::NAN, 3.0, alt).is_nan());
+        }
+        // t^2 overflows: the tail underflows to 0 instead of producing NaN.
+        assert_eq!(t_pvalue(1e200, 4.0, Alternative::Greater), 0.0);
     }
 }

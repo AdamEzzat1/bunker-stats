@@ -244,7 +244,7 @@ means, stds, counts = b.rolling_multi_np(x, 20, min_periods=10,
 ```
 
 - **NaN policy details:** under `"propagate"` each window is evaluated independently, so — unlike the legacy strict functions — output *recovers* after a NaN leaves the window: `[1, nan, 3, 4, 5]` with `window=3` gives `(nan, nan, 4.0)` for the mean. Under `"ignore"`, `count` reports the number of valid values per window.
-- **Centered alignment details:** output is full length `n` and aligned with the input; windows are truncated at both edges. With `min_periods=None`, truncated edge windows are still computed at their actual size; with an explicit `min_periods`, edges with fewer valid values than `min_periods` yield NaN. Because the window is expressed as `k ± window//2`, an **even** `window` spans `window + 1` points in the interior (e.g. `window=4` gives interior counts of 5); prefer odd windows for centered smoothing.
+- **Centered alignment details:** output is full length `n` and aligned with the input; windows are truncated at both edges. With `min_periods=None`, truncated edge windows are still computed at their actual size; with an explicit `min_periods`, edges with fewer valid values than `min_periods` yield NaN. The window at position `k` covers `[k - window//2, k + (window-1)//2]`, i.e. exactly `window` points in the interior for odd and even `window` alike; an even window takes its extra point on the left, as pandas `rolling(window, center=True)` does.
 - **Why it matters:** computing mean, std and count in one pass halves (or better) the passes over large arrays, and it is the only 1-D entry point with explicit `min_periods` / alignment / NaN-policy control — e.g. pandas-like smoothing with `alignment="centered"`, or gap-tolerant volatility with `nan_policy="ignore", min_periods=10`.
 - **Edge cases:** `window == 0` → `ValueError`. Trailing with `window > n` → tuple of empty arrays. `window == 1` under `"propagate"` returns `0.0` for std/var (a known quirk of the fused fast path; the legacy functions and pandas return NaN), while under `"ignore"` it returns NaN. Numerically stable on large-offset data in both policies (per-window translation offset; verified at `1e8`).
 
@@ -417,4 +417,4 @@ Additional notes:
 
 - Trailing output alignment: output index `k` ↔ input window `[k, k + window)`; the window *ends* at input index `k + window - 1`.
 - `rolling_zscore_np` standardizes the window's **first** element; `rolling_zscore_nan_np` standardizes the **current** (last) element. They are not interchangeable.
-- Centered alignment with an even `window` uses `window//2` points on each side and therefore spans `window + 1` points away from the edges; use odd windows for symmetric smoothing.
+- Centered alignment with an even `window` cannot be symmetric: it uses `window//2` points to the left and `window//2 - 1` to the right (the pandas `center=True` convention). Use odd windows for symmetric smoothing.

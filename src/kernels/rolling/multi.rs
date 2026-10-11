@@ -424,13 +424,11 @@ fn rolling_multi_centered(
     out_max: &mut [f64],
 ) {
     let n = xs.len();
-    let half = window / 2;
     let min_periods = config.effective_min_periods();
     let nan_policy = config.nan_policy;
-    
+
     for k in 0..n {
-        let start = k.saturating_sub(half);
-        let end = (k + half + 1).min(n);
+        let (start, end) = super::bounds::centered_range(k, n, window);
         let window_slice = &xs[start..end];
         
         let mut state = RollingState::new();
