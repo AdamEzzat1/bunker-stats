@@ -689,7 +689,7 @@ class TestSignificanceAndEffect:
             nb.style_significance(results, alpha=alpha)
 
     def test_rich_coverage_matches_the_docs(self):
-        """The docs name the helpers without a `rich` option; keep them honest."""
+        """The docs say every helper takes `rich`; keep them honest."""
         import inspect
 
         without = {
@@ -697,10 +697,7 @@ class TestSignificanceAndEffect:
             if inspect.isfunction(getattr(nb, name))
             and "rich" not in inspect.signature(getattr(nb, name)).parameters
         }
-        assert without == {
-            "describe_fast", "normality_report", "missingness_report",
-            "rolling_report", "available_themes",
-        }
+        assert without == {"available_themes"}
 
     @pytest.mark.parametrize("bad", [-0.01, 1.5])
     def test_out_of_range_pvalues_are_rejected(self, bad):

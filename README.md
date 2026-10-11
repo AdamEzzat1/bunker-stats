@@ -135,8 +135,67 @@ Further notebook-layer fixes:
 
 - Reports accept **MultiIndex columns** (every one raised `ValueError`). The
   report's rows are indexed by the same levels, as are both axes of the
-  `correlation_report` matrix. Derived column names in the transforms and
-  stylers are still built by string concatenation.
+  `correlation_report` matrix. Derived columns put their suffix on the last
+  level -- `("g1", "a")` gives `("g1", "a_zscore")` -- in the transforms, the
+  stylers and `rolling_report`; they used to come out as the string
+  `"('g1', 'a')_zscore"`.
+- **`normality_report` decides by Anderson-Darling, not Jarque-Bera**, and
+  gains `ad_pvalue` and `n_missing` columns. Verdicts change where the two
+  tests disagree: 30 exponential draws that Jarque-Bera passed (p = 0.28) are
+  now rejected (p = 0.03). Fewer than 8 finite values gives "inconclusive
+  (n < 8)" instead of a verdict from five points, and a constant column says
+  so instead of "sample too small". The `conclusion` strings name the test.
+- **Every helper takes `rich=True`**: `describe_fast`, `normality_report`,
+  `missingness_report` and `rolling_report` now return a `DescribeReport`,
+  `NormalityReport`, `MissingnessReport` and `RollingReport`. Reports unpack
+  as `data, meta`, and reports and style results answer to each other's
+  attribute names.
+- **`to_dict()` is strict JSON, and `to_json()` is new.** It was documented
+  as JSON-safe but passed NaN through (invalid JSON), and raised on MultiIndex
+  labels, Timestamps and numpy scalar arguments. NaN and ±inf are now `None`;
+  code that read NaN out of `to_dict()` should read `.data` / `.metadata`.
+- **Warnings that were only on the rich result are also raised as
+  `UserWarning` on the plain path** when they change what the numbers mean: a
+  derived column replacing an existing one, robust scaling with a zero MAD
+  (the output is ~1e12, not a score), fewer than 100 bootstrap resamples.
+  New: integer columns beyond 2**53 warn, because float64 collapses nearby
+  values (`2**53 + [1, 3, 5, 2, 4]` has std 1.58; the computed value is 2.24).
+- New notes on rich results: a z-score threshold the sample size can never
+  reach (`outlier_report` / `outlier_style`, `method="zscore"`); pairs with
+  fewer than 3 overlapping rows, constant columns and small overlaps in
+  `correlation_report`, which used to return no warnings at all; and the
+  number of uncorrected tests when `pvalues=True`.
+- `style_significance(adjusted=True)` declares the p-values already corrected
+  and drops the "no correction" warning, which used to fire on a column that
+  had just come out of `p_adjust`.
+- `missingness_report` and `missingness_style` share one rule, so they agree:
+  infinities in an `object` column of numbers are counted and painted, and a
+  complex column no longer loses its imaginary part (with a `ComplexWarning`).
+- `CorrelationReport.style()` on the long form colors only the `correlation`
+  column; the [-1, 1] gradient used to be applied to `n`, `statistic` and
+  `pvalue` too.
+- Validation: non-numeric `alpha`, `conf`, `lower_q` / `upper_q` raise a
+  `TypeError` naming the argument; `bootstrap_ci_report` rejects
+  `n_resamples < 1`; `style_effect_size` rejects thresholds that are not
+  finite and > 0 (negative ones silently put every row in "large").
+- **`bunker_stats.pandas.corr_df` / `cov_df` default to `skipna=True`.** One
+  NaN used to make the whole matrix NaN. They are now pairwise-complete, like
+  `DataFrame.corr()` / `.cov()` and `correlation_report`, and ±inf is skipped
+  along with NaN. `skipna=False` keeps the strict behaviour. `corr_df` takes
+  both standard deviations from the pair's own rows; `corr_matrix(skipna=True)`
+  does not (it uses each column's own rows), so the two can differ in the
+  third decimal when columns are missing in different places.
+- **One name per option.** `suffix=` works on every helper that adds a column;
+  `add_suffix=` (on `zscore_style`, `demean_style`, `robust_scale_column`) is
+  kept as an alias. Outlier style metadata carries `lower_bound` /
+  `upper_bound` as well as `lower_fence` / `upper_fence`, matching
+  `outlier_report`. `scale_compare_style` keeps `suffixes`, since it adds two.
+- The Anderson-Darling p-value no longer flattens out at 5e-31: beyond the
+  published fit it is continued log-linearly, so stronger departures still
+  get smaller p-values. Treat values that small as an order of magnitude.
+- `describe_fast` is no longer described as faster than `df.describe()`. With
+  `robust=False` it is (about 2x at 100,000 rows); the default adds six robust
+  statistics and is about 10x slower there, mostly `qn_scale`.
 - **`normality_report` `kurtosis` is now excess kurtosis** (0 for a normal
   distribution), matching `robust_summary`. It was Pearson kurtosis, so the
   two reports differed by 3 under the same column name. Values in this column
@@ -383,8 +442,8 @@ pip install bunker-stats-rs
 pip install "bunker-stats-rs[notebook]"
 ```
 
-The core package depends only on **numpy**. `pandas`, `jinja2` and `matplotlib`
-arrive with the `[notebook]` extra and are needed solely by
+The core package depends only on **numpy**. `pandas`, `jinja2`, `matplotlib`
+and `plotly` arrive with the `[notebook]` extra and are needed solely by
 `bunker_stats.notebook`.
 
 ### Basic Usage
@@ -751,10 +810,8 @@ raises a clear `ImportError` naming the command above.
 | `*_style` / `style_*` | `pandas.io.formats.style.Styler`                 |
 | `*_columns`   | `pandas.DataFrame` copy with added/transformed columns    |
 
-Every styler and transform, and four of the reports (`robust_summary`,
-`outlier_report`, `correlation_report`, `bootstrap_ci_report`), also accept
-`rich=True` to get the same output wrapped with its context. `describe_fast`,
-`normality_report`, `missingness_report` and `rolling_report` do not yet. See [Report objects](#report-objects-and-interactive-plotly-figures)
+Every helper also accepts `rich=True` to get the same output wrapped with
+its context. See [Report objects](#report-objects-and-interactive-plotly-figures)
 and [Style results](#style-results-richtrue-on-stylers-and-transforms).
 
 **Copy semantics.** No helper ever modifies the DataFrame it is given, and
@@ -778,7 +835,8 @@ from bunker_stats.notebook import (
 # --- Profiling ---------------------------------------------------------
 robust_summary(df)                 # count, mean, std, median, MAD, IQR, Qn,
                                    # trimmed mean, skew, kurtosis
-describe_fast(df)                  # a faster, richer df.describe().T
+describe_fast(df)                  # a richer df.describe().T (robust=False
+                                   # for the plain columns, faster than pandas)
 missingness_report(df)             # NaN vs +/-inf vs finite, per column
 missingness_style(df)              # the same, painted onto the table
 
@@ -789,7 +847,7 @@ outlier_style(df)                                   # highlight across columns
 scale_compare_style(df, "price")                    # z-score vs robust score
 
 # --- Distribution & association ----------------------------------------
-normality_report(df)                                # Jarque-Bera + A-D
+normality_report(df)                                # Anderson-Darling + J-B
 correlation_report(df, method="spearman")           # square matrix
 correlation_report(df, pvalues=True)                # long form with p-values
 corr_heatmap(df)                                    # gradient Styler
@@ -813,12 +871,11 @@ and re-exported from `bunker_stats.pandas` alongside `cov_df` / `corr_df`.
 
 ### Report objects and interactive Plotly figures
 
-`robust_summary`, `outlier_report`, `correlation_report` and
-`bootstrap_ci_report` also take **`rich=True`**, returning a report object
-instead of a bare DataFrame — same numbers (`report.data`), plus `meta`
-(method, parameters, NaN policy, seeds), misuse-prevention `warnings`, a stable
-`to_dict()` schema (`{"title", "data", "meta", "warnings"}`), `.style()`,
-`.info()`, and interactive **Plotly** figure methods:
+Every report also takes **`rich=True`**, returning a report object instead
+of a bare DataFrame — same numbers (`report.data`), plus `meta` (method,
+parameters, NaN policy, seeds), misuse-prevention `warnings`, a stable
+`to_dict()` schema (`{"title", "data", "meta", "warnings"}`), `to_json()`,
+`.style()` and `.info()`. Three of them add interactive **Plotly** figures:
 
 ```python
 from bunker_stats import notebook as nb
@@ -867,7 +924,8 @@ meta["n_high"], meta["n_low"], meta["n_flagged"]
 meta["expected_pct_if_normal"]   # 0.27 for threshold=3: a calibration point
 
 print(result.info())        # the same, as aligned text, plus any warnings
-result.to_dict()            # {"title", "metadata", "warnings"}, JSON-safe
+result.to_dict()            # {"title", "metadata", "warnings"}, strict JSON
+result.to_json()            # the same as a string (NaN and inf become null)
 result.warnings             # e.g. "with n = 5 no z-score can reach 3 ..."
 ```
 
@@ -887,9 +945,25 @@ result.warnings             # e.g. "with n = 5 no z-score can reach 3 ..."
 
 Style results unpack as `styler, frame, metadata`; transform results as
 `frame, metadata` (their `.styler` is built on demand and is the only part
-that needs jinja2). Every result records `n` and `n_missing`, the NaN policy,
-and `frame_is_copy`. Without `rich=True` the helpers return exactly what they
-always did.
+that needs jinja2); reports unpack as `data, meta`. All three answer to both
+spellings of their parts (`.frame` / `.data`, `.metadata` / `.meta`). Every
+result records `frame_is_copy` and how missing values were treated;
+single-column results carry `n` and `n_missing` at the top level and
+multi-column ones under `per_column`. Without `rich=True` the helpers return
+exactly what they always did.
+
+`to_dict()` and `to_json()` produce strict JSON: NaN and ±inf become `null`,
+numpy scalars become Python numbers, dates become ISO strings, and tuple
+(MultiIndex) labels become string keys. Read `.metadata` / `.data` when you
+need the original values.
+
+**Warnings.** Things that make a result misleading are listed in
+`result.warnings`. A few mean the numbers are not what they appear to be, and
+those are also raised as a `UserWarning` when you are *not* using `rich=True`:
+integer values beyond 2**53 (float64 cannot hold them exactly), a derived
+column replacing one that already existed, robust scaling of a column whose
+MAD is 0, fewer than 100 bootstrap resamples, and a table too large for pandas
+to render in full.
 
 **Themes.** Every styler takes `theme=`: `"default"`, `"colorblind"` (blue /
 orange instead of green / red), or a mapping that overrides single roles —
@@ -941,7 +1015,7 @@ layer makes the choice explicit rather than inheriting it:
 
 | Helper family | Behaviour with NaN / ±inf |
 |---------------|---------------------------|
-| `*_report`, `robust_summary`, `describe_fast` | Dropped **per column** before the kernel runs; the count appears in `n_missing`. A column with no finite values yields an all-NaN row, not an exception. |
+| `*_report`, `robust_summary`, `describe_fast` | Dropped **per column** before the kernel runs; the count appears in `n_missing`. A column with no finite values yields an all-NaN row, not an exception. (`rolling_report` keeps one row per input row instead.) |
 | `correlation_report`, `corr_heatmap` | Dropped **pairwise** — each pair uses rows where both columns are finite. `n` per pair is reported when `pvalues=True`. |
 | `*_columns` | The transform is fit on finite values only, then results are scattered back into their original positions. Non-finite in ⇒ NaN out; **row alignment is always preserved**. |
 | `*_style`, `style_*` | Never raise on NaN; non-finite cells receive no background color (except in `missingness_style`, whose job is to show them). |
@@ -949,11 +1023,15 @@ layer makes the choice explicit rather than inheriting it:
 
 Two behaviours worth calling out explicitly:
 
-- **Anderson-Darling has no p-value.** The kernel returns the A\* statistic
-  only (its critical values need table interpolation), so `normality_report`
-  reports `ad_statistic` for reference and bases the `normal` / `conclusion`
-  verdict solely on the Jarque-Bera p-value. As a rule of thumb A\* > 0.787
-  rejects normality at α = 0.05.
+- **`normality_report` decides by Anderson-Darling.** The kernel returns the
+  A\* statistic; this layer adds `ad_pvalue` (the D'Agostino-Stephens
+  approximation, checked against statsmodels) and bases `normal` /
+  `conclusion` on it. Jarque-Bera is reported alongside but only sees skewness
+  and kurtosis, and its chi-square approximation is poor below a few hundred
+  observations. There is no verdict (`normal` is `None`) for fewer than 8
+  finite values or a constant column, and the conclusion says which. With
+  thousands of rows either test rejects for departures too small to matter;
+  `rich=True` warns about that.
 - **`rolling_report(..., nan_policy="ignore")` does nothing on its own.** With
   the default `min_periods == window`, a window containing a NaN still fails
   the count check. To actually skip NaNs, pass `min_periods` below `window`:
