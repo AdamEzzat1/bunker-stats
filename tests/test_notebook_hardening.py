@@ -477,8 +477,15 @@ class TestMissingness:
     @pytest.fixture
     def frame(self):
         inf = float("inf")
+        # Built part by part: converting the Python value complex(0.0, inf)
+        # is platform-dependent (it arrives as nan+infj on Linux), which made
+        # the expected counts below wrong there.
+        z = np.zeros(5, dtype=complex)
+        z.real = [1.0, inf, 0.0, np.nan, np.nan]
+        z.imag = [2.0, 0.0, inf, 0.0, inf]      # the last one is NaN *and* inf
         return pd.DataFrame({
-            "z": [1 + 2j, complex(inf, 0.0), complex(0.0, inf), complex(np.nan, 0.0)],
+            "z": z[:4],
+            "z_both": z[[0, 1, 2, 4]],
             "o": pd.Series([1.0, inf, -inf, np.nan], dtype=object),
             "t": pd.Series(["a", "b", None, "d"], dtype=object),
             "m": pd.Series([1, "x", 2.5, None], dtype=object),
@@ -491,6 +498,14 @@ class TestMissingness:
             warnings.simplefilter("error")   # no ComplexWarning from a float cast
             out = nb.missingness_report(frame)
         assert out.loc["z", ["n_missing", "n_infinite", "n_finite"]].tolist() == [1, 2, 1]
+        # NaN in one part and inf in the other is missing, not infinite, and
+        # the three counts add up to the number of rows
+        assert out.loc["z_both", ["n_missing", "n_infinite", "n_finite"]].tolist() == [1, 2, 1]
+        stored = frame["z"].to_numpy()
+        assert int(np.isnan(stored).sum()) == 1 and int(np.isinf(stored).sum()) == 2
+        for label in ("z", "z_both", "o", "f"):
+            row = out.loc[label]
+            assert row["n_missing"] + row["n_infinite"] + row["n_finite"] == len(frame)
         assert out.loc["o", ["n_missing", "n_infinite", "n_finite"]].tolist() == [1, 2, 1]
         assert out.loc["f", ["n_missing", "n_infinite", "n_finite"]].tolist() == [1, 1, 2]
         for label in ("t", "m", "b"):       # text, mixed, boolean: not meaningful
