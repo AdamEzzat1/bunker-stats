@@ -23,15 +23,22 @@ Suffix            Returns
 ``*_columns``     a :class:`pandas.DataFrame` copy with added/transformed cols
 ================  ==========================================================
 
-Most helpers also take ``rich=True``, which keeps the same numbers but wraps
+Every helper also takes ``rich=True``, which keeps the same numbers but wraps
 them with the context needed to describe or reproduce them: every styler ->
 :class:`StyleResult` (unpacks as ``styler, frame, metadata``), every transform
--> :class:`TransformResult` (``frame, metadata``), and four reports
-(:func:`robust_summary`, :func:`outlier_report`, :func:`correlation_report`,
-:func:`bootstrap_ci_report`) -> :class:`NotebookReport`. All of them have
-``.to_dict()``, ``.info()`` and ``.warnings``. :func:`describe_fast`,
-:func:`normality_report`, :func:`missingness_report` and
-:func:`rolling_report` have no ``rich`` option yet.
+-> :class:`TransformResult` (``frame, metadata``), and every report ->
+:class:`NotebookReport` (``data, meta``). All of them have ``.to_dict()``,
+``.to_json()``, ``.info()`` and ``.warnings``, and answer to both spellings of
+their parts: ``.frame`` / ``.data`` and ``.metadata`` / ``.meta``.
+
+Warnings
+--------
+Conditions that make a result *misleading* are collected in ``.warnings`` on a
+rich result. A few mean the returned numbers are not what they appear to be,
+and those are also raised as a :class:`UserWarning` on the plain path: integer
+values too large for float64, a derived column replacing an existing one,
+robust scaling with a zero MAD, too few bootstrap resamples, and a table too
+large for pandas to render in full.
 
 Copy semantics
 --------------
@@ -51,6 +58,8 @@ default for exploratory data analysis, so this layer makes the choice explicit:
   drop non-finite values (NaN and +/-inf) **per column** before calling a
   kernel, and report how many were dropped in the ``n_missing`` column. A
   column with no finite values yields an all-NaN row rather than an exception.
+  (:func:`correlation_report` and :func:`rolling_report` have no such column:
+  the first reports the pairwise ``n``, the second keeps one row per input row.)
 * **Column transforms** (``*_columns``) fit the transform on the finite values
   only, then scatter the results back into their original positions. Non-finite
   inputs stay non-finite in the output, so row alignment is always preserved.
@@ -103,6 +112,10 @@ __all__ = [
     "OutlierReport",
     "CorrelationReport",
     "BootstrapCIReport",
+    "DescribeReport",
+    "NormalityReport",
+    "MissingnessReport",
+    "RollingReport",
     # --- style / transform objects (returned by <helper>(..., rich=True)) --
     "StyleResult",
     "OutlierStyleResult",
@@ -202,6 +215,49 @@ def _check_positive(value: Any, name: str) -> float:
     return value
 
 
+def _check_number(value: Any, name: str) -> float:
+    """A real number as float, or a TypeError naming the argument."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.number)):
+        raise TypeError(f"{name} must be a number, got {type(value).__name__}")
+    return float(value)
+
+
+def _check_open_unit(value: Any, name: str) -> float:
+    """A float strictly inside (0, 1) (written so that NaN fails too)."""
+    value = _check_number(value, name)
+    if not 0.0 < value < 1.0:
+        raise ValueError(f"{name} must be in (0, 1), got {value}")
+    return value
+
+
+def _warn(message: str) -> None:
+    """Emit a UserWarning attributed to the user's own line.
+
+    Helpers call each other (``iqr_outlier_style`` -> ``outlier_style``), so a
+    fixed ``stacklevel`` points into this file for some of them. Walk out of
+    this module instead.
+    """
+    level, caller = 1, sys._getframe(1)
+    while caller is not None and caller.f_code.co_filename == __file__:
+        level, caller = level + 1, caller.f_back
+    _warnings.warn(message, UserWarning, stacklevel=level + 1)
+
+
+def _suffixed(column: Any, suffix: str) -> Any:
+    """Label for a column derived from `column`.
+
+    A MultiIndex label is a tuple; the suffix goes on its last level so the
+    derived column stays under the same group (``("g", "a")`` ->
+    ``("g", "a_zscore")``) instead of becoming ``"('g', 'a')_zscore"``.
+    """
+    if isinstance(column, tuple) and column:
+        return column[:-1] + (f"{column[-1]}{suffix}",)
+    return f"{column}{suffix}"
+
+
+_FLOAT64_EXACT_INT = 2 ** 53
+
+
 def _resolve_columns(
     df,
     columns: Sequence[Any] | None,
@@ -277,6 +333,20 @@ def _as_float(series) -> np.ndarray:
     raises on masked ``Int64``/``boolean`` columns holding ``pd.NA`` in older
     pandas releases still inside the supported range.
     """
+    pd = _pd()
+    if pd.api.types.is_integer_dtype(series) and len(series):
+        # float64 has 53 bits of mantissa. Beyond that neighbouring integers
+        # collapse onto the same float, and every statistic of the *spread*
+        # (std, MAD, z-scores, ranks) is computed from the collapsed values.
+        lo, hi = series.min(), series.max()
+        if not (pd.isna(lo) or pd.isna(hi)) and max(-int(lo), int(hi)) > _FLOAT64_EXACT_INT:
+            _warn(
+                f"column {series.name!r} holds integers beyond 2**53, which "
+                "float64 cannot represent exactly: nearby values collapse "
+                "together, so the standard deviation, z-scores and other "
+                "spread statistics can be wrong. Subtract a constant offset "
+                "from the column first"
+            )
     return np.ascontiguousarray(
         series.to_numpy(dtype="float64", na_value=np.nan), dtype=np.float64
     )
@@ -411,8 +481,14 @@ def robust_summary(df, columns: Sequence[Any] | None = None, *, rich: bool = Fal
     return out
 
 
-def describe_fast(df, columns: Sequence[Any] | None = None, *, robust: bool = True):
-    """A faster, richer ``df.describe().T`` backed by the Rust kernels.
+def describe_fast(
+    df,
+    columns: Sequence[Any] | None = None,
+    *,
+    robust: bool = True,
+    rich: bool = False,
+):
+    """A richer ``df.describe().T`` backed by the Rust kernels.
 
     Always returns ``n``, ``n_missing``, ``mean``, ``std``, ``min``, ``25%``,
     ``50%``, ``75%``, ``max``. With ``robust=True`` (the default) it also adds
@@ -420,6 +496,12 @@ def describe_fast(df, columns: Sequence[Any] | None = None, *, robust: bool = Tr
 
     Unlike ``df.describe()``, non-finite values are dropped per column and
     counted in ``n_missing`` instead of being silently ignored.
+
+    On speed: ``robust=False`` computes the same columns as ``describe()`` and
+    is faster than pandas. The default adds six robust statistics and is
+    slower than ``describe()`` on large frames; most of that is ``qn_scale``.
+
+    With ``rich=True`` returns a :class:`DescribeReport`.
     """
     pd = _pd()
     cols = _resolve_columns(df, columns)
@@ -458,7 +540,45 @@ def describe_fast(df, columns: Sequence[Any] | None = None, *, robust: bool = Tr
     if robust:
         order += ["mad", "iqr", "qn_scale", "trimmed_mean", "skew", "kurtosis"]
     out = pd.DataFrame(rows, index=_column_index(df, cols))
-    return out.reindex(columns=order)
+    out = out.reindex(columns=order)
+    if not rich:
+        return out
+    warnings = []
+    empty = [str(c) for c in out.index[out["n"] == 0]]
+    if empty:
+        warnings.append(f"no finite values in column(s): {', '.join(empty)}")
+    constant = [str(c) for c in out.index[(out["n"] > 0) & (out["std"] == 0.0)]]
+    if constant:
+        warnings.append(f"zero variance in column(s): {', '.join(constant)}")
+    meta = {
+        "columns": list(cols),
+        "robust": bool(robust),
+        "nan_policy": "non-finite dropped per column (see n_missing)",
+        "quantile_method": "linear interpolation",
+    }
+    if robust:
+        meta.update({"trimmed_mean": "10% per tail", "kurtosis": "excess (Fisher)"})
+    return DescribeReport(out, meta=meta, warnings=warnings)
+
+
+def _unreachable_z_warning(sizes: Mapping[Any, int], z_threshold: float) -> str | None:
+    """Columns too short for any classical z-score to reach the threshold.
+
+    In a sample of size n no z-score (ddof=1) can exceed (n - 1) / sqrt(n),
+    so e.g. n = 5 can never be flagged at 3 however extreme a value is.
+    """
+    short = [
+        str(c) for c, n in sizes.items()
+        if n >= 2 and (n - 1) / math.sqrt(n) < z_threshold
+    ]
+    if not short:
+        return None
+    return (
+        f"z_threshold {z_threshold:g} cannot be reached in column(s): "
+        f"{', '.join(short)} — a sample of size n has no z-score beyond "
+        "(n - 1) / sqrt(n), so nothing can be flagged; use "
+        "method='robust_zscore' or 'iqr'"
+    )
 
 
 def _outlier_bounds(
@@ -581,6 +701,10 @@ def outlier_report(
                 f"zero spread in column(s): {', '.join(degenerate)} — the fences "
                 "collapse to a point, so every value that differs from it is flagged"
             )
+        if method == "zscore":
+            note = _unreachable_z_warning(dict(zip(out.index, out["n"])), z_threshold)
+            if note:
+                warnings.append(note)
         return OutlierReport(
             out,
             meta={
@@ -595,33 +719,75 @@ def outlier_report(
     return out
 
 
-def normality_report(df, columns: Sequence[Any] | None = None, *, alpha: float = 0.05):
-    """Jarque-Bera and Anderson-Darling normality diagnostics per column.
+def _ad_pvalue(a_star: float, n: int) -> float:
+    """Approximate p-value for the Anderson-Darling normality statistic.
 
-    Returns ``n``, ``skewness``, ``kurtosis``, ``jb_statistic``, ``jb_pvalue``,
-    ``ad_statistic``, ``normal`` and ``conclusion``.
-    ``kurtosis`` is *excess* kurtosis (0 for a normal distribution), the same
-    convention as :func:`robust_summary`.
+    D'Agostino & Stephens (1986), Table 4.9, for mean and variance both
+    estimated; valid for n >= 8. Their formulas are in terms of
+    ``A^2 (1 + 0.75/n + 2.25/n^2)``, whereas the kernel returns
+    ``A^2 (1 + 4/n - 25/n^2)``, so convert first. The fit stops at a
+    statistic of 13 (p ~ 5e-31); anything larger reports that floor.
+    """
+    if n < 8 or not np.isfinite(a_star):
+        return float("nan")
+    a2 = a_star / (1.0 + 4.0 / n - 25.0 / (n * n))
+    z = min(a2 * (1.0 + 0.75 / n + 2.25 / (n * n)), 13.0)
+    if z < 0.2:
+        p = 1.0 - math.exp(-13.436 + 101.14 * z - 223.73 * z * z)
+    elif z < 0.34:
+        p = 1.0 - math.exp(-8.318 + 42.796 * z - 59.938 * z * z)
+    elif z < 0.6:
+        p = math.exp(0.9177 - 4.279 * z - 1.38 * z * z)
+    else:
+        p = math.exp(1.2937 - 5.709 * z + 0.0186 * z * z)
+    return min(max(p, 0.0), 1.0)
 
-    .. note::
-       ``normal`` / ``conclusion`` are decided by the **Jarque-Bera p-value**
-       only. The Rust ``anderson_darling`` kernel returns the A-squared
-       statistic without a p-value (its critical values need table
-       interpolation), so it is reported for reference but not used in the
-       verdict. As a rule of thumb A* > 0.787 rejects normality at alpha=0.05.
+
+_NORMALITY_MIN_N = 8
+_NORMALITY_LARGE_N = 5000
+
+
+def normality_report(
+    df,
+    columns: Sequence[Any] | None = None,
+    *,
+    alpha: float = 0.05,
+    rich: bool = False,
+):
+    """Anderson-Darling and Jarque-Bera normality diagnostics per column.
+
+    Returns ``n``, ``n_missing``, ``skewness``, ``kurtosis``,
+    ``jb_statistic``, ``jb_pvalue``, ``ad_statistic``, ``ad_pvalue``,
+    ``normal`` and ``conclusion``. ``kurtosis`` is *excess* kurtosis (0 for a
+    normal distribution), the same convention as :func:`robust_summary`.
+
+    ``normal`` / ``conclusion`` are decided by the **Anderson-Darling**
+    p-value. It responds to any departure from normality, where Jarque-Bera
+    only sees skewness and kurtosis and its chi-square approximation is poor
+    below a few hundred observations; the Jarque-Bera columns are reported for
+    reference. ``ad_statistic`` is A-squared times the small-sample factor
+    ``1 + 4/n - 25/n^2`` and ``ad_pvalue`` is the D'Agostino-Stephens
+    approximation.
+
+    ``normal`` is ``None`` when no verdict is possible: fewer than 8 finite
+    values, or a constant column. With thousands of observations the tests
+    reject for departures far too small to matter, so read the skewness and
+    kurtosis as well; ``rich=True`` returns a :class:`NormalityReport` that
+    warns about both situations.
     """
     pd = _pd()
     cols = _resolve_columns(df, columns)
-    if not 0.0 < alpha < 1.0:
-        raise ValueError(f"alpha must be in (0, 1), got {alpha}")
+    alpha = _check_open_unit(alpha, "alpha")
 
     rows = []
     for col in cols:
-        x = _finite(_as_float(df[col]))
+        values = _as_float(df[col])
+        x = _finite(values)
         n = int(x.size)
-        row: dict[str, Any] = {"n": n}
+        row: dict[str, Any] = {"n": n, "n_missing": int(values.size) - n}
+        constant = n > 0 and float(np.min(x)) == float(np.max(x))
         jb = _safe(_bs.jarque_bera, x, default={}) or {}
-        ad = _safe(_bs.anderson_darling, x, default={}) or {}
+        ad = ({} if constant else _safe(_bs.anderson_darling, x, default={})) or {}
         row["skewness"] = jb.get("skewness", np.nan)
         # The kernel reports Pearson kurtosis (normal = 3). Every other
         # "kurtosis" in this layer is excess kurtosis (normal = 0), so convert
@@ -630,25 +796,131 @@ def normality_report(df, columns: Sequence[Any] | None = None, *, alpha: float =
         row["jb_statistic"] = jb.get("statistic", np.nan)
         row["jb_pvalue"] = jb.get("pvalue", np.nan)
         row["ad_statistic"] = ad.get("statistic", np.nan)
+        row["ad_pvalue"] = _ad_pvalue(row["ad_statistic"], n)
 
-        p = row["jb_pvalue"]
-        if p is None or not np.isfinite(p):
+        p = row["ad_pvalue"]
+        if n == 0:
+            row["normal"], row["conclusion"] = None, "no finite values"
+        elif constant:
+            row["normal"], row["conclusion"] = None, "constant column (no variance)"
+        elif not np.isfinite(p):
             row["normal"] = None
-            row["conclusion"] = "inconclusive (sample too small)"
+            row["conclusion"] = f"inconclusive (n < {_NORMALITY_MIN_N})"
         elif p < alpha:
             row["normal"] = False
-            row["conclusion"] = f"reject normality (p < {alpha})"
+            row["conclusion"] = f"reject normality (Anderson-Darling p < {alpha:g})"
         else:
             row["normal"] = True
-            row["conclusion"] = f"cannot reject normality (p >= {alpha})"
+            row["conclusion"] = (
+                f"cannot reject normality (Anderson-Darling p >= {alpha:g})"
+            )
         rows.append(row)
 
     order = [
-        "n", "skewness", "kurtosis", "jb_statistic", "jb_pvalue",
-        "ad_statistic", "normal", "conclusion",
+        "n", "n_missing", "skewness", "kurtosis", "jb_statistic", "jb_pvalue",
+        "ad_statistic", "ad_pvalue", "normal", "conclusion",
     ]
     out = pd.DataFrame(rows, index=_column_index(df, cols))
-    return out.reindex(columns=order)
+    out = out.reindex(columns=order)
+    if not rich:
+        return out
+
+    warnings = []
+    empty = [str(c) for c in out.index[out["n"] == 0]]
+    if empty:
+        warnings.append(f"no finite values in column(s): {', '.join(empty)}")
+    constant_cols = [
+        str(c) for c in out.index[out["conclusion"] == "constant column (no variance)"]
+    ]
+    if constant_cols:
+        warnings.append(
+            f"constant column(s): {', '.join(constant_cols)} — normality is "
+            "not testable"
+        )
+    small = [
+        str(c) for c in out.index[(out["n"] > 0) & (out["n"] < _NORMALITY_MIN_N)]
+        if str(c) not in constant_cols
+    ]
+    if small:
+        warnings.append(
+            f"fewer than {_NORMALITY_MIN_N} finite values in column(s): "
+            f"{', '.join(small)} — too few for a verdict"
+        )
+    large = [str(c) for c in out.index[out["n"] > _NORMALITY_LARGE_N]]
+    if large:
+        warnings.append(
+            f"large sample (n > {_NORMALITY_LARGE_N}) in column(s): "
+            f"{', '.join(large)} — the tests reject for departures from "
+            "normality too small to matter in practice; judge by skewness "
+            "and kurtosis as well"
+        )
+    return NormalityReport(
+        out,
+        meta={
+            "alpha": alpha,
+            "columns": list(cols),
+            "decided_by": "Anderson-Darling p-value (D'Agostino-Stephens approximation)",
+            "min_n_for_verdict": _NORMALITY_MIN_N,
+            "kurtosis": "excess (Fisher)",
+            "nan_policy": "non-finite dropped per column (see n_missing)",
+            "caveat": (
+                "failing to reject is not evidence of normality, and no "
+                "multiple-comparison correction is applied across columns"
+            ),
+        },
+        warnings=warnings,
+    )
+
+
+def _corr_diagnostics(df, cols: Sequence[Any]) -> dict:
+    """Pairwise sample sizes and the warnings they imply, for a set of columns."""
+    values = np.column_stack([_as_float(df[c]) for c in cols])
+    finite = np.isfinite(values)
+    pair_n = finite.astype(np.int64).T @ finite.astype(np.int64)
+    upper = np.triu_indices(len(cols), k=1)
+    pair_counts = pair_n[upper]
+
+    all_missing, constant = [], []
+    for j, col in enumerate(cols):
+        x = values[finite[:, j], j]
+        if x.size == 0:
+            all_missing.append(str(col))
+        elif np.min(x) == np.max(x):
+            constant.append(str(col))
+
+    warnings = []
+    if all_missing:
+        warnings.append(f"no finite values in column(s): {', '.join(all_missing)}")
+    if constant:
+        warnings.append(
+            f"constant column(s): {', '.join(constant)} — correlation with a "
+            "constant is undefined (shown as missing)"
+        )
+    n_short = int((pair_counts < 3).sum())
+    if n_short:
+        warnings.append(
+            f"{n_short} pair(s) have fewer than 3 overlapping rows — their "
+            "correlation is undefined (shown as missing)"
+        )
+    if pair_counts.size and pair_counts.min() != pair_counts.max():
+        warnings.append(
+            "pairwise deletion: cells are computed from different row subsets "
+            f"(n from {int(pair_counts.min())} to {int(pair_counts.max())}), so "
+            "they are not directly comparable"
+        )
+    usable = pair_counts[pair_counts >= 3]
+    if usable.size and usable.min() < 10:
+        warnings.append(
+            f"small overlap (min pairwise n = {int(usable.min())}): "
+            "correlations from few rows are noisy"
+        )
+    return {
+        "pair_n": pair_n,
+        "pair_counts": pair_counts,
+        "all_missing": all_missing,
+        "constant": constant,
+        "warnings": warnings,
+    }
 
 
 def correlation_report(
@@ -688,6 +960,18 @@ def correlation_report(
         "nan_policy": "pairwise-complete (each pair uses rows finite in both)",
         "form": "long" if pvalues else "matrix",
     }
+    notes: list = []
+    if rich:
+        diag = _corr_diagnostics(df, cols)
+        notes = diag["warnings"]
+        counts = diag["pair_counts"]
+        meta["pairwise_n_min"] = int(counts.min()) if counts.size else None
+        meta["pairwise_n_max"] = int(counts.max()) if counts.size else None
+        if pvalues and len(cols) > 2:
+            notes = notes + [
+                f"{len(cols) * (len(cols) - 1) // 2} tests with no "
+                "multiple-comparison correction — consider bunker_stats.p_adjust"
+            ]
 
     if not pvalues:
         mat = np.full((len(cols), len(cols)), np.nan)
@@ -705,7 +989,7 @@ def correlation_report(
             # otherwise, so flat frames keep their unnamed column axis.
             columns=index if isinstance(index, pd.MultiIndex) else cols,
         )
-        return CorrelationReport(out, meta=meta) if rich else out
+        return CorrelationReport(out, meta=meta, warnings=notes) if rich else out
 
     rows = []
     for i in range(len(cols)):
@@ -720,7 +1004,7 @@ def correlation_report(
                 }
             )
     out = pd.DataFrame(rows, columns=["x", "y", "n", "correlation", "statistic", "pvalue"])
-    return CorrelationReport(out, meta=meta) if rich else out
+    return CorrelationReport(out, meta=meta, warnings=notes) if rich else out
 
 
 def _pair_corr(test, xi: np.ndarray, xj: np.ndarray):
@@ -740,42 +1024,112 @@ def _pair_corr(test, xi: np.ndarray, xj: np.ndarray):
     )
 
 
-def missingness_report(df):
+def _gap_masks(series) -> tuple[np.ndarray, np.ndarray, bool]:
+    """``(is_missing, is_infinite, numeric)`` for one column of any dtype.
+
+    Shared by :func:`missingness_report` and :func:`missingness_style` so the
+    two can never disagree. ``numeric`` says whether finite/infinite is a
+    meaningful question for the column: real and complex dtypes, and object
+    columns whose non-null entries are all real numbers (a column of floats
+    that picked up ``object`` dtype still has its infinities counted).
+    """
+    pd = _pd()
+    is_missing = series.isna().to_numpy(dtype=bool)
+    none = np.zeros(len(series), dtype=bool)
+    if pd.api.types.is_bool_dtype(series):
+        return is_missing, none, False
+    if pd.api.types.is_complex_dtype(series):
+        # Infinite if either part is; a float cast would drop the imaginary part.
+        return is_missing, np.isinf(series.to_numpy()), True
+    if pd.api.types.is_numeric_dtype(series):
+        return is_missing, np.isinf(_as_float(series)), True
+    if series.dtype == object:
+        items = series.to_numpy(dtype=object)
+        real = np.array(
+            [
+                isinstance(v, (int, float, np.integer, np.floating))
+                and not isinstance(v, (bool, np.bool_))
+                for v in items
+            ],
+            dtype=bool,
+        )
+        if real.any() and bool((real | is_missing).all()):
+            infinite = np.array(
+                [bool(r) and math.isinf(v) for r, v in zip(real, items)], dtype=bool
+            )
+            return is_missing, infinite & ~is_missing, True
+    return is_missing, none, False
+
+
+def missingness_report(df, *, rich: bool = False):
     """Missing / non-finite audit for **every** column, numeric or not.
 
     Returns ``dtype``, ``n_rows``, ``n_missing`` (null per pandas),
     ``pct_missing``, ``n_finite`` and ``n_infinite``. The finite/infinite
-    counts are NaN for non-numeric columns, where they are not meaningful.
+    counts are NaN for columns where they are not meaningful (text, dates,
+    booleans). Complex columns count a value as infinite if either part is,
+    and an ``object`` column holding only real numbers is treated as numeric.
 
     This is the one helper that counts rather than drops non-finite values.
+    With ``rich=True`` returns a :class:`MissingnessReport`.
     """
     pd = _pd()
     _check_frame(df)
 
     n_rows = int(len(df))
     rows = []
+    incomplete = np.zeros(n_rows, dtype=bool)
     for i in range(df.shape[1]):
         series = df.iloc[:, i]  # positional: survives duplicate column labels
-        n_missing = int(series.isna().sum())
+        is_missing, is_infinite, numeric = _gap_masks(series)
+        incomplete |= is_missing | is_infinite
+        n_missing = int(is_missing.sum())
         row = {
             "dtype": str(series.dtype),
             "n_rows": n_rows,
             "n_missing": n_missing,
             "pct_missing": (100.0 * n_missing / n_rows) if n_rows else np.nan,
         }
-        if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
-            values = _as_float(series)
-            row["n_finite"] = int(np.isfinite(values).sum())
-            row["n_infinite"] = int(np.isinf(values).sum())
+        if numeric:
+            row["n_infinite"] = int(is_infinite.sum())
+            row["n_finite"] = n_rows - n_missing - row["n_infinite"]
         else:
             row["n_finite"] = np.nan
             row["n_infinite"] = np.nan
         rows.append(row)
 
-    return pd.DataFrame(
+    out = pd.DataFrame(
         rows,
         index=_column_index(df, list(df.columns)),
         columns=["dtype", "n_rows", "n_missing", "pct_missing", "n_finite", "n_infinite"],
+    )
+    if not rich:
+        return out
+
+    warnings = []
+    hollow = [
+        str(c) for c, m in zip(out.index, out["n_missing"]) if n_rows and m == n_rows
+    ]
+    if hollow:
+        warnings.append(f"entirely missing column(s): {', '.join(hollow)}")
+    if n_rows and df.shape[1] and not (~incomplete).any():
+        warnings.append(
+            "no row is complete across all columns — listwise deletion would "
+            "discard every row"
+        )
+    return MissingnessReport(
+        out,
+        meta={
+            "n_rows": n_rows,
+            "n_columns": int(df.shape[1]),
+            "n_complete_rows": int((~incomplete).sum()),
+            "n_incomplete_rows": int(incomplete.sum()),
+            "definition": (
+                "missing = null per pandas (NaN/None/NA/NaT); infinite = +/-inf "
+                "in numeric columns; a complete row has neither"
+            ),
+        },
+        warnings=warnings,
     )
 
 
@@ -788,6 +1142,7 @@ def rolling_report(
     min_periods: int | None = None,
     alignment: str = "trailing",
     nan_policy: str = "propagate",
+    rich: bool = False,
 ):
     """Rolling-window features for one column, via the fused Rust kernel.
 
@@ -829,9 +1184,11 @@ def rolling_report(
     -------
     pandas.DataFrame
         Indexed like ``df``, with one ``{column}_roll{window}_{stat}`` column
-        per requested statistic. If the kernel returns the shortened
+        per requested statistic (for a MultiIndex column the suffix goes on
+        the last level). If the kernel returns the shortened
         ``n - window + 1`` form, results are right-aligned and left-padded with
-        NaN so the index always lines up with the input.
+        NaN so the index always lines up with the input. With ``rich=True``
+        returns a :class:`RollingReport`.
     """
     pd = _pd()
     _resolve_columns(df, [column])
@@ -876,9 +1233,39 @@ def rolling_report(
             padded = np.full(n, np.nan, dtype=np.float64)
             padded[n - arr.size:] = arr
             arr = padded
-        out[f"{column}_roll{window}_{stat}"] = arr
+        out[_suffixed(column, f"_roll{window}_{stat}")] = arr
 
-    return pd.DataFrame(out, index=df.index)
+    frame = pd.DataFrame(out, index=df.index)
+    if isinstance(df.columns, pd.MultiIndex):
+        frame.columns = pd.MultiIndex.from_tuples(list(out), names=df.columns.names)
+    if not rich:
+        return frame
+
+    n_valid = int(np.isfinite(values).sum())
+    warnings = []
+    if n_valid < n and nan_policy == "ignore" and (min_periods is None or min_periods >= window):
+        warnings.append(
+            "nan_policy='ignore' has no effect while min_periods equals the "
+            "window: a window holding a NaN still fails the count check. "
+            "Pass min_periods below the window"
+        )
+    first = next(iter(out.values()))
+    return RollingReport(
+        frame,
+        meta={
+            "column": column,
+            "window": window,
+            "stats": list(stats),
+            "alignment": alignment,
+            "min_periods": window if min_periods is None else int(min_periods),
+            "nan_policy": nan_policy,
+            "n_rows": int(n),
+            "n_missing": int(n) - n_valid,
+            "n_rows_without_a_value": int((~np.isfinite(first)).sum()),
+            "derived_columns": list(out),
+        },
+        warnings=warnings,
+    )
 
 
 def bootstrap_ci_report(
@@ -917,6 +1304,26 @@ def bootstrap_ci_report(
     """
     pd = _pd()
     cols = _resolve_columns(df, columns)
+    conf = _check_open_unit(conf, "conf")
+    if isinstance(n_resamples, bool) or not isinstance(n_resamples, (int, np.integer)):
+        raise TypeError(
+            f"n_resamples must be an int, got {type(n_resamples).__name__}"
+        )
+    n_resamples = int(n_resamples)
+    if n_resamples < 1:
+        raise ValueError(f"n_resamples must be >= 1, got {n_resamples}")
+    few_resamples = None
+    if n_resamples < 100:
+        # A percentile interval reads the alpha/2 and 1 - alpha/2 quantiles of
+        # the draws; with a handful of draws those are just the extremes (and
+        # with one draw the interval has zero width).
+        few_resamples = (
+            f"n_resamples={n_resamples} is too few for a percentile interval: "
+            "its endpoints are little more than the most extreme draws. Use "
+            "at least 1000"
+        )
+        if not rich:
+            _warn(few_resamples)
 
     config = _bs.BootstrapConfig(
         n_resamples=n_resamples,
@@ -963,7 +1370,9 @@ def bootstrap_ci_report(
     out = out.reindex(columns=order)
     if rich:
         warnings = []
-        if n_resamples < 1000:
+        if few_resamples:
+            warnings.append(few_resamples)
+        elif n_resamples < 1000:
             warnings.append(
                 f"n_resamples={n_resamples} is low; CI endpoints may be "
                 "unstable (>= 1000 recommended)"
@@ -1077,31 +1486,42 @@ def scale_columns(
         kernel = _bs.minmax_scale
 
     out = df.copy()
-    targets = {col: col if replace else f"{col}{suffix}" for col in cols}
+    targets = {col: col if replace else _suffixed(col, suffix) for col in cols}
+    overwrote = [t for t in targets.values() if not replace and t in df.columns]
     per_column: dict[Any, dict] = {}
+    zero_mad = []
     for col in cols:
         values = _as_float(df[col])
         out[targets[col]] = _fit_scatter(values, kernel)
+        x = _finite(values)
+        if method == "robust" and x.size and float(_safe(_bs.mad, x)) == 0.0:
+            zero_mad.append(str(col))
         if rich:
-            x = _finite(values)
             per_column[col] = {
                 "derived_column": targets[col],
                 "n": int(x.size),
                 "n_missing": int(values.size - x.size),
                 **_scale_params(x, method, scale_factor),
             }
+    zero_mad_note = (
+        f"MAD is 0 in column(s): {', '.join(zero_mad)} — " + _ZERO_MAD_BEHAVIOR
+        if zero_mad else None
+    )
     if not rich:
+        # Both of these change what the returned numbers mean, so they are
+        # not left to the rich result alone.
+        if zero_mad_note:
+            _warn(zero_mad_note)
+        if overwrote:
+            _warn(_overwrite_warning(overwrote))
         return out
 
     warnings = []
     empty = [str(c) for c, d in per_column.items() if d["n"] == 0]
     if empty:
         warnings.append(f"no finite values in column(s): {', '.join(empty)}")
-    zero_mad = [str(c) for c, d in per_column.items() if d.get("zero_mad")]
-    if zero_mad:
-        warnings.append(
-            f"MAD is 0 in column(s): {', '.join(zero_mad)} — " + _ZERO_MAD_BEHAVIOR
-        )
+    if zero_mad_note:
+        warnings.append(zero_mad_note)
     zero_std = [str(c) for c, d in per_column.items() if d.get("std") == 0.0]
     if zero_std:
         warnings.append(
@@ -1112,7 +1532,6 @@ def scale_columns(
         warnings.append(
             f"zero range in column(s): {', '.join(zero_range)} — min-max output is all 0"
         )
-    overwrote = [t for t in targets.values() if not replace and t in df.columns]
     if overwrote:
         warnings.append(_overwrite_warning(overwrote))
     meta = {
@@ -1153,6 +1572,8 @@ def winsorize_columns(
     per column, the clipping bounds and how many values each tail changed.
     """
     cols = _resolve_columns(df, columns)
+    lower_q = _check_number(lower_q, "lower_q")
+    upper_q = _check_number(upper_q, "upper_q")
     for name, q in (("lower_q", lower_q), ("upper_q", upper_q)):
         if not 0.0 <= q <= 1.0:
             raise ValueError(f"{name} must be in [0, 1], got {q}")
@@ -1164,7 +1585,10 @@ def winsorize_columns(
     kernel = lambda x: _bs.winsorize(x, lower_q=lower_q, upper_q=upper_q)  # noqa: E731
 
     out = df.copy()
-    targets = {col: col if replace else f"{col}{suffix}" for col in cols}
+    targets = {col: col if replace else _suffixed(col, suffix) for col in cols}
+    overwrote = [t for t in targets.values() if not replace and t in df.columns]
+    if overwrote and not rich:
+        _warn(_overwrite_warning(overwrote))
     per_column: dict[Any, dict] = {}
     for col in cols:
         values = _as_float(df[col])
@@ -1193,7 +1617,6 @@ def winsorize_columns(
     empty = [str(c) for c, d in per_column.items() if d["n"] == 0]
     if empty:
         warnings.append(f"no finite values in column(s): {', '.join(empty)}")
-    overwrote = [t for t in targets.values() if not replace and t in df.columns]
     if overwrote:
         warnings.append(_overwrite_warning(overwrote))
     meta = {
@@ -1450,19 +1873,10 @@ def _render_limit_note(frame) -> str | None:
 
 
 def _warn_render_limit(frame) -> None:
-    """Emit the render-limit note as a UserWarning attributed to the caller.
-
-    Helpers call each other (``iqr_outlier_style`` -> ``outlier_style``), so a
-    fixed ``stacklevel`` points into this file for some of them. Walk out of
-    this module instead, so the warning always shows the user's own line.
-    """
+    """Emit the render-limit note as a UserWarning attributed to the caller."""
     note = _render_limit_note(frame)
-    if not note:
-        return
-    level, caller = 1, sys._getframe(1)
-    while caller is not None and caller.f_code.co_filename == __file__:
-        level, caller = level + 1, caller.f_back
-    _warnings.warn(note, UserWarning, stacklevel=level + 1)
+    if note:
+        _warn(note)
 
 
 def _apply_css(frame, css):
@@ -1470,13 +1884,13 @@ def _apply_css(frame, css):
     return _base_styler(frame).apply(lambda _: css, axis=None)
 
 
-def _derived_name(column: Any, suffix: Any, name: str = "add_suffix") -> str:
+def _derived_name(column: Any, suffix: Any, name: str = "add_suffix") -> Any:
     if not isinstance(suffix, str) or not suffix:
         raise ValueError(
             f"`{name}` must be a non-empty string so the derived column does "
             "not overwrite its source"
         )
-    return f"{column}{suffix}"
+    return _suffixed(column, suffix)
 
 
 def _normal_two_sided_pct(z: float) -> float:
@@ -1592,6 +2006,12 @@ def outlier_style(
             f"zero spread in column(s): {', '.join(flat)} — the fences collapse "
             "to a point, so every value that differs from it is flagged"
         )
+    if method == "zscore":
+        note = _unreachable_z_warning(
+            {c: d["n"] for c, d in per_column.items()}, z_threshold
+        )
+        if note:
+            warnings.append(note)
     meta = {
         "method": method,
         "k": k if method == "iqr" else None,
@@ -1701,9 +2121,9 @@ def corr_heatmap(
         return styler
 
     cols = list(corr.columns)
-    values = np.column_stack([_as_float(df[c]) for c in cols])
-    finite = np.isfinite(values)
-    pair_n = finite.astype(np.int64).T @ finite.astype(np.int64)
+    diag = _corr_diagnostics(df, cols)
+    pair_n, pair_counts = diag["pair_n"], diag["pair_counts"]
+    all_missing, constant, warnings = diag["all_missing"], diag["constant"], diag["warnings"]
 
     upper = np.triu_indices(len(cols), k=1)
     off = matrix[upper]
@@ -1720,40 +2140,13 @@ def corr_heatmap(
         for o in order
     ]
 
-    all_missing, constant = [], []
-    for j, col in enumerate(cols):
-        x = values[finite[:, j], j]
-        if x.size == 0:
-            all_missing.append(str(col))
-        elif np.min(x) == np.max(x):
-            constant.append(str(col))
-
-    pair_counts = pair_n[upper]
-    warnings = []
-    if all_missing:
-        warnings.append(f"no finite values in column(s): {', '.join(all_missing)}")
-    if constant:
-        warnings.append(
-            f"constant column(s): {', '.join(constant)} — correlation with a "
-            "constant is undefined (shown as missing)"
-        )
-    if pair_counts.size and pair_counts.min() != pair_counts.max():
-        warnings.append(
-            "pairwise deletion: cells are computed from different row subsets "
-            f"(n from {int(pair_counts.min())} to {int(pair_counts.max())}), so "
-            "they are not directly comparable"
-        )
-    if pair_counts.size and 3 <= pair_counts.min() < 10:
-        warnings.append(
-            f"small overlap (min pairwise n = {int(pair_counts.min())}): "
-            "correlations from few rows are noisy"
-        )
-
     meta = {
         "method": method,
         "columns": cols,
         "shape": tuple(corr.shape),
         "n_rows": int(len(df)),
+        "nan_policy": "pairwise-complete (each pair uses rows finite in both)",
+        # same text under the key this helper has always used
         "missing_policy": "pairwise-complete (each pair uses rows finite in both)",
         "pairwise_n_min": int(pair_counts.min()) if pair_counts.size else None,
         "pairwise_n_max": int(pair_counts.max()) if pair_counts.size else None,
@@ -1796,16 +2189,17 @@ def missingness_style(
 ):
     """Highlight missing and infinite cells, to see *where* the gaps are.
 
-    The styled companion to :func:`missingness_report`. Missing cells (NaN,
-    ``None``, ``pd.NA``, ``NaT``) get the theme's ``missing`` color; ``+/-inf``
-    in numeric columns get the ``infinite`` color. ``columns=None`` covers
-    every column, numeric or not. The input frame is styled as-is.
+    The styled companion to :func:`missingness_report`, and counted by the
+    same rule. Missing cells (NaN, ``None``, ``pd.NA``, ``NaT``) get the
+    theme's ``missing`` color; ``+/-inf`` in numeric columns (including complex
+    ones and ``object`` columns holding only numbers) get the ``infinite``
+    color. ``columns=None`` covers every column, numeric or not. The input
+    frame is styled as-is.
 
     With ``rich=True`` returns a :class:`MissingnessStyleResult` with per-column
     counts, the number of fully complete rows, and warnings for columns that
     are entirely missing.
     """
-    pd = _pd()
     cols = _resolve_columns(df, columns, numeric_only=False)
     _check_stylable(df)
     theme_name, roles = _resolve_theme(
@@ -1820,10 +2214,7 @@ def missingness_style(
     per_column: dict[Any, dict] = {}
     for col in cols:
         series = df[col]
-        is_missing = series.isna().to_numpy(dtype=bool)
-        is_infinite = np.zeros(n_rows, dtype=bool)
-        if _is_real_numeric(series) and not pd.api.types.is_bool_dtype(series):
-            is_infinite = np.isinf(_as_float(series))
+        is_missing, is_infinite, _ = _gap_masks(series)
         css.loc[:, col] = np.where(
             is_missing, missing_css, np.where(is_infinite, infinite_css, "")
         )
@@ -1906,6 +2297,7 @@ def style_significance(
     pvalue_column: Any = "pvalue",
     alpha: float = 0.05,
     highlight_row: bool = True,
+    adjusted: bool = False,
     theme: Any = "default",
     rich: bool = False,
 ):
@@ -1930,6 +2322,11 @@ def style_significance(
            ok = np.isfinite(p)
            df["p_adj"] = np.nan
            df.loc[ok, "p_adj"] = bs.p_adjust(p[ok], "holm")
+
+       Then pass ``adjusted=True`` to say the column is already corrected;
+       the "no correction" warning and the expected-false-positive count are
+       dropped. It is a declaration only: the values are shaded as given
+       either way.
 
     With ``rich=True`` returns a :class:`SignificanceStyleResult` whose
     metadata reports the number of tests, per-tier counts and that expected
@@ -1969,7 +2366,7 @@ def style_significance(
     tier = np.select(conditions, [0, 1, 2, 3], default=-1)
     n_significant = int((tier >= 0).sum() - (tier == 3).sum())
     warnings = []
-    if n_tests > 1:
+    if n_tests > 1 and not adjusted:
         warnings.append(
             f"{n_tests} tests shaded with no multiple-comparison correction; "
             f"about {alpha * n_tests:.3g} would fall below alpha={alpha:g} by "
@@ -1988,8 +2385,13 @@ def style_significance(
             f"p < {cutoffs[2]:g}": int((tier == 2).sum()),
             "not significant": int((tier == 3).sum()),
         },
-        "multiple_comparison_correction": "none (p-values shaded as given)",
-        "expected_false_positives_if_all_null": float(alpha * n_tests),
+        "multiple_comparison_correction": (
+            "declared already adjusted by the caller (adjusted=True)"
+            if adjusted else "none (p-values shaded as given)"
+        ),
+        "expected_false_positives_if_all_null": (
+            None if adjusted else float(alpha * n_tests)
+        ),
         "highlight_row": bool(highlight_row),
         "caveat": (
             "shading reflects p-value thresholds only; a small p-value says "
@@ -2029,9 +2431,15 @@ def style_effect_size(
     """
     effect = _check_result_column(df, effect_column, "Effect")
 
-    cuts = [float(t) for t in thresholds]
+    if isinstance(thresholds, str) or not isinstance(thresholds, Iterable):
+        raise TypeError("`thresholds` must be a sequence of 3 numbers")
+    cuts = [_check_number(t, "each threshold") for t in thresholds]
     if len(cuts) != 3:
         raise ValueError(f"`thresholds` must contain exactly 3 values, got {len(cuts)}")
+    # The effect is compared by magnitude, so a threshold at or below zero (or
+    # an infinite one) leaves a bucket that nothing can fall into.
+    if not all(math.isfinite(c) and c > 0 for c in cuts):
+        raise ValueError(f"`thresholds` must be finite and > 0, got {cuts}")
     if not all(a < b for a, b in zip(cuts, cuts[1:])):
         raise ValueError(f"`thresholds` must be strictly ascending, got {cuts}")
 
@@ -2068,7 +2476,7 @@ def style_effect_size(
     return EffectSizeStyleResult(styler, df, meta, [])
 
 
-def _attach(df, target: str, values: np.ndarray):
+def _attach(df, target: Any, values: np.ndarray):
     """Copy `df` and set one derived column; report whether it replaced one."""
     overwrote = target in df.columns
     out = df.copy()
@@ -2076,7 +2484,7 @@ def _attach(df, target: str, values: np.ndarray):
     return out, overwrote
 
 
-def _overwrite_warning(targets: Sequence[str]) -> str:
+def _overwrite_warning(targets: Sequence[Any]) -> str:
     return (
         f"derived column(s) {', '.join(map(str, targets))} already existed in "
         "the input and were replaced in the returned frame"
@@ -2123,6 +2531,8 @@ def demean_style(
         signs[mask] = np.asarray(s, dtype=np.float64)
 
     out, overwrote = _attach(df, target, demeaned)
+    if overwrote and not rich:
+        _warn(_overwrite_warning([target]))
 
     text = roles["text"]
     with np.errstate(invalid="ignore"):
@@ -2226,6 +2636,8 @@ def zscore_style(
 
     z = _fit_scatter(values, _bs.zscore)
     out, overwrote = _attach(df, target, z)
+    if overwrote and not rich:
+        _warn(_overwrite_warning([target]))
 
     colors, high, low = _zscore_cells(z, threshold, roles)
     css = _blank_css(out)
@@ -2333,6 +2745,8 @@ def scale_compare_style(
         robust = _fit_scatter(values, lambda v: _bs.robust_scale(v, scale_factor))
 
     overwrote = [c for c in (z_col, r_col) if c in df.columns]
+    if overwrote and not rich:
+        _warn(_overwrite_warning(overwrote))
     out = df.copy()
     out[z_col] = z
     out[r_col] = robust
@@ -2404,15 +2818,46 @@ def scale_compare_style(
 # Style / transform result objects  (returned with rich=True)
 # ======================================================================
 
+def _json_key(key: Any) -> Any:
+    """A dict key ``json.dumps`` accepts (it takes str, int, float, bool, None)."""
+    if key is None or isinstance(key, (str, bool)):
+        return key
+    if isinstance(key, (int, np.integer)):
+        return int(key)
+    if isinstance(key, (float, np.floating)) and math.isfinite(key):
+        return float(key)
+    if isinstance(key, tuple):  # a MultiIndex label
+        return str(tuple(_jsonable(k) for k in key))
+    return str(_jsonable(key))
+
+
 def _jsonable(value: Any) -> Any:
-    """Plain-Python copy of a metadata value (numpy scalars, tuples, nesting)."""
+    """Strict-JSON copy of a value: what ``json.dumps(..., allow_nan=False)``
+    accepts.
+
+    numpy scalars and arrays become Python numbers and lists; NaN, +/-inf,
+    ``pd.NA`` and ``NaT`` become ``None`` (JSON has no spelling for them);
+    timestamps and dates become ISO strings; tuple keys become strings.
+    """
     if isinstance(value, Mapping):
-        return {k: _jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
+        return {_json_key(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
         return [_jsonable(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return [_jsonable(v) for v in value.tolist()]
     if isinstance(value, np.generic):
-        return value.item()
-    return value
+        value = value.item()
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    pd = sys.modules.get("pandas")
+    if pd is not None and (value is pd.NA or value is pd.NaT):
+        return None
+    iso = getattr(value, "isoformat", None)
+    if callable(iso):
+        return iso()
+    return str(value)
 
 
 def _fmt_meta(value: Any) -> str:
@@ -2497,6 +2942,15 @@ class StyleResult:
         return self.metadata
 
     @property
+    def data(self):
+        """Alias of ``frame`` (the name the ``*_report`` objects use)."""
+        return self.frame
+
+    def to_frame(self):
+        """Return a copy of the table."""
+        return self.frame.copy()
+
+    @property
     def warnings(self) -> list:
         """Misuse-prevention warnings attached to this result (may be empty)."""
         return list(self._warnings)
@@ -2519,10 +2973,12 @@ class StyleResult:
     def to_dict(self, *, frame: bool = False) -> dict:
         """Stable dict schema: ``{"title", "metadata", "warnings"}``.
 
-        Values are plain Python (no numpy scalars), so the dict goes straight
-        into ``json.dumps`` as long as the column labels are strings. The
-        table itself is left out by default because it can be the whole input
-        frame; pass ``frame=True`` to add it as ``DataFrame.to_dict("list")``.
+        The result is strict JSON: plain Python values, ``None`` for NaN and
+        +/-inf, ISO strings for dates, and string keys for tuple (MultiIndex)
+        labels -- so it goes straight into ``json.dumps(..., allow_nan=False)``.
+        Use ``.metadata`` when you need the original values. The table itself
+        is left out by default because it can be the whole input frame; pass
+        ``frame=True`` to add it as ``DataFrame.to_dict("list")``.
         """
         out = {
             "title": self._title,
@@ -2530,8 +2986,14 @@ class StyleResult:
             "warnings": list(self._warnings),
         }
         if frame:
-            out["frame"] = self.frame.to_dict(orient="list")
+            out["frame"] = _jsonable(self.frame.to_dict(orient="list"))
         return out
+
+    def to_json(self, *, frame: bool = False, **kwargs: Any) -> str:
+        """``to_dict()`` serialized with :func:`json.dumps` (strict JSON)."""
+        import json
+
+        return json.dumps(self.to_dict(frame=frame), allow_nan=False, **kwargs)
 
     def info(self) -> str:
         """Pretty, multi-line human summary of the metadata and warnings."""
@@ -2655,16 +3117,39 @@ class NotebookReport:
     ``*_report`` helpers when called with ``rich=True``; the default return
     stays a plain DataFrame.
 
-    All reports support ``.to_frame()``, ``.to_dict()``, ``.style()``,
-    ``.info()`` and render as a table in Jupyter via ``_repr_html_``.
+    All reports support ``.to_frame()``, ``.to_dict()``, ``.to_json()``,
+    ``.style()``, ``.info()`` and render as a table in Jupyter via
+    ``_repr_html_``. A report unpacks as ``data, meta = report``, and answers
+    to the names the style results use as well (``.frame``, ``.metadata``).
     """
 
     _title = "Report"
+    _fields: tuple[str, ...] = ("data", "meta")
 
     def __init__(self, data, meta: dict, warnings: Sequence[str] | None = None):
         self._data = data
         self.meta = dict(meta)
         self._warnings = list(warnings or [])
+
+    # -- tuple-like access, as on StyleResult -------------------------------
+    def __iter__(self):
+        return (getattr(self, name) for name in self._fields)
+
+    def __len__(self) -> int:
+        return len(self._fields)
+
+    def __getitem__(self, index):
+        return [getattr(self, name) for name in self._fields][index]
+
+    @property
+    def frame(self):
+        """Alias of ``data`` (the name the style results use)."""
+        return self._data
+
+    @property
+    def metadata(self) -> dict:
+        """Alias of ``meta`` (the name the style results use)."""
+        return self.meta
 
     @property
     def warnings(self) -> list:
@@ -2688,16 +3173,25 @@ class NotebookReport:
         """Stable dict schema: ``{"title", "data", "meta", "warnings"}``.
 
         ``data`` is ``DataFrame.to_dict(orient="index")`` — one entry per
-        report row, keyed by the row label. NaN values survive as ``float
-        ('nan')`` (JSON encoders should use their NaN handling of choice).
-        ``warnings`` is always present (possibly empty).
+        report row, keyed by the row label. The result is strict JSON: plain
+        Python values, ``None`` for NaN and +/-inf, ISO strings for dates and
+        string keys for tuple (MultiIndex) labels, so it goes straight into
+        ``json.dumps(..., allow_nan=False)``. Use ``.data`` / ``.meta`` when
+        you need the original values. ``warnings`` is always present
+        (possibly empty).
         """
         return {
             "title": self._title,
-            "data": self._data.to_dict(orient="index"),
-            "meta": dict(self.meta),
+            "data": _jsonable(self._data.to_dict(orient="index")),
+            "meta": _jsonable(self.meta),
             "warnings": list(self._warnings),
         }
+
+    def to_json(self, **kwargs: Any) -> str:
+        """``to_dict()`` serialized with :func:`json.dumps` (strict JSON)."""
+        import json
+
+        return json.dumps(self.to_dict(), allow_nan=False, **kwargs)
 
     def style(self):
         """A basic pandas Styler over the report table (float formatting)."""
@@ -2726,6 +3220,30 @@ class SummaryReport(NotebookReport):
     """Rich wrapper over :func:`robust_summary`."""
 
     _title = "Robust Summary"
+
+
+class DescribeReport(SummaryReport):
+    """Rich wrapper over :func:`describe_fast`."""
+
+    _title = "Describe"
+
+
+class NormalityReport(NotebookReport):
+    """Rich wrapper over :func:`normality_report`."""
+
+    _title = "Normality Report"
+
+
+class MissingnessReport(NotebookReport):
+    """Rich wrapper over :func:`missingness_report`."""
+
+    _title = "Missingness Report"
+
+
+class RollingReport(NotebookReport):
+    """Rich wrapper over :func:`rolling_report`; ``data`` has one row per input row."""
+
+    _title = "Rolling Report"
 
 
 class OutlierReport(NotebookReport):
@@ -2767,12 +3285,25 @@ class OutlierReport(NotebookReport):
 
 
 class CorrelationReport(NotebookReport):
-    """Rich wrapper over :func:`correlation_report` (matrix form)."""
+    """Rich wrapper over :func:`correlation_report` (matrix or long form)."""
 
     _title = "Correlation Report"
 
     def style(self):
-        """Gradient-styled matrix (requires matplotlib via pandas Styler)."""
+        """Gradient-styled table (requires matplotlib via pandas Styler).
+
+        The [-1, 1] color scale applies to correlations only. In the long
+        form that is the ``correlation`` column; ``n``, ``statistic`` and
+        ``pvalue`` are formatted but not colored, since a gradient pinned to
+        [-1, 1] says nothing about them.
+        """
+        if self.meta.get("form") == "long":
+            return self._data.style.background_gradient(
+                cmap="coolwarm", vmin=-1.0, vmax=1.0, subset=["correlation"]
+            ).format(
+                {"correlation": "{:.4g}", "statistic": "{:.4g}", "pvalue": "{:.3g}"},
+                na_rep="·",
+            )
         return self._data.style.background_gradient(
             cmap="coolwarm", vmin=-1.0, vmax=1.0
         )
