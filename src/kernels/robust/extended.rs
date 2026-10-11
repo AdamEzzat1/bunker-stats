@@ -338,13 +338,28 @@ pub(crate) fn biweight_midvariance_slice(xs: &[f64], c: f64) -> f64 {
     (n as f64) * numerator / (denominator * denominator)
 }
 
-/// Scale estimator in the style of Rousseeuw & Croux's Qn: 2.2219 times the
-/// order statistic of rank `floor(C(n,2) / 4)` (0-indexed) among the pairwise
-/// absolute differences.
+/// Normal-consistency constant of Qn: `1 / (sqrt(2) * Phi^-1(5/8))`.
+const QN_CONSISTENCY: f64 = 2.219_144_465_985_076;
+
+/// 0-indexed rank of the pairwise difference Qn selects.
 ///
-/// Note this is the first-quartile rank, not the textbook
-/// `k = C(floor(n/2) + 1, 2)`. The two agree for odd n up to 9 and converge
-/// for large n, but for small even n this estimate is markedly smaller.
+/// Rousseeuw & Croux (1993) take the `k`-th smallest of the `C(n, 2)`
+/// differences with `k = C(h, 2)` and `h = floor(n/2) + 1` (1-indexed).
+/// That is close to, but not the same as, the first quartile of the
+/// differences: `floor(C(n,2) / 4)` agrees for odd n up to 9 and is a lower
+/// rank otherwise, by enough to make the estimate ~25% smaller at n = 10.
+#[inline]
+fn qn_rank(n: usize) -> usize {
+    let h = n / 2 + 1;
+    h * (h - 1) / 2 - 1
+}
+
+/// Rousseeuw & Croux's Qn scale estimator: `QN_CONSISTENCY` times the
+/// `C(floor(n/2) + 1, 2)`-th smallest pairwise absolute difference.
+///
+/// No finite-sample correction factor is applied, as in
+/// `statsmodels.robust.scale.qn_scale` (R's `robustbase::Qn` applies one by
+/// default).
 ///
 /// Runs in O(n log n) time and O(n) memory. Materialising the `n(n-1)/2`
 /// differences needs 160 GB at n = 200,000, and a failed allocation aborts
@@ -359,11 +374,7 @@ pub(crate) fn qn_scale_slice(xs: &[f64]) -> f64 {
         return f64::NAN;
     }
 
-    if n == 2 {
-        return (xs[0] - xs[1]).abs() * 0.8224;
-    }
-
-    let k = (n * (n - 1) / 2) / 4;
+    let k = qn_rank(n);
 
     // +/-Inf needs no quadratic buffer either. Sorted with `total_cmp`, the
     // pairwise differences fall into three runs: the finite ones (both values
@@ -373,15 +384,15 @@ pub(crate) fn qn_scale_slice(xs: &[f64]) -> f64 {
     let n_pos = xs.iter().filter(|v| **v == f64::INFINITY).count();
     let n_neg = xs.iter().filter(|v| **v == f64::NEG_INFINITY).count();
     if n_pos + n_neg == 0 {
-        return kth_pairwise_abs_diff(xs, k) * 2.2219;
-    }
+        return kth_pairwise_abs_diff(xs, k) * QN_CONSISTENCY;
+}
 
     let finite: Vec<f64> = xs.iter().copied().filter(|v| v.is_finite()).collect();
     let m = finite.len();
     let finite_pairs = m * m.saturating_sub(1) / 2;
     if k < finite_pairs {
-        return kth_pairwise_abs_diff(&finite, k) * 2.2219;
-    }
+        return kth_pairwise_abs_diff(&finite, k) * QN_CONSISTENCY;
+}
     let infinite_pairs = m * (n_pos + n_neg) + n_pos * n_neg;
     if k < finite_pairs + infinite_pairs {
         f64::INFINITY
@@ -407,10 +418,10 @@ fn qn_scale_brute_force(xs: &[f64]) -> f64 {
         return f64::NAN;
     }
 
-    let k = diffs.len() / 4;
+    let k = qn_rank(n);
     let (_, selected, _) = diffs.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
 
-    *selected * 2.2219
+    *selected * QN_CONSISTENCY
 }
 
 /// The `k`-th smallest (0-indexed) of the `n(n-1)/2` values `|x_i - x_j|`,
@@ -734,13 +745,62 @@ mod qn_tests {
         ((*state >> 11) as f64) / ((1u64 << 53) as f64)
     }
 
+    /// Values from `statsmodels.robust.scale.qn_scale`, which implements the
+    /// Rousseeuw-Croux definition independently (their O(n log n) algorithm).
+    /// The brute-force reference below shares `qn_rank` with the kernel, so
+    /// it cannot catch a wrong rank; these can. The even-n rows are the ones
+    /// the old first-quartile rank got wrong (it gave 2.2219, 2.2219 and
+    /// 4.6660 for the 6-, 8- and 10-point samples).
+    #[test]
+    fn qn_matches_statsmodels() {
+        let cases: &[(&[f64], f64)] = &[
+            (&[1.0, 2.0], 2.219144465985076),
+            (&[1.0, 2.0, 4.0], 2.219144465985076),
+            (&[1.0, 2.0, 3.0, 4.0, 5.0, 100.0], 4.438288931970152),
+            (&[3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0], 4.438288931970152),
+            (&[2.5, -1.0, 0.3, 7.0, 7.0, 4.2, -3.3, 0.0, 1.1, 9.4], 6.213604504758212),
+            (
+                &[0.1, 0.4, 0.9, 1.6, 2.5, 3.6, 4.9, 6.4, 8.1, 10.0, 12.1],
+                4.660203378568658,
+            ),
+        ];
+        for (xs, want) in cases {
+            let got = qn_scale_slice(xs);
+            assert!(((got - want) / want).abs() < 1e-13, "{xs:?}: {got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn qn_rank_is_the_rousseeuw_croux_k() {
+        // (n, k) with k = C(floor(n/2) + 1, 2), 1-indexed
+        for &(n, k) in &[(2usize, 1usize), (3, 1), (4, 3), (5, 3), (6, 6), (7, 6), (10, 15), (11, 15), (100, 1275)] {
+            assert_eq!(qn_rank(n) + 1, k, "n = {n}");
+            assert!(qn_rank(n) < n * (n - 1) / 2);
+        }
+    }
+
+    /// For normal data Qn estimates sigma (that is what the constant is for).
+    #[test]
+    fn qn_is_consistent_for_normal_sigma() {
+        let mut state = 0xD1B54A32D192ED03u64;
+        let xs: Vec<f64> = (0..40_000)
+            .map(|_| {
+                // Box-Muller
+                let (u, v) = (lcg(&mut state).max(1e-300), lcg(&mut state));
+                3.0 * (-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * v).cos()
+            })
+            .collect();
+        let qn = qn_scale_slice(&xs);
+        assert!((qn / 3.0 - 1.0).abs() < 0.02, "got {qn}");
+    }
+
     /// The O(n log n) path must return the same bits as selecting among all
     /// materialised differences, including with heavy ties and huge ranges.
     #[test]
     fn fast_qn_matches_brute_force_bit_for_bit() {
         let mut state = 0x9E3779B97F4A7C15u64;
-        for n in 3..=120usize {
-            for shape in 0..4 {
+        for n in 2..=120usize {
+for shape in 0..4 {
                 let xs: Vec<f64> = (0..n)
                     .map(|_| {
                         let u = lcg(&mut state);
