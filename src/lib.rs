@@ -1232,9 +1232,57 @@ fn ecdf_np<'py>(
     Ok((PyArray1::from_vec_bound(py, vals), PyArray1::from_vec_bound(py, cdf)))
 }
 
+/// Bin of the value at sorted position `i` among `n`, for `n_bins` bins.
+///
+/// Bin `b` holds the sorted positions `[b*n/n_bins, (b+1)*n/n_bins)` (integer
+/// division), so position `i` belongs to the smallest `b` with
+/// `(b+1)*n/n_bins > i`, i.e. `b = ((i+1)*n_bins - 1) / n`. Computing it per
+/// element is O(n); looping over the bins instead is O(n_bins), which never
+/// finishes for an absurd `n_bins`, and its `(b+1)*n` overflows.
+#[inline]
+fn quantile_bin_of(i: usize, n: usize, n_bins: usize) -> i64 {
+    ((((i as u128) + 1) * (n_bins as u128) - 1) / (n as u128)) as i64
+}
+
+#[cfg(test)]
+mod quantile_bin_tests {
+    use super::quantile_bin_of;
+
+    /// The loop over bins this replaced.
+    fn by_bins(n: usize, n_bins: usize) -> Vec<i64> {
+        let mut bins = vec![-1_i64; n];
+        let mut start = 0usize;
+        for b in 0..n_bins {
+            let end = if b == n_bins - 1 { n } else { ((b + 1) * n) / n_bins };
+            for slot in bins.iter_mut().take(end).skip(start) {
+                *slot = b as i64;
+            }
+            start = end;
+        }
+        bins
+    }
+
+    #[test]
+    fn per_element_formula_equals_the_loop_over_bins() {
+        for n in 1..=40usize {
+            for n_bins in 1..=90usize {
+                let fast: Vec<i64> = (0..n).map(|i| quantile_bin_of(i, n, n_bins)).collect();
+                assert_eq!(fast, by_bins(n, n_bins), "n={n} n_bins={n_bins}");
+            }
+        }
+    }
+
+    #[test]
+    fn absurd_bin_counts_do_not_overflow() {
+        let top = i64::MAX as usize;
+        assert_eq!(quantile_bin_of(0, 3, top), ((top as u128 - 1) / 3) as i64);
+        assert_eq!(quantile_bin_of(2, 3, top), top as i64 - 1);
+    }
+}
+
 #[pyfunction]
 fn quantile_bins_np<'py>(
-    py: Python<'py>,
+py: Python<'py>,
     a: PyReadonlyArray1<f64>,
     n_bins: usize,
 ) -> PyResult<Bound<'py, PyArray1<i64>>> {
@@ -1251,15 +1299,12 @@ fn quantile_bins_np<'py>(
     // total_cmp is a total order over f64 (NaN sorts last), so this never panics.
     pairs.sort_by(|(v1, _), (v2, _)| v1.total_cmp(v2));
 
+    if n_bins > i64::MAX as usize {
+        return Err(PyValueError::new_err("n_bins is too large"));
+    }
     let mut bins = vec![-1_i64; n];
-    let mut start = 0usize;
-    for b in 0..n_bins {
-        let end = if b == n_bins - 1 { n } else { ((b + 1) * n) / n_bins };
-        for i in start..end {
-            let (_, idx) = pairs[i];
-            bins[idx] = b as i64;
-        }
-        start = end;
+    for (i, &(_, idx)) in pairs.iter().enumerate() {
+        bins[idx] = quantile_bin_of(i, n, n_bins);
     }
 
     Ok(PyArray1::from_vec_bound(py, bins))
@@ -2286,6 +2331,7 @@ pub fn rolling_linreg_skipna<'py>(
 
 #[pyfunction]
 fn pad_nan_np<'py>(py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    crate::util::ensure_allocatable::<f64>(n, "n")?;
     Ok(PyArray1::from_vec_bound(py, vec![f64::NAN; n]))
 }
 

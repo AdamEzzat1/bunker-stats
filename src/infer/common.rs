@@ -140,6 +140,39 @@ pub fn norm_two_sided_pvalue(z: f64) -> f64 {
     libm::erfc(z.abs() / std::f64::consts::SQRT_2).clamp(0.0, 1.0)
 }
 
+/// Upper tail of the standard normal, `P(Z >= z)`, from `libm::erfc`.
+///
+/// statrs' `Normal::sf` / `cdf` are only good to about 1e-11 relative.
+pub fn norm_sf(z: f64) -> f64 {
+    if z.is_nan() {
+        return f64::NAN;
+    }
+    0.5 * libm::erfc(z / std::f64::consts::SQRT_2)
+}
+
+/// Standard normal CDF, `P(Z <= z)`.
+pub fn norm_cdf(z: f64) -> f64 {
+    norm_sf(-z)
+}
+
+/// Mean and sample variance, exact for a constant sample.
+///
+/// The mean of n copies of `c` is not always `c` in floating point
+/// (`(0.1 + 0.1 + 0.1) / 3` is 0.10000000000000002), which leaves a variance
+/// of ~1e-34 instead of 0. A t statistic built from those is rounding error
+/// divided by rounding error: two samples holding the same constant, with
+/// different sizes, came out "significantly different". Detect the constant
+/// case and return it exactly.
+pub fn mean_var_sample(xs: &[f64]) -> (f64, f64) {
+    if let Some(&first) = xs.first() {
+        if xs.iter().all(|&v| v == first) {
+            return (first, 0.0);
+        }
+    }
+    let m = mean(xs);
+    (m, var_sample(xs, m))
+}
+
 /// Reject NaN / Inf inputs (v0.3 contract).
 #[inline]
 pub fn reject_nonfinite(xs: &[f64], name: &str) -> PyResult<()> {

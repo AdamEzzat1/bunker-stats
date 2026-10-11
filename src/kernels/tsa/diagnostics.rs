@@ -118,7 +118,9 @@ pub fn bg_test(
 ) -> PyResult<(f64, f64)> {
     let e = resid.as_slice()?;
     let n = e.len();
-    if n <= max_lag + 1 || max_lag == 0 {
+    // `max_lag >= n` first: `max_lag + 1` wraps to 0 for usize::MAX, the
+    // check passes, and the regression below never finishes.
+    if max_lag == 0 || max_lag >= n || n <= max_lag + 1 {
         return Ok((f64::NAN, f64::NAN));
     }
 

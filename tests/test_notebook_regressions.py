@@ -570,7 +570,8 @@ class TestRenderLimit:
         assert sum("truncated" in w for w in result.warnings) == 1
 
     def test_no_warning_at_or_below_the_limit(self, frame):
-        with pd.option_context("styler.render.max_elements", frame.size):
+        # int(): pandas 1.3 rejects a numpy integer for this option
+        with pd.option_context("styler.render.max_elements", int(frame.size)):
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 result = nb.outlier_style(frame, rich=True)

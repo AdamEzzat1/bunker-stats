@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 
-use super::common::{mean, reject_nonfinite, var_sample, Alternative};
+use super::common::{mean_var_sample, reject_nonfinite, Alternative};
 
 fn p_from_t(t: f64, df: f64, alt: Alternative) -> f64 {
     super::common::t_pvalue(t, df, alt)
@@ -29,13 +29,12 @@ pub fn t_test_1samp_np(
         return Err(PyValueError::new_err("t_test_1samp requires n >= 2"));
     }
 
-    let m = mean(xs);
-    let v = var_sample(xs, m);
+    let (m, v) = mean_var_sample(xs);
 
     if !v.is_finite() || v < 0.0 {
         return Err(PyValueError::new_err(format!(
             "variance is not finite: var={:.6e}, mean={:.6e}, n={}",
-            v, m, n
+v, m, n
         )));
     }
 
@@ -93,10 +92,8 @@ pub fn t_test_2samp_np(
         ));
     }
 
-    let m1 = mean(xs);
-    let m2 = mean(ys);
-    let v1 = var_sample(xs, m1);
-    let v2 = var_sample(ys, m2);
+    let (m1, v1) = mean_var_sample(xs);
+    let (m2, v2) = mean_var_sample(ys);
 
     if !v1.is_finite() || !v2.is_finite() || v1 < 0.0 || v2 < 0.0 {
         return Err(PyValueError::new_err(format!(
@@ -114,9 +111,11 @@ pub fn t_test_2samp_np(
 
         let se = (sp2 * (1.0 / (n1 as f64) + 1.0 / (n2 as f64))).sqrt();
         let t = if se == 0.0 { 
-            // Both samples have zero variance
-            if (m1 - m2).abs() < 1e-15 {
-                0.0
+            // Both samples have zero variance. Compare the means exactly: an
+            // absolute tolerance (this was `< 1e-15`) calls 1e-20 and 2e-20
+            // equal, and the means of constant samples are exact.
+            if m1 == m2 {
+0.0
             } else {
                 f64::INFINITY * (m1 - m2).signum()
             }
@@ -129,9 +128,11 @@ pub fn t_test_2samp_np(
         let se2 = v1 / (n1 as f64) + v2 / (n2 as f64);
         let se = se2.sqrt();
         let t = if se == 0.0 { 
-            // Both samples have zero variance
-            if (m1 - m2).abs() < 1e-15 {
-                0.0
+            // Both samples have zero variance. Compare the means exactly: an
+            // absolute tolerance (this was `< 1e-15`) calls 1e-20 and 2e-20
+            // equal, and the means of constant samples are exact.
+            if m1 == m2 {
+0.0
             } else {
                 f64::INFINITY * (m1 - m2).signum()
             }

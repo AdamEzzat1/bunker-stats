@@ -460,7 +460,8 @@ class TestRichWarnings:
         assert declared.metadata["expected_false_positives_if_all_null"] is None
         assert "adjusted" in declared.metadata["multiple_comparison_correction"]
         # a declaration only: the shading is identical
-        assert declared.styler.to_html(uuid="t") == plain.styler.to_html(uuid="t")
+        # set_uuid rather than to_html(uuid=...): the keyword is not in pandas 1.3
+        assert declared.styler.set_uuid("t").to_html() == plain.styler.set_uuid("t").to_html()
 
     def test_heatmap_uses_both_policy_keys(self):
         frame = pd.DataFrame(np.random.default_rng(0).normal(size=(20, 2)), columns=list("ab"))

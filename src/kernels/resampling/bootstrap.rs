@@ -38,6 +38,7 @@ pub fn bootstrap_mean(
     n_resamples: usize,
     random_state: Option<u64>,
 ) -> PyResult<f64> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     let n = x.len();
 
@@ -82,6 +83,7 @@ pub fn bootstrap_mean_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     let n = x.len();
 
@@ -138,6 +140,7 @@ fn bootstrap_draws_core(
     n_resamples: usize,
     base_seed: u64,
 ) -> PyResult<Vec<f64>> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let n = x.len();
     let vals: Vec<f64> = match stat {
         "mean" => (0..n_resamples)
@@ -241,6 +244,7 @@ pub fn bootstrap_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
 
     if x.is_empty() || n_resamples == 0 {
@@ -267,6 +271,7 @@ pub fn bootstrap_ci_with_draws<'py>(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64, Bound<'py, PyArray1<f64>>)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
 
     if x.is_empty() || n_resamples == 0 {
@@ -296,6 +301,7 @@ pub fn bootstrap_corr(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     let y = y.as_slice()?;
     let n = x.len();
@@ -526,6 +532,7 @@ pub fn bootstrap_se(
     n_resamples: usize,
     random_state: Option<u64>,
 ) -> PyResult<f64> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     let n = x.len();
     if n == 0 || n_resamples == 0 {
@@ -592,6 +599,7 @@ pub fn bootstrap_var(
     n_resamples: usize,
     random_state: Option<u64>,
 ) -> PyResult<f64> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let se = bootstrap_se(x, stat, n_resamples, random_state)?;
     Ok(se * se)
 }
@@ -604,6 +612,7 @@ pub fn bootstrap_t_ci_mean(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     let n = x.len();
     if n <= 1 || n_resamples == 0 {
@@ -674,6 +683,7 @@ pub fn bootstrap_bca_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     let n = x.len();
     if n <= 2 || n_resamples == 0 {
@@ -895,6 +905,7 @@ pub fn bayesian_bootstrap_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     let n = x.len();
     if n == 0 || n_resamples == 0 || conf <= 0.0 || conf >= 1.0 {
@@ -1211,6 +1222,7 @@ pub fn moving_block_bootstrap_mean_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     let n = x.len();
     if n == 0 || n_resamples == 0 || block_len == 0 {
@@ -1256,6 +1268,7 @@ pub fn circular_block_bootstrap_mean_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     let n = x.len();
     if n == 0 || n_resamples == 0 || block_len == 0 {
@@ -1302,6 +1315,7 @@ pub fn stationary_bootstrap_mean_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     let n = x.len();
     if n == 0 || n_resamples == 0 || block_len == 0 {
