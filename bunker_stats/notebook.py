@@ -1051,8 +1051,10 @@ def _gap_masks(series) -> tuple[np.ndarray, np.ndarray, bool]:
     if pd.api.types.is_bool_dtype(series):
         return is_missing, none, False
     if pd.api.types.is_complex_dtype(series):
-        # Infinite if either part is; a float cast would drop the imaginary part.
-        return is_missing, np.isinf(series.to_numpy()), True
+        # Infinite if either part is; a float cast would drop the imaginary
+        # part. A value can be both (NaN in one part, inf in the other): it
+        # counts as missing, so that the three counts still add up to n_rows.
+        return is_missing, np.isinf(series.to_numpy()) & ~is_missing, True
     if pd.api.types.is_numeric_dtype(series):
         return is_missing, np.isinf(_as_float(series)), True
     if series.dtype == object:
