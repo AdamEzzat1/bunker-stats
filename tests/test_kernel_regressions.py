@@ -12,6 +12,9 @@
 * ``TestPearsonScale``      - correlation was inf / 0 for data scaled by
                               1e-100 / 1e100.
 * ``TestNoProcessAbort``    - ordinary bad inputs aborted the interpreter.
+* ``TestUpperTails``        - F, chi-square and normal upper tails formed as
+                              ``1 - cdf`` were exactly 0.0 below ~1e-16, and
+                              ``f_test_var`` doubled the wrong tail.
 
 Conventions (see ``test_notebook_regressions.py`` for why): comparisons of
 small quantities use ``close`` with no absolute tolerance; references are
@@ -405,3 +408,153 @@ class TestNoProcessAbort:
             ref_p = 2 * min(scipy_stats.f.sf(f["statistic"], 29, 29), scipy_stats.f.cdf(f["statistic"], 29, 29))
         assert close(f["pvalue"], ref_p, 1e-9)
         assert 0.0 < bs.var_ci(x, confidence=0.9)["ci_lower"] < np.var(x, ddof=1)
+
+
+def _ar1(phi: float, n: int, seed: int) -> np.ndarray:
+    e = np.random.default_rng(seed).standard_normal(n)
+    x = np.empty(n)
+    x[0] = e[0]
+    for i in range(1, n):
+        x[i] = phi * x[i - 1] + e[i]
+    return x
+
+
+class TestUpperTails:
+    """p-values formed as ``1 - cdf(stat)`` are exactly 0.0 below ~1e-16.
+
+    Every F, chi-square and normal upper tail outside the t-tests did this, so
+    any strongly significant result reported p = 0. Each test here needs a
+    p-value far below 1e-16 and compares with no absolute tolerance, so a
+    result of 0.0 can never pass.
+    """
+
+    TINY = 1e-20
+
+    def test_f_oneway_far_tail(self, scipy_stats):
+        rng = np.random.default_rng(0)
+        for sep in (3.0, 8.0, 30.0):
+            groups = [rng.normal(i * sep, 1.0, 40) for i in range(3)]
+            ref = scipy_stats.f_oneway(*groups)
+            got = bs.f_test_oneway(groups)
+            assert 0.0 < ref.pvalue < self.TINY
+            assert close(got["statistic"], ref.statistic, 1e-9)
+            assert close(got["pvalue"], ref.pvalue, 1e-7), (sep, got["pvalue"], ref.pvalue)
+
+    def test_levene_far_tail(self, scipy_stats):
+        rng = np.random.default_rng(1)
+        groups = [rng.normal(0.0, s, 60) for s in (1.0, 5.0, 25.0)]
+        ref = scipy_stats.levene(*groups, center="median")
+        got = bs.levene_test(groups)
+        assert 0.0 < ref.pvalue < self.TINY
+        assert close(got["statistic"], ref.statistic, 1e-9)
+        assert close(got["pvalue"], ref.pvalue, 1e-7), (got["pvalue"], ref.pvalue)
+
+    def test_bartlett_far_tail(self, scipy_stats):
+        rng = np.random.default_rng(2)
+        for scale in (2.0, 10.0):
+            groups = [rng.normal(0.0, s, 80) for s in (1.0, scale, scale * scale)]
+            ref = scipy_stats.bartlett(*groups)
+            got = bs.bartlett_test(groups)
+            assert 0.0 < ref.pvalue < self.TINY
+            assert close(got["statistic"], ref.statistic, 1e-9)
+            assert close(got["pvalue"], ref.pvalue, 1e-8), (scale, got["pvalue"], ref.pvalue)
+
+    def test_chi2_gof_far_tail(self, scipy_stats):
+        obs = np.array([100.0, 200.0, 300.0, 400.0])
+        ref = scipy_stats.chisquare(obs)
+        got = bs.chi2_gof(obs)
+        assert 0.0 < ref.pvalue < self.TINY
+        assert close(got["statistic"], ref.statistic, 1e-12)
+        assert close(got["pvalue"], ref.pvalue, 1e-9), (got["pvalue"], ref.pvalue)
+
+    def test_chi2_independence_far_tail(self, scipy_stats):
+        table = np.array([[300.0, 100.0], [100.0, 300.0]])
+        got = bs.chi2_independence(table)
+        ref = scipy_stats.chi2.sf(got["statistic"], 1)
+        assert 0.0 < ref < self.TINY
+        assert close(got["pvalue"], ref, 1e-9), (got["pvalue"], ref)
+
+    def test_jarque_bera_far_tail(self, scipy_stats):
+        x = np.random.default_rng(500).exponential(size=500)
+        ref = scipy_stats.jarque_bera(x)
+        got = bs.jarque_bera(x)
+        assert 0.0 < ref.pvalue < self.TINY
+        assert close(got["statistic"], ref.statistic, 1e-9)
+        assert close(got["pvalue"], ref.pvalue, 1e-9), (got["pvalue"], ref.pvalue)
+        # normality_summary carries its own copy of the same computation
+        summary = bs.normality_summary(x)
+        assert close(summary["jb_pvalue"], ref.pvalue, 1e-9), summary["jb_pvalue"]
+
+    def test_f_test_var_far_tail(self, scipy_stats):
+        x = np.random.default_rng(200).normal(0.0, 6.0, 200)
+        y = np.random.default_rng(201).normal(0.0, 1.0, 200)
+        got = bs.f_test_var(x, y)
+        ref = 2 * scipy_stats.f.sf(got["statistic"], got["df1"], got["df2"])
+        assert 0.0 < ref < self.TINY
+        assert close(got["pvalue"], ref, 1e-7), (got["pvalue"], ref)
+
+    @pytest.mark.parametrize("ratio", [1.05, 1.5, 2.0, 3.0, 50.0])
+    def test_f_test_var_uses_the_smaller_tail(self, scipy_stats, ratio):
+        """With unequal degrees of freedom the upper tail of the larger/smaller
+        ratio is not always the smaller tail: F(100, 1) has median ~2.2, so a
+        ratio of 1.5 is *below* the median and the lower tail is the small one.
+        Doubling the upper tail gave p = 1.0 there."""
+        x = np.random.default_rng(7).normal(size=101)
+        x = x / x.std(ddof=1) * np.sqrt(ratio)      # sample variance = ratio
+        y = np.array([-1.0, 1.0]) / np.sqrt(2.0)     # sample variance = 1
+        dist = scipy_stats.f(100, 1)
+        ref = min(1.0, 2 * min(dist.sf(ratio), dist.cdf(ratio)))
+        for a, b in ((x, y), (y, x)):
+            got = bs.f_test_var(a, b)
+            assert close(got["statistic"], ratio, 1e-9)
+            assert (got["df1"], got["df2"]) == (100.0, 1.0)
+            assert close(got["pvalue"], ref, 1e-9), (ratio, got["pvalue"], ref)
+
+    def test_time_series_chi_square_tails(self, scipy_stats):
+        x = _ar1(0.6, 500, seed=500)
+        for name, df, call in (
+            ("ljung_box", 10, lambda: bs.ljung_box(x, lags=10)),
+            ("box_pierce", 10, lambda: bs.box_pierce(x, lags=10)),
+            ("bg_test", 5, lambda: bs.bg_test(x, max_lag=5)),
+        ):
+            stat, p = call()[:2]
+            ref = scipy_stats.chi2.sf(stat, df)
+            assert 0.0 < ref < self.TINY, name
+            assert close(p, ref, 1e-9), (name, p, ref)
+
+    def test_time_series_normal_tails(self, scipy_stats):
+        x = _ar1(0.9, 2000, seed=2000)
+        _, z, p = bs.runs_test(x)[:3]
+        ref = 2 * scipy_stats.norm.sf(abs(z))
+        assert 0.0 < ref < self.TINY
+        assert close(p, ref, 1e-11), (p, ref)
+
+        _, z, p = bs.variance_ratio_test(np.cumsum(_ar1(0.6, 500, seed=500)), lags=4)[:3]
+        ref = 2 * scipy_stats.norm.sf(abs(z))
+        assert 0.0 < ref < self.TINY
+        assert close(p, ref, 1e-11), (p, ref)
+
+    def test_moderate_p_values_are_unchanged(self, scipy_stats):
+        """The same functions at ordinary significance levels."""
+        rng = np.random.default_rng(3)
+        groups = [rng.normal(0.1 * i, 1.0, 25) for i in range(3)]
+        assert close(bs.f_test_oneway(groups)["pvalue"], scipy_stats.f_oneway(*groups).pvalue, 1e-10)
+        assert close(bs.levene_test(groups)["pvalue"], scipy_stats.levene(*groups, center="median").pvalue, 1e-10)
+        assert close(bs.bartlett_test(groups)["pvalue"], scipy_stats.bartlett(*groups).pvalue, 1e-10)
+        obs = np.array([18.0, 22.0, 27.0, 33.0])
+        assert close(bs.chi2_gof(obs)["pvalue"], scipy_stats.chisquare(obs).pvalue, 1e-12)
+        x = rng.normal(size=80)
+        assert close(bs.jarque_bera(x)["pvalue"], scipy_stats.jarque_bera(x).pvalue, 1e-10)
+        _, z, p = bs.runs_test(x)[:3]
+        assert close(p, 2 * scipy_stats.norm.sf(abs(z)), 1e-12)
+
+    def test_degenerate_statistics(self):
+        """Identical groups: F = 0 and p = 1, not NaN."""
+        same = [np.array([1.0, 2.0, 3.0, 4.0])] * 3
+        res = bs.f_test_oneway(same)
+        assert res["statistic"] == 0.0 and res["pvalue"] == 1.0
+        res = bs.bartlett_test(same)
+        assert res["pvalue"] == pytest.approx(1.0, abs=1e-12)
+        # perfectly separated constant groups: F = inf and p = 0
+        res = bs.f_test_oneway([np.full(4, 1.0), np.full(4, 2.0)])
+        assert res["statistic"] == np.inf and res["pvalue"] == 0.0

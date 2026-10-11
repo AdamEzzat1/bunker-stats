@@ -110,10 +110,22 @@ Kernel fixes (Rust):
   variance overflows; `mean_diff_ci` with `alpha` outside (0, 1); NaN as the
   `confidence` of `odds_ratio`, `var_ci` or `corr_ci` (`var_ci` silently
   returned a zero-width interval).
-- Not yet fixed: the F, chi-square and Jarque-Bera p-values still use
-  `1 - cdf` and can report 0.0 for very strong effects. Count arguments such
-  as `n_resamples` are not bounded, so an absurd value can still exhaust
-  memory and abort.
+- **F, chi-square and normal p-values are accurate in the far tail.** These
+  were still `1 - cdf(stat)`, which is exactly 0.0 below about 1e-16, so
+  `f_test_oneway`, `levene_test`, `bartlett_test`, `f_test_var`, `chi2_gof`,
+  `chi2_independence`, `jarque_bera`, `normality_summary`, `ljung_box`,
+  `box_pierce`, `bg_test`, `runs_test` and `variance_ratio_test` reported
+  `pvalue == 0.0` for any strong effect. They now use the upper incomplete
+  gamma / beta functions and `erfc` directly and agree with scipy down to
+  about 1e-300. Ordinary p-values are unchanged (to ~1e-11).
+- **`f_test_var` doubled the wrong tail when the sample sizes differ a lot.**
+  It put the larger variance on top and doubled the upper tail, but that is
+  not always the smaller tail: with 101 and 2 observations and a variance
+  ratio of 1.5 it reported p = 1.0 where 2·min(lower, upper) is 0.83. It now
+  takes the smaller of the two tails. Results for equal sample sizes are
+  unchanged.
+- Not yet fixed: count arguments such as `n_resamples` are not bounded, so an
+  absurd value can still exhaust memory and abort.
 - **Centered rolling windows with an even `window` covered `window + 1`
   points.** `Rolling(x, window=4, alignment="centered")` averaged five values.
   The window is now `[i - w//2, i + (w-1)//2]`, as in pandas
