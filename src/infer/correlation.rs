@@ -49,7 +49,9 @@ pub fn pearson_corr_test_np(
         return Err(PyValueError::new_err("zero variance in x or y"));
     }
     
-    let r = sxy / (sxx * syy).sqrt();
+    // sqrt each factor: the product sxx * syy under/overflows for data scaled
+    // by ~1e-100 or ~1e100 even though the correlation is scale-free.
+    let r = sxy / (sxx.sqrt() * syy.sqrt());
     
     // t-test for r != 0
     let df = (n - 2) as f64;
@@ -121,7 +123,7 @@ pub fn spearman_corr_test_np(
         return Err(PyValueError::new_err("zero variance in ranks"));
     }
     
-    let rho = sxy / (sxx * syy).sqrt();
+    let rho = sxy / (sxx.sqrt() * syy.sqrt());
     
     // t-test for rho != 0
     let df = (n - 2) as f64;

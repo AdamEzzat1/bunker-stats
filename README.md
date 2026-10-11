@@ -81,8 +81,39 @@ Kernel fixes (Rust):
   p = 0 for it under every alternative. An infinite statistic *against* a
   one-sided alternative now gives p = 1, as in scipy, and a NaN statistic
   gives a NaN p-value instead of 0.
-- Not yet fixed: the F, chi-square, Jarque-Bera and Kolmogorov-Smirnov
-  p-values still use `1 - cdf` and can report 0.0 for very strong effects.
+- **`ks_1samp` two-sided p-values were wrong for n from about 550 to
+  10,000.** They came back as ~1.0 whatever the data (1,000 points from
+  N(0.15, 1) tested against N(0, 1): p = 1.0; scipy 0.012). The exact matrix
+  method lost track of its scale factors once it had to rescale, and a
+  non-positive result was then reported as "no evidence". The bookkeeping is
+  fixed and checked against a 60-digit evaluation of the same formula. Small
+  p-values (and every statistic ≥ 0.5) now use twice the exact one-sided tail,
+  which is accurate far below 1e-16 and takes O(n) time: a case that took
+  minutes (n = 4,000, D ≈ 0.5) is now immediate. For n > 10,000 with
+  p > 0.01 the Stephens series is still used (within about 0.5%).
+- **`anderson_darling` no longer depends on the sign of an outlier.** The
+  upper tail was `1 - cdf(z)`, exactly 0 beyond z ≈ 8.3 and then clamped, so a
+  sample with one value at +12σ scored 5.22 and its mirror image 3.96. It now
+  matches scipy's A² times the documented small-sample factor either way. For
+  n ≤ 3 that factor is negative and the statistic was reported negative;
+  `anderson_darling` now requires n ≥ 4 and `normality_summary` /
+  `normality_report` show NaN.
+- **Rolling windows:** a centered window longer than the data returned all
+  zeros (now truncated windows, as pandas with `min_periods`); rolling
+  min/max were inexact for data with a large offset (`[1e16, 1, 3, …]` gave a
+  minimum of 0; now exact); the std/var of a one-point trailing window was
+  0.0 (now NaN, as in pandas).
+- **`pearson_corr_test` is scale-invariant.** Data scaled by 1e-100 gave
+  r = inf, and by 1e100 gave r = 0.
+- **Bad arguments raise `ValueError` instead of killing the process:** a
+  frame with no columns in `Rolling(..., axis=0)`; `f_test_var` on data whose
+  variance overflows; `mean_diff_ci` with `alpha` outside (0, 1); NaN as the
+  `confidence` of `odds_ratio`, `var_ci` or `corr_ci` (`var_ci` silently
+  returned a zero-width interval).
+- Not yet fixed: the F, chi-square and Jarque-Bera p-values still use
+  `1 - cdf` and can report 0.0 for very strong effects. Count arguments such
+  as `n_resamples` are not bounded, so an absurd value can still exhaust
+  memory and abort.
 - **Centered rolling windows with an even `window` covered `window + 1`
   points.** `Rolling(x, window=4, alignment="centered")` averaged five values.
   The window is now `[i - w//2, i + (w-1)//2]`, as in pandas

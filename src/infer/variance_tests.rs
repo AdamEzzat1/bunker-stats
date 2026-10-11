@@ -34,6 +34,14 @@ pub fn f_test_var_np(
     if vx <= 0.0 || vy <= 0.0 {
         return Err(PyValueError::new_err("variances must be positive"));
     }
+    // Finite data can still overflow the sum of squares. An infinite variance
+    // makes F infinite or NaN, and the F distribution's CDF panics on that --
+    // which aborts the process in release builds.
+    if !vx.is_finite() || !vy.is_finite() {
+        return Err(PyValueError::new_err(
+            "variance overflowed to infinity; rescale the data",
+        ));
+    }
     
     // F = larger_var / smaller_var (always >= 1)
     let (f_stat, df1, df2) = if vx >= vy {
@@ -45,7 +53,8 @@ pub fn f_test_var_np(
     let dist = FisherSnedecor::new(df1, df2).unwrap();
     
     // Two-sided p-value: 2 * min(P(F >= f), P(F <= f))
-    let upper_tail = 1.0 - dist.cdf(f_stat);
+    // (the ratio of two finite variances can itself overflow)
+    let upper_tail = if f_stat.is_finite() { 1.0 - dist.cdf(f_stat) } else { 0.0 };
     let p = (2.0 * upper_tail).clamp(0.0, 1.0);
     
     let d = PyDict::new_bound(py);
