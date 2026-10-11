@@ -78,15 +78,19 @@ def run_isolated(body: str, timeout: int = 300) -> subprocess.CompletedProcess:
 # Qn scale: O(n) memory
 # ======================================================================
 
+QN_CONSTANT = 2.219144465985076   # 1 / (sqrt(2) * Phi^-1(5/8))
+
+
 def _all_pairs_quartile(x: np.ndarray) -> float:
-    """The kernel's own definition evaluated the slow way: 2.2219 times the
-    floor(C(n,2)/4)-th smallest pairwise distance. Agreement with this shows
-    the fast path computes what the old path computed -- not that either is
-    the textbook Qn (see ``test_textbook_qn_*``)."""
+    """Rousseeuw & Croux's Qn evaluated the slow way: the constant times the
+    k-th smallest of all pairwise distances, k = C(floor(n/2) + 1, 2). This
+    is written from the paper's definition, not from the kernel; the kernel
+    is also checked against statsmodels below (``test_qn_matches_statsmodels``)."""
     i, j = np.triu_indices(len(x), k=1)
     with np.errstate(invalid="ignore"):
         diffs = np.sort(np.abs(x[i] - x[j]))
-    return float(diffs[len(diffs) // 4] * 2.2219)
+    h = len(x) // 2 + 1
+    return float(diffs[h * (h - 1) // 2 - 1] * QN_CONSTANT)
 
 
 class TestQnScale:
@@ -139,31 +143,31 @@ class TestQnScale:
         ours, ref = bs.qn_scale(x), _all_pairs_quartile(x)
         assert (np.isnan(ours) and np.isnan(ref)) or ours == ref
 
-    @staticmethod
-    def _textbook_constant(scipy_stats) -> float:
-        # Rousseeuw & Croux: 1 / (sqrt(2) * Phi^-1(5/8)) = 2.21914...
-        return 1.0 / (np.sqrt(2.0) * scipy_stats.norm.ppf(0.625))
+    def test_constant_is_the_normal_consistency_factor(self, scipy_stats):
+        assert close(QN_CONSTANT, 1.0 / (np.sqrt(2.0) * scipy_stats.norm.ppf(0.625)), 1e-15)
 
-    @pytest.mark.parametrize("n", [3, 5, 7, 9])
-    def test_textbook_qn_agrees_for_small_odd_n(self, n, scipy_stats):
-        """For odd n <= 9 the kernel's rank coincides with Rousseeuw & Croux's
-        k = C(floor(n/2)+1, 2); only the constant differs (2.2219, rounded,
-        against 2.21914...)."""
+    @pytest.mark.parametrize("n", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 20, 51, 100, 501, 2000])
+    def test_qn_matches_statsmodels(self, n):
+        """statsmodels implements Rousseeuw & Croux's definition with their
+        own O(n log n) algorithm. The kernel used the first-quartile rank
+        floor(C(n,2)/4) and a rounded constant, which agreed only for odd
+        n <= 9 (to 0.1%); for normal samples it was typically 0.68x at n = 6
+        and 0.82x at n = 10, and always 0.37x at n = 2."""
         robust_scale = pytest.importorskip("statsmodels.robust.scale")
         x = np.random.default_rng(n).normal(size=n)
-        ratio = bs.qn_scale(x) / robust_scale.qn_scale(x)
-        assert close(ratio, 2.2219 / self._textbook_constant(scipy_stats), 1e-9)
+        assert close(bs.qn_scale(x), float(robust_scale.qn_scale(x)), 1e-12)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="known: the kernel uses the first-quartile rank floor(C(n,2)/4), "
-        "not the textbook k, so it is smaller for even n (about 0.8x at n = 10)",
-    )
-    def test_textbook_qn_agrees_for_even_n(self, scipy_stats):
-        robust_scale = pytest.importorskip("statsmodels.robust.scale")
-        x = np.random.default_rng(10).normal(size=10)
-        ratio = bs.qn_scale(x) / robust_scale.qn_scale(x)
-        assert close(ratio, 2.2219 / self._textbook_constant(scipy_stats), 1e-6)
+    @pytest.mark.parametrize("scale", [1e-6, 1.0, 250.0])
+    def test_qn_estimates_sigma_for_normal_data(self, scale):
+        x = np.random.default_rng(5).normal(0.0, scale, size=20000)
+        assert close(bs.qn_scale(x), scale, 0.03)
+
+    def test_qn_is_scale_and_shift_equivariant(self):
+        x = np.random.default_rng(8).normal(size=40)
+        base = bs.qn_scale(x)
+        assert close(bs.qn_scale(3.5 * x), 3.5 * base, 1e-12)
+        assert close(bs.qn_scale(-x), base, 1e-12)
+        assert close(bs.qn_scale(x + 7.0), base, 1e-9)
 
 
 # ======================================================================

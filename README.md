@@ -63,11 +63,18 @@ Kernel fixes (Rust):
   all n(n−1)/2 pairwise differences — 160 GB at n = 200,000 — and the failed
   allocation killed the interpreter with no Python exception, taking
   `robust_summary` and `describe_fast` with it. It now runs in O(n log n) time
-  and O(n) memory and returns bit-identical results, including for input
-  containing ±inf. (This estimator uses the first-quartile rank
-  ⌊C(n,2)/4⌋, not the textbook Rousseeuw–Croux rank, so for small even n it
-  is smaller than e.g. statsmodels' `qn_scale` — about 0.8× at n = 10. That
-  predates this change and is unchanged by it.)
+  and O(n) memory, including for input containing ±inf.
+- **`qn_scale` is now Rousseeuw & Croux's Qn.** It selected the pairwise
+  difference of rank ⌊C(n,2)/4⌋ (the first quartile) and multiplied by a
+  rounded 2.2219. The definition is the C(⌊n/2⌋+1, 2)-th smallest difference
+  times 1/(√2·Φ⁻¹(5/8)) = 2.21914…; the two ranks coincide only for odd
+  n ≤ 9. **Results change, mostly for small samples**: for normal data the
+  old value was typically 0.68× the definition at n = 6, 0.82× at n = 10,
+  0.87× at n = 20, 0.97× at n = 100 and 0.998× at n = 1000 (and always 0.37×
+  at n = 2). It now equals `statsmodels.robust.scale.qn_scale` to 12
+  digits. This reaches `robust_summary`, `describe_fast` and
+  `robust_fit(scale="qn")`. No finite-sample correction is applied (as in
+  statsmodels; R's `robustbase::Qn` applies one by default).
 - **t-based p-values are accurate in the far tail.** Upper tails were
   computed as `1 - cdf(t)`, which cancels below about 1e-16, so
   `pearson_corr_test`, `spearman_corr_test`, `t_test_1samp`, `t_test_2samp`
@@ -182,9 +189,11 @@ Further notebook-layer fixes:
   NaN used to make the whole matrix NaN. They are now pairwise-complete, like
   `DataFrame.corr()` / `.cov()` and `correlation_report`, and ±inf is skipped
   along with NaN. `skipna=False` keeps the strict behaviour. `corr_df` takes
-  both standard deviations from the pair's own rows; `corr_matrix(skipna=True)`
-  does not (it uses each column's own rows), so the two can differ in the
-  third decimal when columns are missing in different places.
+  both standard deviations from the pair's own rows, as pandas does. The
+  lower-level `corr_matrix(skipna=True)` deliberately does not (it
+  standardizes each column once, over that column's own rows; see the matrix
+  kernel README), so the two differ slightly when columns are missing in
+  different places.
 - **One name per option.** `suffix=` works on every helper that adds a column;
   `add_suffix=` (on `zscore_style`, `demean_style`, `robust_scale_column`) is
   kept as an alias. Outlier style metadata carries `lower_bound` /
