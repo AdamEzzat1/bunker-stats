@@ -55,7 +55,7 @@ pub fn proportion_ztest_np(
         Alternative::TwoSided => (2.0 * norm_sf(z.abs())).clamp(0.0, 1.0),
         Alternative::Greater => norm_sf(z).clamp(0.0, 1.0),
         Alternative::Less => norm_cdf(z).clamp(0.0, 1.0),
-};
+    };
 
     let d = PyDict::new_bound(py);
     d.set_item("statistic", z)?;
@@ -127,7 +127,7 @@ pub fn two_proportions_ztest_np(
         Alternative::TwoSided => (2.0 * norm_sf(z.abs())).clamp(0.0, 1.0),
         Alternative::Greater => norm_sf(z).clamp(0.0, 1.0),
         Alternative::Less => norm_cdf(z).clamp(0.0, 1.0),
-};
+    };
 
     let d = PyDict::new_bound(py);
     d.set_item("statistic", z)?;

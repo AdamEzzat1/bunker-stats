@@ -1037,11 +1037,35 @@ pub fn bayesian_bootstrap_ci(
 // PERMUTATION TESTS - OPTIMIZED (NOW PARALLEL!)
 // ==============================================
 
+/// Run `count` over `0..total` in batches and sum the results, checking for a
+/// pending signal between batches.
+///
+/// A permutation count is not bounded by memory (nothing is stored per
+/// permutation), so an absurd value does not fail: it runs, for hours, and
+/// without this the interpreter cannot deliver Ctrl-C until it finishes. Each
+/// permutation is seeded from its own index, so batching does not change the
+/// result. A batch is sized to about 2^26 element visits.
+fn sum_in_batches<F>(py: Python<'_>, total: usize, n: usize, count: F) -> PyResult<usize>
+where
+    F: Fn(std::ops::Range<usize>) -> usize,
+{
+    let batch = ((1usize << 26) / n.max(1)).max(1);
+    let (mut done, mut acc) = (0usize, 0usize);
+    while done < total {
+        let end = done.saturating_add(batch).min(total);
+        acc += count(done..end);
+        done = end;
+        py.check_signals()?;
+    }
+    Ok(acc)
+}
+
 /// Permutation test for correlation - OPTIMIZED
 ///
 /// Returns (observed_corr, p_value)
 #[pyfunction(signature = (x, y, n_permutations=1000, alternative="two-sided", random_state=None))]
 pub fn permutation_corr_test(
+    py: Python<'_>,
     x: PyReadonlyArray1<f64>,
     y: PyReadonlyArray1<f64>,
     n_permutations: usize,
@@ -1084,55 +1108,58 @@ pub fn permutation_corr_test(
     let base_seed = random_state.unwrap_or(0);
 
     // OPTIMIZED: Parallel permutation test (2-4Ã— speedup!)
-    let extreme: usize = (0..n_permutations)
-        .into_par_iter()
-        .map_init(
-            || {
-                let orig = y.to_vec();
-                let work = orig.clone();
-                (orig, work)
-            },
-            |(orig, work), p| {
-                // Reset work to deterministic baseline before shuffling
-                work.copy_from_slice(&orig[..]);
+    let count_extreme = |range: std::ops::Range<usize>| -> usize {
+        range
+            .into_par_iter()
+            .map_init(
+                || {
+                    let orig = y.to_vec();
+                    let work = orig.clone();
+                    (orig, work)
+                },
+                |(orig, work), p| {
+                    // Reset work to deterministic baseline before shuffling
+                    work.copy_from_slice(&orig[..]);
 
-                let seed = mix_seed(base_seed, p as u64);
-                let mut rng = Pcg64::seed_from_u64(seed);
+                    let seed = mix_seed(base_seed, p as u64);
+                    let mut rng = Pcg64::seed_from_u64(seed);
                 
-                // Fisher-Yates shuffle
-                for i in (1..n).rev() {
-                    let j = rng.gen_range(0..=i);
-                    work.swap(i, j);
-                }
+                    // Fisher-Yates shuffle
+                    for i in (1..n).rev() {
+                        let j = rng.gen_range(0..=i);
+                        work.swap(i, j);
+                    }
 
-                // Compute permuted correlation
-                let mut sy = 0.0; let mut sy2 = 0.0; let mut sxy = 0.0;
-                for i in 0..n {
-                    let yi = work[i];
-                    sy += yi; sy2 += yi * yi; sxy += x[i] * yi;
-                }
+                    // Compute permuted correlation
+                    let mut sy = 0.0; let mut sy2 = 0.0; let mut sxy = 0.0;
+                    for i in 0..n {
+                        let yi = work[i];
+                        sy += yi; sy2 += yi * yi; sxy += x[i] * yi;
+                    }
                 
-                let my = sy / nf;
-                let vy = sy2 / nf - my * my;
-                let r = if vx <= 0.0 || vy <= 0.0 {
-                    f64::NAN
-                } else {
-                    (sxy / nf - mx * my) / (vx * vy).sqrt()
-                };
+                    let my = sy / nf;
+                    let vy = sy2 / nf - my * my;
+                    let r = if vx <= 0.0 || vy <= 0.0 {
+                        f64::NAN
+                    } else {
+                        (sxy / nf - mx * my) / (vx * vy).sqrt()
+                    };
                 
-                if !r.is_finite() {
-                    return 0;
-                }
+                    if !r.is_finite() {
+                        return 0;
+                    }
 
-                match alternative {
-                    "two-sided" => if r.abs() >= obs.abs() { 1 } else { 0 },
-                    "greater" => if r >= obs { 1 } else { 0 },
-                    "less" => if r <= obs { 1 } else { 0 },
-                    _ => 0,
+                    match alternative {
+                        "two-sided" => if r.abs() >= obs.abs() { 1 } else { 0 },
+                        "greater" => if r >= obs { 1 } else { 0 },
+                        "less" => if r <= obs { 1 } else { 0 },
+                        _ => 0,
+                    }
                 }
-            }
-        )
-        .sum();
+            )
+            .sum()
+    };
+    let extreme = sum_in_batches(py, n_permutations, n, count_extreme)?;
 
     // Add-one smoothing
     let p = (extreme as f64 + 1.0) / (n_permutations as f64 + 1.0);
@@ -1144,6 +1171,7 @@ pub fn permutation_corr_test(
 /// Returns (observed_diff, p_value), where diff = mean(x) - mean(y)
 #[pyfunction(signature = (x, y, n_permutations=1000, alternative="two-sided", random_state=None))]
 pub fn permutation_mean_diff_test(
+    py: Python<'_>,
     x: PyReadonlyArray1<f64>,
     y: PyReadonlyArray1<f64>,
     n_permutations: usize,
@@ -1166,44 +1194,47 @@ pub fn permutation_mean_diff_test(
     let base_seed = random_state.unwrap_or(0);
 
     // OPTIMIZED: Parallel permutation test (2-4Ã— speedup!)
-    let extreme: usize = (0..n_permutations)
-        .into_par_iter()
-        .map_init(
-            || {
-                let mut orig = Vec::with_capacity(nx + ny);
-                orig.extend_from_slice(x);
-                orig.extend_from_slice(y);
-                let work = orig.clone();
-                (orig, work)
-            },
-            |(orig, work), p| {
-                // Reset work to deterministic baseline before shuffling
-                work.copy_from_slice(&orig[..]);
+    let count_extreme = |range: std::ops::Range<usize>| -> usize {
+        range
+            .into_par_iter()
+            .map_init(
+                || {
+                    let mut orig = Vec::with_capacity(nx + ny);
+                    orig.extend_from_slice(x);
+                    orig.extend_from_slice(y);
+                    let work = orig.clone();
+                    (orig, work)
+                },
+                |(orig, work), p| {
+                    // Reset work to deterministic baseline before shuffling
+                    work.copy_from_slice(&orig[..]);
 
-                let seed = mix_seed(base_seed, p as u64);
-                let mut rng = Pcg64::seed_from_u64(seed);
+                    let seed = mix_seed(base_seed, p as u64);
+                    let mut rng = Pcg64::seed_from_u64(seed);
                 
-                // Fisher-Yates shuffle
-                let n = work.len();
-                for i in (1..n).rev() {
-                    let j = rng.gen_range(0..=i);
-                    work.swap(i, j);
-                }
+                    // Fisher-Yates shuffle
+                    let n = work.len();
+                    for i in (1..n).rev() {
+                        let j = rng.gen_range(0..=i);
+                        work.swap(i, j);
+                    }
                 
-                // Compute mean difference
-                let sx: f64 = work[0..nx].iter().copied().sum();
-                let sy: f64 = work[nx..(nx + ny)].iter().copied().sum();
-                let diff = sx / (nx as f64) - sy / (ny as f64);
+                    // Compute mean difference
+                    let sx: f64 = work[0..nx].iter().copied().sum();
+                    let sy: f64 = work[nx..(nx + ny)].iter().copied().sum();
+                    let diff = sx / (nx as f64) - sy / (ny as f64);
 
-                match alternative {
-                    "two-sided" => if diff.abs() >= obs.abs() { 1 } else { 0 },
-                    "greater" => if diff >= obs { 1 } else { 0 },
-                    "less" => if diff <= obs { 1 } else { 0 },
-                    _ => 0,
+                    match alternative {
+                        "two-sided" => if diff.abs() >= obs.abs() { 1 } else { 0 },
+                        "greater" => if diff >= obs { 1 } else { 0 },
+                        "less" => if diff <= obs { 1 } else { 0 },
+                        _ => 0,
+                    }
                 }
-            }
-        )
-        .sum();
+            )
+            .sum()
+    };
+    let extreme = sum_in_batches(py, n_permutations, nx + ny, count_extreme)?;
 
     let p = (extreme as f64 + 1.0) / (n_permutations as f64 + 1.0);
     Ok((obs, p))

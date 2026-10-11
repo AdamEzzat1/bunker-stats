@@ -86,7 +86,7 @@ pub fn f_test_oneway_np(
     
     let p = if f_stat.is_finite() && f_stat >= 0.0 {
         f_sf(f_stat, df_between, df_within)
-} else if f_stat.is_infinite() {
+    } else if f_stat.is_infinite() {
         0.0
     } else {
         f64::NAN
@@ -176,7 +176,7 @@ pub fn levene_test_np(
     
     let p = if w_stat.is_finite() && w_stat >= 0.0 {
         f_sf(w_stat, df_between, df_within)
-} else {
+    } else {
         f64::NAN
     };
     

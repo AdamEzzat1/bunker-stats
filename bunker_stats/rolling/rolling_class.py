@@ -117,8 +117,13 @@ class Rolling:
     
     Examples
     --------
+    Trailing output has one value per full window (``n - window + 1``).
+    Pass ``full_length=True`` for one value per observation, as pandas
+    returns: the first ``window - 1`` rows then use partial windows and are
+    NaN until they hold ``min_periods`` valid values.
+
     Basic trailing window:
-    
+
     >>> x = np.array([1., 2., 3., 4., 5.])
     >>> r = Rolling(x, window=3)
     >>> r.mean()
@@ -153,9 +158,18 @@ class Rolling:
         alignment: Alignment = "trailing",
         nan_policy: NanPolicy = "propagate",
         axis: Optional[int] = None,
+        full_length: bool = False,
     ):
         self.data = np.asarray(data, dtype=np.float64)
-        
+        # Trailing output is one value per *full* window (n - window + 1 of
+        # them), so it has no rows for the first window - 1 observations and
+        # `min_periods` cannot act on them. `full_length=True` returns one
+        # value per observation instead, like pandas `rolling(window,
+        # min_periods=m)`: the leading rows use the partial window x[0..i]
+        # and are NaN until it holds `min_periods` valid values. Centered
+        # output is always full length, so the flag changes nothing there.
+        self.full_length = bool(full_length)
+
         # Validate alignment and nan_policy before creating config
         # (RollingConfig will also validate, but we want clear error messages)
         if alignment not in VALID_ALIGNMENTS:
@@ -218,10 +232,52 @@ class Rolling:
     def _compute(self, *stats: str) -> Tuple[np.ndarray, ...]:
         """Compute multiple statistics at once."""
         if self.data.ndim == 1:
-            return self._compute_1d(*stats)
+            core = self._compute_1d(*stats)
         else:
-            return self._compute_2d(*stats)
-    
+            core = self._compute_2d(*stats)
+        if self.full_length and self.config.alignment == "trailing":
+            return self._with_leading_rows(stats, core)
+        return core
+
+    def _with_leading_rows(self, stats, core) -> Tuple[np.ndarray, ...]:
+        """Prepend the partial-window rows to truncated trailing output.
+
+        Row i < window - 1 covers x[0..i]. Those values come from the same
+        kernel: put window - 1 NaNs in front of the head of the data and skip
+        NaNs, and the i-th full window of that array is exactly x[0..i] plus
+        padding.
+        """
+        window = self.config.window
+        lead = min(window - 1, self.data.shape[0])
+        if lead == 0:
+            return core
+        head = self.data[:lead]
+        pad = np.full((window - 1,) + head.shape[1:], np.nan)
+        padded = np.ascontiguousarray(np.concatenate([pad, head]))
+        kernel = rolling_multi_np if self.data.ndim == 1 else rolling_multi_axis0_np
+        partial = kernel(
+            padded,
+            window=window,
+            min_periods=self.config.min_periods or window,
+            alignment="trailing",
+            nan_policy="ignore",
+            stats=list(stats),
+        )
+        # Skipping NaNs was for the padding. Under "propagate" a real NaN in
+        # the partial window still makes every statistic but the count NaN.
+        poisoned = (
+            np.maximum.accumulate(np.isnan(head), axis=0)
+            if self.config.nan_policy == "propagate" else None
+        )
+        out = []
+        for stat, rows, rest in zip(stats, partial, core):
+            rows = np.array(rows, dtype=np.float64)
+            if poisoned is not None and stat != "count":
+                rows[poisoned] = np.nan
+            rest = np.asarray(rest, dtype=np.float64)
+            out.append(np.concatenate([rows, rest]) if rest.size else rows)
+        return tuple(out)
+
     def mean(self) -> np.ndarray:
         """Compute rolling mean.
         

@@ -724,40 +724,33 @@ class TestRolling:
 class TestPerformance:
     """Performance benchmarks"""
     
-    def test_periodogram_performance(self, rng):
+    def test_periodogram_performance(self, rng, best_time):
         """Benchmark FFT periodogram vs DFT"""
         x = rng.randn(10000)
-        
-        start = time.time()
-        for _ in range(10):
-            bs.periodogram(x)
-        elapsed = time.time() - start
-        
+
+        # best of 3 batches: one wall-clock reading fails on a busy machine
+        elapsed = best_time(lambda: [bs.periodogram(x) for _ in range(10)], repeats=3)
+
         print(f"\n10 periodograms (n=10000): {elapsed:.3f}s ({elapsed/10*1000:.1f}ms each)")
         # Should be fast (<100ms total for 10 iterations)
         assert elapsed < 1.0
     
-    def test_pacf_performance(self, rng):
+    def test_pacf_performance(self, rng, best_time):
         """Benchmark Levinson-Durbin PACF"""
         x = rng.randn(10000)
-        
-        start = time.time()
-        bs.pacf(x, nlags=100)
-        elapsed = time.time() - start
-        
+
+        elapsed = best_time(lambda: bs.pacf(x, nlags=100))
+
         print(f"\nPACF (n=10000, nlags=100): {elapsed:.3f}s")
         # Should be fast (<50ms)
         assert elapsed < 0.5
     
-    def test_stationarity_performance(self, rng):
+    def test_stationarity_performance(self, rng, best_time):
         """Benchmark stationarity tests"""
         x = rng.randn(1000)
-        
-        start = time.time()
-        for _ in range(100):
-            bs.adf_test(x)
-        elapsed = time.time() - start
-        
+
+        elapsed = best_time(lambda: [bs.adf_test(x) for _ in range(100)], repeats=3)
+
         print(f"\n100 ADF tests (n=1000): {elapsed:.3f}s ({elapsed/100*1000:.1f}ms each)")
         # Should be fast
         assert elapsed < 1.0

@@ -109,7 +109,7 @@ def test_mann_whitney_ties():
 # Performance Optimization Tests
 # ============================================================================
 
-def test_chi2_performance():
+def test_chi2_performance(best_time):
     """Benchmark chi-square test performance."""
     import time
     
@@ -118,18 +118,11 @@ def test_chi2_performance():
     # Scale expected to match observed sum for valid test
     exp = np.ones(1000) * (obs.sum() / 1000)  # NEW - normalized
     
-    # Bunker-stats
-    start = time.time()
-    for _ in range(100):
-        bs.chi2_gof(obs, exp)
-    bs_time = time.time() - start
-    
-    # SciPy
-    start = time.time()
-    for _ in range(100):
-        sp.chisquare(obs, exp)
-    scipy_time = time.time() - start
-    
+    # Best of 5 batches each: comparing two single wall-clock readings fails
+    # whenever the machine is busy during one of them.
+    bs_time = best_time(lambda: [bs.chi2_gof(obs, exp) for _ in range(100)])
+    scipy_time = best_time(lambda: [sp.chisquare(obs, exp) for _ in range(100)])
+
     print(f"\nChi-square: bunker-stats={bs_time:.4f}s, scipy={scipy_time:.4f}s")
     print(f"Speedup: {scipy_time/bs_time:.2f}x")
     
@@ -137,7 +130,7 @@ def test_chi2_performance():
     assert bs_time < scipy_time * 1.2  # Allow 20% margin
 
 
-def test_ttest_performance():
+def test_ttest_performance(best_time):
     """Benchmark t-test performance."""
     import time
     
@@ -145,18 +138,9 @@ def test_ttest_performance():
     x = np.random.randn(1000)
     y = np.random.randn(1000) + 0.1
     
-    # Bunker-stats
-    start = time.time()
-    for _ in range(100):
-        bs.t_test_2samp(x, y, equal_var=True)
-    bs_time = time.time() - start
-    
-    # SciPy
-    start = time.time()
-    for _ in range(100):
-        sp.ttest_ind(x, y, equal_var=True)
-    scipy_time = time.time() - start
-    
+    bs_time = best_time(lambda: [bs.t_test_2samp(x, y, equal_var=True) for _ in range(100)])
+    scipy_time = best_time(lambda: [sp.ttest_ind(x, y, equal_var=True) for _ in range(100)])
+
     print(f"\nT-test: bunker-stats={bs_time:.4f}s, scipy={scipy_time:.4f}s")
     print(f"Speedup: {scipy_time/bs_time:.2f}x")
     

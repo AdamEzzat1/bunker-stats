@@ -110,12 +110,20 @@ class TestMatrixSkipnaLargeOffset:
         X = offset + base
         X[::11, 1] = np.nan
         got = np.asarray(b.corr_matrix_skipna_np(X))
-        # Kernel convention: pairwise-complete cov_ij normalized by the
-        # pairwise-complete variances from the covariance matrix diagonal,
-        # corr_ij = cov_ij / sqrt(cov_ii * cov_jj).
-        cov = _pairwise_cov_ref(X)
-        d = np.sqrt(np.diag(cov))
-        want = cov / np.outer(d, d)
+        # Pairwise-complete: entry (i, j) is the correlation of the rows where
+        # both columns are finite, variances included. (This test used to pin
+        # cov_ij / sqrt(cov_ii * cov_jj), which takes each variance over the
+        # column's own rows; the kernel changed after 0.3.1.) Exact two-pass
+        # reference on the stored values, shifted by an element of the column:
+        # at 1e12 the stored X is quantized to ~1e-4, so it is not base + offset,
+        # and subtracting a nearby double is exact.
+        k = X.shape[1]
+        want = np.eye(k)
+        for i in range(k):
+            for j in range(i + 1, k):
+                both = np.isfinite(X[:, i]) & np.isfinite(X[:, j])
+                a, c = X[both, i], X[both, j]
+                want[i, j] = want[j, i] = np.corrcoef(a - a[0], c - c[0])[0, 1]
         # atol covers near-zero correlations at 1e12 where the comparison is
         # limited by input quantization, not by the kernel
         np.testing.assert_allclose(got, want, rtol=RTOL, atol=1e-8)
