@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 
-use super::common::{mean, var_sample, reject_nonfinite, Alternative};
+use super::common::{reject_nonfinite, Alternative};
 
 /// Paired (dependent) t-test.
 ///
@@ -40,8 +40,7 @@ pub fn t_test_paired_np(
     let diffs: Vec<f64> = xs.iter().zip(ys.iter()).map(|(&a, &b)| a - b).collect();
 
     // One-sample t-test on differences vs popmean=0
-    let m = mean(&diffs);
-    let v = var_sample(&diffs, m);
+    let (m, v) = super::common::mean_var_sample(&diffs);
 
     let alt = Alternative::from_str(alternative)?;
 

@@ -233,7 +233,7 @@ rolling_multi_np(x, window, min_periods=None, alignment="trailing",
   - `window` — window size (int ≥ 1; `0` raises `ValueError`).
   - `min_periods` — minimum valid (non-NaN) observations required per window; `None` means `window`. Must satisfy `1 <= min_periods <= window` or `ValueError` is raised.
   - `alignment` — `"trailing"` (output length `n - window + 1`, window `[k, k + window)`) or `"centered"` (output length `n`, window `[k - window//2, k + window//2 + 1)` clipped to the array).
-  - `nan_policy` — `"propagate"` (any NaN in the window makes every requested statistic NaN, including `count`), `"ignore"` (skip NaNs; compute when valid count ≥ `min_periods`), or `"require_min_periods"` (identical to `"ignore"`; the name documents intent).
+  - `nan_policy` — `"propagate"` (any NaN in the window makes every requested statistic NaN, except `count`), `"ignore"` (skip NaNs; compute when valid count ≥ `min_periods`), or `"require_min_periods"` (identical to `"ignore"`; the name documents intent).
   - `stats` — list of statistic names from `"mean"`, `"std"`, `"var"`, `"count"`, `"min"`, `"max"`; defaults to `["mean"]`. Unknown names raise `ValueError`.
 - **Returns:** a **tuple of arrays in the same order as `stats`**, one array per requested statistic.
 
@@ -243,7 +243,7 @@ means, stds, counts = b.rolling_multi_np(x, 20, min_periods=10,
                                          stats=["mean", "std", "count"])
 ```
 
-- **NaN policy details:** under `"propagate"` each window is evaluated independently, so — unlike the legacy strict functions — output *recovers* after a NaN leaves the window: `[1, nan, 3, 4, 5]` with `window=3` gives `(nan, nan, 4.0)` for the mean. Under `"ignore"`, `count` reports the number of valid values per window.
+- **NaN policy details:** under `"propagate"` each window is evaluated independently, so — unlike the legacy strict functions — output *recovers* after a NaN leaves the window: `[1, nan, 3, 4, 5]` with `window=3` gives `(nan, nan, 4.0)` for the mean. `count` is the number of valid (non-NaN) values in the window under every policy and alignment; it is never NaN and never gated by `min_periods`, because it is what explains a NaN in the other statistics.
 - **Centered alignment details:** output is full length `n` and aligned with the input; windows are truncated at both edges. With `min_periods=None`, truncated edge windows are still computed at their actual size; with an explicit `min_periods`, edges with fewer valid values than `min_periods` yield NaN. The window at position `k` covers `[k - window//2, k + (window-1)//2]`, i.e. exactly `window` points in the interior for odd and even `window` alike; an even window takes its extra point on the left, as pandas `rolling(window, center=True)` does.
 - **Why it matters:** computing mean, std and count in one pass halves (or better) the passes over large arrays, and it is the only 1-D entry point with explicit `min_periods` / alignment / NaN-policy control — e.g. pandas-like smoothing with `alignment="centered"`, or gap-tolerant volatility with `nan_policy="ignore", min_periods=10`.
 - **Edge cases:** `window == 0` → `ValueError`. Trailing with `window > n` → tuple of empty arrays. `window == 1` returns NaN for std/var under every policy (a one-point window has no sample variance), as pandas does. Centered alignment with `window > n` still returns length-`n` output from truncated windows. Numerically stable on large-offset data in both policies (per-window translation offset; verified at `1e8`).

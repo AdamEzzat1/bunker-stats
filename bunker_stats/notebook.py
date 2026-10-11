@@ -331,7 +331,10 @@ def _as_float(series) -> np.ndarray:
 
     ``to_numpy(na_value=...)`` rather than ``astype("float64")``: the latter
     raises on masked ``Int64``/``boolean`` columns holding ``pd.NA`` in older
-    pandas releases still inside the supported range.
+    pandas releases still inside the supported range. And on the *array*,
+    not the Series: pandas 1.3's ``Series.to_numpy(na_value=...)`` fills the
+    missing entries by label, which raises ``KeyError`` when the index has
+    duplicates.
     """
     pd = _pd()
     if pd.api.types.is_integer_dtype(series) and len(series):
@@ -348,7 +351,7 @@ def _as_float(series) -> np.ndarray:
                 "from the column first"
             )
     return np.ascontiguousarray(
-        series.to_numpy(dtype="float64", na_value=np.nan), dtype=np.float64
+        series.array.to_numpy(dtype="float64", na_value=np.nan), dtype=np.float64
     )
 
 
@@ -1051,8 +1054,10 @@ def _gap_masks(series) -> tuple[np.ndarray, np.ndarray, bool]:
     if pd.api.types.is_bool_dtype(series):
         return is_missing, none, False
     if pd.api.types.is_complex_dtype(series):
-        # Infinite if either part is; a float cast would drop the imaginary part.
-        return is_missing, np.isinf(series.to_numpy()), True
+        # Infinite if either part is; a float cast would drop the imaginary
+        # part. A value can be both (NaN in one part, inf in the other): it
+        # counts as missing, so that the three counts still add up to n_rows.
+        return is_missing, np.isinf(series.to_numpy()) & ~is_missing, True
     if pd.api.types.is_numeric_dtype(series):
         return is_missing, np.isinf(_as_float(series)), True
     if series.dtype == object:
@@ -1168,10 +1173,10 @@ def rolling_report(
         Minimum valid observations per window. Defaults to ``window``, so
         every reported value comes from a full window. Lowering it lets a
         window with NaNs produce a value (together with
-        ``nan_policy="ignore"``) and, for ``alignment="centered"``, lets the
-        rows near either end use truncated windows. With
-        ``alignment="trailing"`` the first ``window - 1`` rows are always NaN:
-        unlike pandas, the trailing kernel never emits partial leading windows.
+        ``nan_policy="ignore"``) and lets the rows that cannot have a full
+        window use a partial one: the first ``window - 1`` rows for
+        ``alignment="trailing"`` (as pandas ``rolling(window, min_periods=m)``
+        does), the rows near either end for ``"centered"``.
     alignment : {"trailing", "centered"}
         ``"trailing"`` (default): the value at row ``i`` covers rows
         ``i - window + 1 .. i``. ``"centered"``: it covers ``window`` rows
@@ -1179,8 +1184,9 @@ def rolling_report(
         (``i - window//2 .. i + (window-1)//2``), matching pandas
         ``rolling(window, center=True)``. Rows too close to either end for a
         full window are NaN unless ``min_periods`` is lowered. The ``count``
-        statistic is the raw number of valid values in each window and is
-        reported even where the other statistics are NaN.
+        statistic is the number of valid (non-NaN) values in each window. It
+        is reported under every policy, including where the other statistics
+        are NaN, since it is what explains them.
     nan_policy : {"propagate", "ignore", "require_min_periods"}
         ``"propagate"`` (the default, matching the kernel) makes any window
         containing a NaN produce NaN.
@@ -1246,6 +1252,31 @@ def rolling_report(
             padded[n - arr.size:] = arr
             arr = padded
         out[_suffixed(column, f"_roll{window}_{stat}")] = arr
+
+    lead = window - 1
+    if alignment == "trailing" and min_periods is not None and min_periods < window and lead:
+        # The trailing kernel returns one value per *full* window, so the
+        # padding above leaves the first window - 1 rows NaN whatever
+        # min_periods says. Those rows have partial windows x[0..i]. Get them
+        # from the same kernel by putting window - 1 NaNs in front of the
+        # head of the series and skipping NaNs: the i-th full window of that
+        # array holds exactly x[0..i] plus padding.
+        head = np.concatenate([np.full(lead, np.nan), values[:lead]])
+        partial = _bs.Rolling(
+            head, window=window, min_periods=min_periods,
+            alignment="trailing", nan_policy="ignore",
+        ).aggregate(*stats)
+        # Skipping NaNs was for the padding. Under "propagate" a real NaN in
+        # the partial window still makes every statistic but the count NaN.
+        poisoned = (
+            np.maximum.accumulate(np.isnan(values[:lead]))
+            if nan_policy == "propagate" else np.zeros(lead, dtype=bool)
+        )
+        for stat, arr in zip(stats, out.values()):
+            rows = np.asarray(partial[stat], dtype=np.float64).copy()
+            if stat != "count":
+                rows[poisoned] = np.nan
+            arr[:lead] = rows
 
     frame = pd.DataFrame(out, index=df.index)
     if isinstance(df.columns, pd.MultiIndex):

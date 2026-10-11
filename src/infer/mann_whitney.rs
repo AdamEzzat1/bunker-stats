@@ -2,9 +2,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use statrs::distribution::{ContinuousCDF, Normal};
 
-use super::common::{reject_nonfinite, Alternative};
+use super::common::{norm_cdf, norm_sf, reject_nonfinite, Alternative};
 
 #[derive(Clone, Copy)]
 struct Obs {
@@ -107,13 +106,12 @@ fn mann_whitney_asymptotic(x: &[f64], y: &[f64], alt: Alternative) -> (f64, f64)
 
     let z = if sd_u > 0.0 { (diff - cc) / sd_u } else { 0.0 };
 
-    let norm = Normal::new(0.0, 1.0).unwrap();
     let p = match alt {
-        Alternative::TwoSided => 2.0 * norm.sf(z.abs()),
-        Alternative::Greater => norm.sf(z),
-        Alternative::Less => norm.cdf(z),
+        Alternative::TwoSided => 2.0 * norm_sf(z.abs()),
+        Alternative::Greater => norm_sf(z),
+        Alternative::Less => norm_cdf(z),
     }
-    .clamp(0.0, 1.0);
+.clamp(0.0, 1.0);
 
     // statistic returned: SciPy returns min(U1, U2) for two-sided, else U1
     let stat = match alt {

@@ -155,8 +155,14 @@ pub fn adf_test(x: PyReadonlyArray1<f64>, regression: &str, max_lag: Option<usiz
     let n = x.len();
     let reg = normalize_reg(regression)?;
     let p = max_lag.unwrap_or(0);
+    // A lag count at or beyond the series length leaves no regression rows.
+    // Decide that before any `p + k`: for an absurd lag those sums wrap, the
+    // "too few rows" checks pass, and the kernel indexes out of bounds.
+    if p >= n {
+        return Ok((f64::NAN, f64::NAN));
+    }
 
-    match df_ols(x, reg, p) {
+match df_ols(x, reg, p) {
         Some((t_stat, _, _, _, _, _, _)) => Ok((t_stat, df_pvalue(t_stat, n, reg))),
         None => Ok((f64::NAN, f64::NAN)),
     }
@@ -451,8 +457,9 @@ pub fn variance_ratio_test(x: PyReadonlyArray1<f64>, lags: usize) -> PyResult<(f
     let n = r.len();
     let q = lags;
 
-    if q < 2 || n < q + 2 {
-        return Ok((f64::NAN, f64::NAN, f64::NAN));
+    // `q >= n` first: `q + 2` wraps for an absurd lag.
+    if q < 2 || q >= n || n < q + 2 {
+return Ok((f64::NAN, f64::NAN, f64::NAN));
     }
 
     let nf = n as f64;
@@ -517,10 +524,11 @@ pub fn zivot_andrews_test(x: PyReadonlyArray1<f64>, max_lag: Option<usize>) -> P
         p_max.min(12).max(1)
     });
     
-    if n <= p + 5 {
+    // `p >= n` first: `p + 5` wraps for an absurd lag.
+    if p >= n || n <= p + 5 {
         return Ok((f64::NAN, 0, f64::NAN));
     }
-    
+
     // Trim 15% from each end (standard ZA practice)
     let trim_pct = 0.15;
     let start = ((n as f64) * trim_pct).floor() as usize;

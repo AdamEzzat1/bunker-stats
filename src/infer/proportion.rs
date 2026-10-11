@@ -5,9 +5,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use statrs::distribution::{ContinuousCDF, Normal};
 
-use super::common::Alternative;
+use super::common::{norm_cdf, norm_sf, Alternative};
 
 /// One-sample proportion z-test.
 ///
@@ -52,12 +51,11 @@ pub fn proportion_ztest_np(
 
     let z = (p_hat - value) / se;
 
-    let norm = Normal::new(0.0, 1.0).unwrap();
     let p = match alt {
-        Alternative::TwoSided => (2.0 * norm.sf(z.abs())).clamp(0.0, 1.0),
-        Alternative::Greater => norm.sf(z).clamp(0.0, 1.0),
-        Alternative::Less => norm.cdf(z).clamp(0.0, 1.0),
-    };
+        Alternative::TwoSided => (2.0 * norm_sf(z.abs())).clamp(0.0, 1.0),
+        Alternative::Greater => norm_sf(z).clamp(0.0, 1.0),
+        Alternative::Less => norm_cdf(z).clamp(0.0, 1.0),
+};
 
     let d = PyDict::new_bound(py);
     d.set_item("statistic", z)?;
@@ -125,12 +123,11 @@ pub fn two_proportions_ztest_np(
 
     let z = (p1 - p2) / se;
 
-    let norm = Normal::new(0.0, 1.0).unwrap();
     let p = match alt {
-        Alternative::TwoSided => (2.0 * norm.sf(z.abs())).clamp(0.0, 1.0),
-        Alternative::Greater => norm.sf(z).clamp(0.0, 1.0),
-        Alternative::Less => norm.cdf(z).clamp(0.0, 1.0),
-    };
+        Alternative::TwoSided => (2.0 * norm_sf(z.abs())).clamp(0.0, 1.0),
+        Alternative::Greater => norm_sf(z).clamp(0.0, 1.0),
+        Alternative::Less => norm_cdf(z).clamp(0.0, 1.0),
+};
 
     let d = PyDict::new_bound(py);
     d.set_item("statistic", z)?;

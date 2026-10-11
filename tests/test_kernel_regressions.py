@@ -399,7 +399,8 @@ class TestNoProcessAbort:
         y = np.random.default_rng(1).normal(0.0, 2.0, size=30)
         lo, hi = bs.mean_diff_ci(x, y, 0.05, False)
         ref = scipy_stats.ttest_ind(x, y, equal_var=False).confidence_interval()
-        assert close(lo, ref.low, 1e-10) and close(hi, ref.high, 1e-10)
+        # 1e-8: scipy's own t quantile is only good to ~2e-9 before 1.12
+        assert close(lo, ref.low, 1e-8) and close(hi, ref.high, 1e-8)
         f = bs.f_test_var(x, y)
         ratio = np.var(y, ddof=1) / np.var(x, ddof=1)
         assert close(f["statistic"], max(ratio, 1 / ratio), 1e-12)

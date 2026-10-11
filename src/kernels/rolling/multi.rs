@@ -304,6 +304,7 @@ fn rolling_multi_trailing_propagate(
     let mut min_val = f64::INFINITY;
     let mut max_val = f64::NEG_INFINITY;
     let mut has_nan = false;
+    let mut n_nan = 0usize;
 
     // Per-window translation offset for numerical stability of the variance
     // (see write_stats). NaN windows output all-NaN, so the offset is only
@@ -314,6 +315,7 @@ fn rolling_multi_trailing_propagate(
     for &x in &xs[..window] {
         if x.is_nan() {
             has_nan = true;
+            n_nan += 1;
         }
         let xv = x - off0;
         sum.add(xv);
@@ -329,7 +331,7 @@ fn rolling_multi_trailing_propagate(
 
     // First output
     write_stats(
-        0, &sum, &sumsq, &sum_raw, window, min_val, max_val, has_nan, mask,
+        0, &sum, &sumsq, &sum_raw, window, min_val, max_val, has_nan, n_nan, mask,
         out_mean, out_std, out_var, out_count, out_min, out_max,
     );
 
@@ -342,11 +344,13 @@ fn rolling_multi_trailing_propagate(
         min_val = f64::INFINITY;
         max_val = f64::NEG_INFINITY;
         has_nan = false;
+        n_nan = 0;
 
         let offk = if xs[k].is_finite() { xs[k] } else { 0.0 };
         for &x in &xs[k..k + window] {
             if x.is_nan() {
                 has_nan = true;
+                n_nan += 1;
             }
             let xv = x - offk;
             sum.add(xv);
@@ -361,7 +365,7 @@ fn rolling_multi_trailing_propagate(
         }
 
         write_stats(
-            k, &sum, &sumsq, &sum_raw, window, min_val, max_val, has_nan, mask,
+            k, &sum, &sumsq, &sum_raw, window, min_val, max_val, has_nan, n_nan, mask,
             out_mean, out_std, out_var, out_count, out_min, out_max,
         );
     }
@@ -485,6 +489,7 @@ fn write_stats(
     min_val: f64,
     max_val: f64,
     has_nan: bool,
+    n_nan: usize,
     mask: StatsMask,
     out_mean: &mut [f64],
     out_std: &mut [f64],
@@ -505,7 +510,10 @@ fn write_stats(
             out_var[k] = f64::NAN;
         }
         if mask.has_count() {
-            out_count[k] = f64::NAN;
+            // `count` is the number of valid values in the window under every
+            // policy and alignment. It is what explains a NaN in the other
+            // statistics, so it is never NaN itself.
+            out_count[k] = (window - n_nan) as f64;
         }
         if mask.has_min() {
             out_min[k] = f64::NAN;

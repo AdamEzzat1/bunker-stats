@@ -23,10 +23,11 @@ import types
 import numpy as np
 import pytest
 
-bs = pytest.importorskip(
-    "bunker_stats_rs",
-    reason="build the extension first: `python -m maturin develop --release`",
-)
+# The extension is `bunker_stats.bunker_stats_rs` (see pyproject.toml). This
+# used to be `pytest.importorskip("bunker_stats_rs")`, a top-level name that
+# has not existed since the package became a mixed Rust/Python layout, so
+# the whole file skipped on every run.
+import bunker_stats.bunker_stats_rs as bs  # noqa: E402
 
 # Functions that historically sorted raw user data with partial_cmp().unwrap()
 # and therefore aborted the interpreter on NaN under panic="abort".
@@ -89,7 +90,7 @@ def test_numeric_parity_spot_checks():
 
 def _run_subprocess(body: str) -> subprocess.CompletedProcess:
     code = (
-        "import numpy as np, bunker_stats_rs as b\n"
+        "import numpy as np, bunker_stats.bunker_stats_rs as b\n"
         "x = np.array([1.0, np.nan, 3.0, 4.0, 5.0])\n"
         f"{body}\n"
         "print('OK')\n"
@@ -111,7 +112,7 @@ def test_nan_input_does_not_abort(name, call):
 def test_zivot_andrews_does_not_abort():
     """(e): regression for the n_regressors out-of-bounds write (SIGABRT)."""
     code = (
-        "import numpy as np, bunker_stats_rs as b\n"
+        "import numpy as np, bunker_stats.bunker_stats_rs as b\n"
         "rng = np.random.default_rng(0)\n"
         "for n in (20, 25, 30, 50):\n"
         "    x = np.cumsum(rng.standard_normal(n))\n"

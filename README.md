@@ -131,8 +131,36 @@ Kernel fixes (Rust):
   ratio of 1.5 it reported p = 1.0 where 2·min(lower, upper) is 0.83. It now
   takes the smaller of the two tails. Results for equal sample sizes are
   unchanged.
-- Not yet fixed: count arguments such as `n_resamples` are not bounded, so an
-  absurd value can still exhaust memory and abort.
+- **Absurd counts and lags raise or return NaN instead of killing the
+  process.** `n_resamples=10**12` asked for an 8 TB result buffer, and the
+  failed allocation aborted the interpreter; every resampler (and `pad_nan`)
+  now raises `MemoryError`. A lag near 2**64 in `adf_test`,
+  `zivot_andrews_test`, `variance_ratio_test` or `bg_test` wrapped the
+  "enough rows?" arithmetic and then indexed out of bounds or never returned;
+  a lag at or beyond the series length now returns NaN, like any other lag
+  that is too large. `quantile_bins` no longer loops over the bins, so an
+  absurd `n_bins` returns immediately.
+- **t-tests on constant samples.** The mean of n copies of a value is not
+  always that value in floating point, which left a variance of ~1e-34 and a
+  t statistic made of rounding error: two samples holding the same constant
+  with different sizes could come out "significantly different". Constant
+  samples are now detected and handled exactly, in `t_test_1samp`,
+  `t_test_2samp` and `t_test_paired`. `t_test_2samp` also compared the means
+  of two zero-variance samples with an absolute 1e-15 tolerance, so constants
+  of 1e-20 and 2e-20 were reported as equal (t = 0, p = 1); they are now
+  compared exactly (t = -inf, p = 0).
+- **`mann_whitney_u`, `proportion_ztest` and `two_proportions_ztest`** take
+  their normal tail from `erfc` and agree with scipy to 1e-13 (it was ~1e-11).
+- **Rolling `count` is the number of valid values in the window, always.**
+  Under `nan_policy="propagate"` it was NaN for a window holding a NaN, and a
+  valid count under every other policy and alignment. It is now the same
+  number everywhere and never NaN: it is what explains a NaN in the other
+  statistics. **Behaviour change** for `propagate` windows that contain NaN.
+- **`jackknife_mean` returns the mean.** It formed `n·θ − (n−1)·mean(loo)`,
+  which subtracts two numbers the size of the data: for
+  `[0, 0, 0, 999999, -999945, 0]` it returned 9.000000000014559 and reported
+  the difference as a bias. For the mean the jackknife has a closed form
+  (estimate = mean, bias = 0, SE = s/√n), which is what it now computes.
 - **Centered rolling windows with an even `window` covered `window + 1`
   points.** `Rolling(x, window=4, alignment="centered")` averaged five values.
   The window is now `[i - w//2, i + (w-1)//2]`, as in pandas
@@ -219,8 +247,14 @@ Further notebook-layer fixes:
 - **`rolling_report(alignment="centered")` returns NaN where a full window
   does not fit**, unless `min_periods` is lowered, so a `..._roll5_mean`
   column never holds 3-point means. `alignment` is now documented and
-  validated. (Trailing alignment is unchanged: its first `window - 1` rows are
-  always NaN, whatever `min_periods` is.)
+  validated.
+- **`rolling_report` honours `min_periods` on the leading rows of a trailing
+  window.** The first `window - 1` rows were NaN whatever `min_periods` said;
+  they now hold partial-window values once enough observations are in, as
+  pandas `rolling(window, min_periods=m)` does, and match it on every row.
+  The default (`min_periods = window`) is unchanged. `bs.Rolling` itself
+  still returns one value per full window for trailing alignment (its output
+  is `n - window + 1` long, so it has no leading rows).
 - **Stylers warn when pandas will truncate the table.** Past
   `styler.render.max_elements` (262,144 cells by default) pandas renders only
   the leading rows, so highlights further down were silently missing while
