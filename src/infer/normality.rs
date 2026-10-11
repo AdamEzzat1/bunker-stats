@@ -55,10 +55,8 @@ pub fn jarque_bera_np(
     let jb = (nf / 6.0) * (skewness * skewness + excess_kurtosis * excess_kurtosis / 4.0);
     
     // Chi-square with df=2
-    use statrs::distribution::ChiSquared;
-    let dist = ChiSquared::new(2.0).unwrap();
-    let p = (1.0 - dist.cdf(jb)).clamp(0.0, 1.0);
-    
+    let p = super::common::chi2_sf(jb, 2.0);
+
     let d = PyDict::new_bound(py);
     d.set_item("statistic", jb)?;
     d.set_item("pvalue", p)?;

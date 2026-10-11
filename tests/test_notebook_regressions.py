@@ -427,12 +427,8 @@ class TestKurtosisConvention:
         assert close(row["jb_statistic"], ref.statistic, 1e-10)
         assert close(row["jb_pvalue"], ref.pvalue, 1e-9)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="known: the Jarque-Bera p-value is still computed as 1 - cdf "
-        "and underflows to 0.0 (scipy: 2.4e-40 here)",
-    )
     def test_jarque_bera_pvalue_in_the_far_tail(self, scipy_stats):
+        """Was 0.0 while the tail was `1 - cdf` (scipy: 2.4e-40 here)."""
         x = np.random.default_rng(1).standard_t(df=5, size=300)
         row = nb.normality_report(pd.DataFrame({"x": x})).loc["x"]
         assert close(row["jb_pvalue"], scipy_stats.jarque_bera(x).pvalue, 1e-6)

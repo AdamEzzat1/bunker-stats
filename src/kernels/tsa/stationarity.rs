@@ -489,9 +489,7 @@ pub fn variance_ratio_test(x: PyReadonlyArray1<f64>, lags: usize) -> PyResult<(f
     let theta = 2.0 * (2.0 * qf - 1.0) * (qf - 1.0) / (3.0 * qf * nf);
     let z = (vr - 1.0) / theta.sqrt();
 
-    use statrs::distribution::{ContinuousCDF, Normal};
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    let p_val = 2.0 * (1.0 - normal.cdf(z.abs()));
+    let p_val = crate::infer::common::norm_two_sided_pvalue(z);
 
     Ok((vr, z, p_val))
 }

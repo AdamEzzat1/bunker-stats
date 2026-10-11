@@ -76,6 +76,70 @@ pub fn t_pvalue(t: f64, df: f64, alt: Alternative) -> f64 {
     p.clamp(0.0, 1.0)
 }
 
+/// Upper tail `P(X >= stat)` of a chi-square with `df` degrees of freedom.
+///
+/// Evaluated as the regularized upper incomplete gamma function, never as
+/// `1 - cdf(stat)`: that subtraction is exactly 0.0 once the tail drops below
+/// ~1e-16, so every strongly significant test reported p = 0.
+///
+/// NaN in gives NaN out; a statistic at or below zero (rounding in a
+/// statistic that is zero in exact arithmetic) has p = 1.
+pub fn chi2_sf(stat: f64, df: f64) -> f64 {
+    use statrs::function::gamma::gamma_ur;
+
+    if stat.is_nan() || !(df > 0.0) || df.is_infinite() {
+        return f64::NAN;
+    }
+    if stat <= 0.0 {
+        return 1.0;
+    }
+    if stat.is_infinite() {
+        return 0.0;
+    }
+    gamma_ur(0.5 * df, 0.5 * stat).clamp(0.0, 1.0)
+}
+
+/// Upper tail `P(F >= f)` of an F distribution with `(df1, df2)` degrees of
+/// freedom: `I_x(df2/2, df1/2)` with `x = df2 / (df2 + df1 f)`.
+///
+/// `x` is formed directly. Writing it as `1 - df1 f / (df1 f + df2)` (as
+/// statrs' own `sf` does) rounds to 0 for a large statistic, and `1 - cdf(f)`
+/// cannot go below ~1e-16 at all.
+pub fn f_sf(f: f64, df1: f64, df2: f64) -> f64 {
+    use statrs::function::beta::beta_reg;
+
+    if f.is_nan() || !(df1 > 0.0) || !(df2 > 0.0) || df1.is_infinite() || df2.is_infinite() {
+        return f64::NAN;
+    }
+    if f <= 0.0 {
+        return 1.0;
+    }
+    let denom = df2 + df1 * f;
+    if !denom.is_finite() {
+        return 0.0;
+    }
+    let x = df2 / denom;
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    beta_reg(0.5 * df2, 0.5 * df1, x).clamp(0.0, 1.0)
+}
+
+/// Two-sided p-value of a standard-normal statistic, `2 P(Z >= |z|)`, from
+/// `erfc` rather than `2 (1 - cdf(|z|))`, which is 0 for |z| > ~8.3.
+///
+/// `libm::erfc`, as in `kernels::dist::normal`: the statrs one is only good
+/// to about 1e-11 relative (0.04999999999775 at z = 1.96).
+pub fn norm_two_sided_pvalue(z: f64) -> f64 {
+    if z.is_nan() {
+        return f64::NAN;
+    }
+    libm::erfc(z.abs() / std::f64::consts::SQRT_2).clamp(0.0, 1.0)
+}
+
 /// Reject NaN / Inf inputs (v0.3 contract).
 #[inline]
 pub fn reject_nonfinite(xs: &[f64], name: &str) -> PyResult<()> {
@@ -403,5 +467,119 @@ mod t_pvalue_tests {
         }
         // t^2 overflows: the tail underflows to 0 instead of producing NaN.
         assert_eq!(t_pvalue(1e200, 4.0, Alternative::Greater), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::*;
+
+    fn rel(a: f64, b: f64) -> f64 {
+        ((a - b) / b).abs()
+    }
+
+    // References: mpmath at 60 digits (regularized incomplete gamma / beta,
+    // erfc), independent of statrs; each was also checked against scipy.
+    const CHI2: &[(f64, f64, f64)] = &[
+        (0.5, 1.0, 0.47950012218695346),
+        (3.0, 2.0, 0.22313016014842983),
+        (10.0, 5.0, 0.075235246146512179),
+        (40.0, 2.0, 2.0611536224385578e-9),
+        (100.0, 1.0, 1.5239706048321052e-23),
+        (200.0, 10.0, 1.6139305336977305e-37),
+        (800.0, 2.0, 1.9151695967140057e-174),
+        (1000.0, 50.0, 7.188706215514835e-177),
+        (1400.0, 3.0, 2.9456193610163087e-303),
+        (30.0, 40.0, 0.87521878496747518),
+        (0.001, 7.0, 0.9999999999997598),
+        (500.0, 400.0, 0.00048221275959343374),
+        (2000.0, 1000.0, 4.1436785914549917e-69),
+    ];
+
+    const F: &[(f64, f64, f64, f64)] = &[
+        (1.0, 3.0, 10.0, 0.43233720302169707),
+        (4.0, 2.0, 30.0, 0.028844623295696826),
+        (50.0, 2.0, 117.0, 2.0229189466309584e-16),
+        (500.0, 2.0, 117.0, 4.761702792428355e-58),
+        (5000.0, 2.0, 117.0, 4.9356634371962726e-114),
+        (1000000.0, 1.0, 5.0, 1.8980131131979715e-14),
+        (1000000000000.0, 3.0, 4.0, 3.333333333322963e-24),
+        (30.0, 59.0, 199.0, 1.1401187408079199e-72),
+        (0.2, 5.0, 5.0, 0.94903026058507082),
+        (3.0, 100.0, 1.0, 0.43499952209983999),
+        (1.2, 59.0, 2.0, 0.56035168591399539),
+        (0.001, 4.0, 9.0, 0.99999756025749564),
+        (2.5, 400.0, 500.0, 2.3734602832561327e-22),
+    ];
+
+    const NORM2: &[(f64, f64)] = &[
+        (0.0, 1.0),
+        (0.5, 0.61707507745197379),
+        (1.959963984540054, 0.050000000000000022),
+        (5.0, 5.7330314375838782e-7),
+        (8.0, 1.2441921148543568e-15),
+        (8.3, 1.0411139489780508e-16),
+        (10.0, 1.5239706048321052e-23),
+        (20.0, 5.5072482372124674e-89),
+        (30.0, 9.8134278542963741e-198),
+        (37.0, 1.1451142445049154e-299),
+        (-12.5, 7.4651285977554268e-36),
+    ];
+
+    #[test]
+    fn chi2_sf_matches_reference_into_the_far_tail() {
+        for &(x, df, sf) in CHI2 {
+            let p = chi2_sf(x, df);
+            assert!(rel(p, sf) < 1e-10, "chi2_sf({x}, {df}) = {p}, want {sf}");
+        }
+    }
+
+    #[test]
+    fn f_sf_matches_reference_into_the_far_tail() {
+        for &(f, d1, d2, sf) in F {
+            let p = f_sf(f, d1, d2);
+            assert!(rel(p, sf) < 1e-10, "f_sf({f}, {d1}, {d2}) = {p}, want {sf}");
+        }
+    }
+
+    #[test]
+    fn norm_two_sided_matches_reference_into_the_far_tail() {
+        for &(z, want) in NORM2 {
+            let p = norm_two_sided_pvalue(z);
+            assert!(rel(p, want) < 1e-12, "z = {z}: {p}, want {want}");
+        }
+    }
+
+    #[test]
+    fn tails_handle_every_statistic_a_caller_can_produce() {
+        assert_eq!(chi2_sf(0.0, 3.0), 1.0);
+        assert_eq!(chi2_sf(-1e-12, 3.0), 1.0);
+        assert_eq!(chi2_sf(f64::INFINITY, 3.0), 0.0);
+        assert!(chi2_sf(f64::NAN, 3.0).is_nan());
+        assert!(chi2_sf(1.0, 0.0).is_nan());
+        assert!(chi2_sf(1.0, f64::NAN).is_nan());
+        // true value 3e-2651: underflows, and must do so to 0, not NaN
+        assert_eq!(f_sf(1e8, 2.0, 1000.0), 0.0);
+        assert_eq!(chi2_sf(1e6, 4.0), 0.0);
+
+        assert_eq!(f_sf(0.0, 2.0, 9.0), 1.0);
+        assert_eq!(f_sf(f64::INFINITY, 2.0, 9.0), 0.0);
+        assert_eq!(f_sf(f64::MAX, 2.0, 9.0), 0.0);
+        assert!(f_sf(f64::NAN, 2.0, 9.0).is_nan());
+        assert!(f_sf(1.0, 0.0, 9.0).is_nan());
+
+        assert_eq!(norm_two_sided_pvalue(f64::INFINITY), 0.0);
+        assert_eq!(norm_two_sided_pvalue(f64::NEG_INFINITY), 0.0);
+        assert!(norm_two_sided_pvalue(f64::NAN).is_nan());
+    }
+
+    /// The lower tail of F(d1, d2) at f is the upper tail of F(d2, d1) at 1/f,
+    /// so the two must sum to one wherever neither is negligible.
+    #[test]
+    fn f_tails_are_complementary() {
+        for &(f, d1, d2) in &[(0.3, 4.0, 7.0), (1.0, 59.0, 2.0), (2.2, 100.0, 1.0), (5.0, 3.0, 3.0)] {
+            let total = f_sf(f, d1, d2) + f_sf(1.0 / f, d2, d1);
+            assert!((total - 1.0).abs() < 1e-12, "f={f} ({d1}, {d2}): {total}");
+        }
     }
 }
