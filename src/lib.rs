@@ -2625,6 +2625,12 @@ fn rolling_multi_axis0_np<'py>(
     let shape = arr.shape();
     let n_rows = shape[0];
     let n_cols = shape[1];
+    // The per-column chunking below panics on a zero chunk size, and a panic
+    // aborts the process in release builds. A frame with no columns is an
+    // ordinary input (an empty selection), so refuse it cleanly.
+    if n_cols == 0 {
+        return Err(PyErr::new::<PyValueError, _>("input has no columns"));
+    }
     
     let data = arr.as_slice()
         .ok_or_else(|| PyErr::new::<PyValueError, _>("Array must be contiguous"))?;
