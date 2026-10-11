@@ -25,7 +25,8 @@ License: See LICENSE file
 
 ## Release Notes — Unreleased
 
-Notebook layer hardening (`bunker_stats.notebook`). No Rust changes.
+Notebook layer hardening (`bunker_stats.notebook`), plus three kernel fixes
+found while reviewing it.
 
 - **`rich=True` on every styler and transform.** Stylers return a
   `StyleResult` that unpacks as `styler, frame, metadata`; `scale_columns`,
@@ -55,6 +56,67 @@ Behavior changes (each replaces a wrong or late-failing result):
 - `style_significance` rejects p-values outside `[0, 1]`.
 - The `outlier_report(rich=True)` zero-spread warning said "nothing can be
   flagged"; when the fences collapse, every value off that point *is* flagged.
+
+Kernel fixes (Rust):
+
+- **`qn_scale` no longer aborts the process on large input.** It materialised
+  all n(n−1)/2 pairwise differences — 160 GB at n = 200,000 — and the failed
+  allocation killed the interpreter with no Python exception, taking
+  `robust_summary` and `describe_fast` with it. It now runs in O(n log n) time
+  and O(n) memory and returns bit-identical results, including for input
+  containing ±inf. (This estimator uses the first-quartile rank
+  ⌊C(n,2)/4⌋, not the textbook Rousseeuw–Croux rank, so for small even n it
+  is smaller than e.g. statsmodels' `qn_scale` — about 0.8× at n = 10. That
+  predates this change and is unchanged by it.)
+- **t-based p-values are accurate in the far tail.** Upper tails were
+  computed as `1 - cdf(t)`, which cancels below about 1e-16, so
+  `pearson_corr_test`, `spearman_corr_test`, `t_test_1samp`, `t_test_2samp`
+  and `t_test_paired` reported `pvalue == 0.0` for strong effects (and a
+  two-sided t-test gave different answers when the samples were swapped).
+  They now agree with scipy to 9 significant digits down to about 1e-280,
+  including at 1–2 degrees of freedom. A p-value of exactly 0.0 now means the
+  true value is below the smallest representable number.
+- **One-sided t-tests with zero variance point the right way.** Constant data
+  gives an infinite statistic; `t_test_1samp` and `t_test_paired` returned
+  p = 0 for it under every alternative. An infinite statistic *against* a
+  one-sided alternative now gives p = 1, as in scipy, and a NaN statistic
+  gives a NaN p-value instead of 0.
+- Not yet fixed: the F, chi-square, Jarque-Bera and Kolmogorov-Smirnov
+  p-values still use `1 - cdf` and can report 0.0 for very strong effects.
+- **Centered rolling windows with an even `window` covered `window + 1`
+  points.** `Rolling(x, window=4, alignment="centered")` averaged five values.
+  The window is now `[i - w//2, i + (w-1)//2]`, as in pandas
+  `rolling(w, center=True)`. Odd windows are unchanged.
+
+Further notebook-layer fixes:
+
+- Reports accept **MultiIndex columns** (every one raised `ValueError`). The
+  report's rows are indexed by the same levels, as are both axes of the
+  `correlation_report` matrix. Derived column names in the transforms and
+  stylers are still built by string concatenation.
+- **`normality_report` `kurtosis` is now excess kurtosis** (0 for a normal
+  distribution), matching `robust_summary`. It was Pearson kurtosis, so the
+  two reports differed by 3 under the same column name. Values in this column
+  drop by 3; the Jarque-Bera statistic and p-value are unchanged.
+- **`bootstrap_ci_report` `estimate` is the statistic of the sample.** It was
+  the mean of the bootstrap draws. The interval is unchanged. For
+  `stat="std"` the estimate is the ddof=0 standard deviation, because that is
+  what the resampling kernel computes for each draw; mixing in the ddof=1
+  value would put the estimate outside its own interval at small n. The
+  small-sample warning now fires below n = 30 and says why: percentile
+  intervals are too narrow at small n.
+- **`rolling_report(alignment="centered")` returns NaN where a full window
+  does not fit**, unless `min_periods` is lowered, so a `..._roll5_mean`
+  column never holds 3-point means. `alignment` is now documented and
+  validated. (Trailing alignment is unchanged: its first `window - 1` rows are
+  always NaN, whatever `min_periods` is.)
+- **Stylers warn when pandas will truncate the table.** Past
+  `styler.render.max_elements` (262,144 cells by default) pandas renders only
+  the leading rows, so highlights further down were silently missing while
+  the metadata still counted them. Every styler, `corr_heatmap` included, now
+  raises a `UserWarning` attributed to the calling line, and the rich result
+  carries the same note. `styler.render.max_rows` / `max_columns` and the
+  report objects' `.style()` are not covered.
 
 ## Release Notes — 0.3.1
 
@@ -403,7 +465,7 @@ High-performance matrix computations for statistical analysis:
 
 Flexible rolling window statistics with policy-driven configuration:
 - **Statistics:** Mean, std, variance, min, max, count
-- **Alignment:** Trailing (classic) or centered (pandas-like)
+- **Alignment:** Trailing (classic) or centered (full-length output; windows match pandas `center=True`, but edge rows use partial windows unless `min_periods` is set)
 - **NaN handling:** Propagate, ignore, or minimum periods
 - **Multi-stat kernels:** Compute 2-6 statistics in single pass
 - **2D support:** Column-wise operations on matrices

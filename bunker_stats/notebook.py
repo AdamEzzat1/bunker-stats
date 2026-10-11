@@ -64,6 +64,8 @@ uses the rows where both are finite.
 from __future__ import annotations
 
 import math
+import sys
+import warnings as _warnings
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -167,6 +169,19 @@ def _check_unique_labels(df, cols: Sequence[Any]) -> None:
             f"Column label(s) {ambiguous} match more than one column. "
             "Make the column labels unique (or pass full MultiIndex keys) first."
         )
+
+
+def _column_index(df, cols: Sequence[Any]):
+    """Row index for a one-row-per-column report.
+
+    ``pd.Index(tuples, name="column")`` raises for MultiIndex columns, which
+    made every report unusable on such frames. Keep the levels instead, so a
+    row is addressed the same way as its source column.
+    """
+    pd = _pd()
+    if isinstance(df.columns, pd.MultiIndex):
+        return pd.MultiIndex.from_tuples(list(cols), names=df.columns.names)
+    return pd.Index(list(cols), name="column")
 
 
 def _is_real_numeric(series) -> bool:
@@ -368,7 +383,7 @@ def robust_summary(df, columns: Sequence[Any] | None = None, *, rich: bool = Fal
         "n", "n_missing", "mean", "std", "min", "median", "max",
         "mad", "mad_std", "iqr", "qn_scale", "trimmed_mean", "skew", "kurtosis",
     ]
-    out = pd.DataFrame(rows, index=pd.Index(cols, name="column"))
+    out = pd.DataFrame(rows, index=_column_index(df, cols))
     out = out.reindex(columns=order)
     if rich:
         warnings = []
@@ -442,7 +457,7 @@ def describe_fast(df, columns: Sequence[Any] | None = None, *, robust: bool = Tr
     order = ["n", "n_missing", "mean", "std", "min", "25%", "50%", "75%", "max"]
     if robust:
         order += ["mad", "iqr", "qn_scale", "trimmed_mean", "skew", "kurtosis"]
-    out = pd.DataFrame(rows, index=pd.Index(cols, name="column"))
+    out = pd.DataFrame(rows, index=_column_index(df, cols))
     return out.reindex(columns=order)
 
 
@@ -549,7 +564,7 @@ def outlier_report(
             }
         )
 
-    out = pd.DataFrame(rows, index=pd.Index(cols, name="column"))
+    out = pd.DataFrame(rows, index=_column_index(df, cols))
     if rich:
         warnings = []
         empty = [str(c) for c in out.index[out["n"] == 0]]
@@ -585,6 +600,8 @@ def normality_report(df, columns: Sequence[Any] | None = None, *, alpha: float =
 
     Returns ``n``, ``skewness``, ``kurtosis``, ``jb_statistic``, ``jb_pvalue``,
     ``ad_statistic``, ``normal`` and ``conclusion``.
+    ``kurtosis`` is *excess* kurtosis (0 for a normal distribution), the same
+    convention as :func:`robust_summary`.
 
     .. note::
        ``normal`` / ``conclusion`` are decided by the **Jarque-Bera p-value**
@@ -606,7 +623,10 @@ def normality_report(df, columns: Sequence[Any] | None = None, *, alpha: float =
         jb = _safe(_bs.jarque_bera, x, default={}) or {}
         ad = _safe(_bs.anderson_darling, x, default={}) or {}
         row["skewness"] = jb.get("skewness", np.nan)
-        row["kurtosis"] = jb.get("kurtosis", np.nan)
+        # The kernel reports Pearson kurtosis (normal = 3). Every other
+        # "kurtosis" in this layer is excess kurtosis (normal = 0), so convert
+        # rather than show two conventions under one column name.
+        row["kurtosis"] = jb.get("kurtosis", np.nan) - 3.0
         row["jb_statistic"] = jb.get("statistic", np.nan)
         row["jb_pvalue"] = jb.get("pvalue", np.nan)
         row["ad_statistic"] = ad.get("statistic", np.nan)
@@ -627,7 +647,7 @@ def normality_report(df, columns: Sequence[Any] | None = None, *, alpha: float =
         "n", "skewness", "kurtosis", "jb_statistic", "jb_pvalue",
         "ad_statistic", "normal", "conclusion",
     ]
-    out = pd.DataFrame(rows, index=pd.Index(cols, name="column"))
+    out = pd.DataFrame(rows, index=_column_index(df, cols))
     return out.reindex(columns=order)
 
 
@@ -678,7 +698,13 @@ def correlation_report(
                 xj = _as_float(df[cols[j]])
                 r = _pair_corr(test, xi, xj)[0]
                 mat[i, j] = mat[j, i] = r
-        out = pd.DataFrame(mat, index=pd.Index(cols, name="column"), columns=cols)
+        index = _column_index(df, cols)
+        out = pd.DataFrame(
+            mat, index=index,
+            # Same levels on both axes for MultiIndex columns; a plain list
+            # otherwise, so flat frames keep their unnamed column axis.
+            columns=index if isinstance(index, pd.MultiIndex) else cols,
+        )
         return CorrelationReport(out, meta=meta) if rich else out
 
     rows = []
@@ -748,7 +774,7 @@ def missingness_report(df):
 
     return pd.DataFrame(
         rows,
-        index=pd.Index(list(df.columns), name="column"),
+        index=_column_index(df, list(df.columns)),
         columns=["dtype", "n_rows", "n_missing", "pct_missing", "n_finite", "n_infinite"],
     )
 
@@ -772,7 +798,22 @@ def rolling_report(
     ----------
     stats : sequence of {"mean", "std", "var", "count", "min", "max"}
     min_periods : int or None
-        Minimum valid observations per window. Defaults to ``window``.
+        Minimum valid observations per window. Defaults to ``window``, so
+        every reported value comes from a full window. Lowering it lets a
+        window with NaNs produce a value (together with
+        ``nan_policy="ignore"``) and, for ``alignment="centered"``, lets the
+        rows near either end use truncated windows. With
+        ``alignment="trailing"`` the first ``window - 1`` rows are always NaN:
+        unlike pandas, the trailing kernel never emits partial leading windows.
+    alignment : {"trailing", "centered"}
+        ``"trailing"`` (default): the value at row ``i`` covers rows
+        ``i - window + 1 .. i``. ``"centered"``: it covers ``window`` rows
+        around ``i``, and an even window takes its extra row on the left
+        (``i - window//2 .. i + (window-1)//2``), matching pandas
+        ``rolling(window, center=True)``. Rows too close to either end for a
+        full window are NaN unless ``min_periods`` is lowered. The ``count``
+        statistic is the raw number of valid values in each window and is
+        reported even where the other statistics are NaN.
     nan_policy : {"propagate", "ignore", "require_min_periods"}
         ``"propagate"`` (the default, matching the kernel) makes any window
         containing a NaN produce NaN.
@@ -809,6 +850,13 @@ def rolling_report(
     bad = [s for s in stats if s not in _ROLLING_STATS]
     if bad:
         raise ValueError(f"Unsupported stat(s) {bad}; valid: {list(_ROLLING_STATS)}")
+
+    _check_choice(alignment, ("trailing", "centered"), "alignment")
+    # The centered kernel accepts truncated windows at the edges when
+    # min_periods is left unset. A report column named "..._roll{window}_mean"
+    # must not silently hold 3-point means, so ask for full windows.
+    if alignment == "centered" and min_periods is None:
+        min_periods = window
 
     values = _as_float(df[column])
     roller = _bs.Rolling(
@@ -860,6 +908,12 @@ def bootstrap_ci_report(
     pandas.DataFrame
         Indexed by column: ``stat``, ``n``, ``n_missing``, ``estimate``,
         ``ci_lower``, ``ci_upper``, ``conf``.
+        ``estimate`` is the statistic of the sample itself; the interval is
+        a percentile bootstrap interval, which is too narrow for small
+        samples (see the warning on the ``rich=True`` result for n < 30).
+        For ``stat="std"`` both the estimate and the draws are the ddof=0
+        (population) standard deviation, which is smaller than
+        :func:`bunker_stats.std` by a factor ``sqrt((n - 1) / n)``.
     """
     pd = _pd()
     cols = _resolve_columns(df, columns)
@@ -871,6 +925,15 @@ def bootstrap_ci_report(
         random_state=random_state,
         nan_policy="omit",
     )
+    # BootstrapConfig has validated `stat` by now. The estimate must use the
+    # same estimator as the bootstrap draws or it can fall outside its own
+    # interval: the resampling kernel computes std with ddof=0, so the "std"
+    # estimate is the ddof=0 value too (the ddof=1 kernel, rescaled).
+    point = {
+        "mean": _bs.mean,
+        "median": _bs.median,
+        "std": lambda v: _bs.std(v) * math.sqrt((v.size - 1) / v.size),
+    }[stat]
 
     rows = []
     for col in cols:
@@ -886,12 +949,17 @@ def bootstrap_ci_report(
         if n < 2:
             row.update({"estimate": np.nan, "ci_lower": np.nan, "ci_upper": np.nan})
         else:
-            estimate, lower, upper = config.run(x)
-            row.update({"estimate": estimate, "ci_lower": lower, "ci_upper": upper})
+            # config.run's first value is the mean of the bootstrap draws,
+            # which differs from the statistic of the sample itself (visibly
+            # so for the median). Report the sample statistic as the estimate.
+            _, lower, upper = config.run(x)
+            row.update(
+                {"estimate": _safe(point, x), "ci_lower": lower, "ci_upper": upper}
+            )
         rows.append(row)
 
     order = ["stat", "n", "n_missing", "estimate", "ci_lower", "ci_upper", "conf"]
-    out = pd.DataFrame(rows, index=pd.Index(cols, name="column"))
+    out = pd.DataFrame(rows, index=_column_index(df, cols))
     out = out.reindex(columns=order)
     if rich:
         warnings = []
@@ -900,11 +968,14 @@ def bootstrap_ci_report(
                 f"n_resamples={n_resamples} is low; CI endpoints may be "
                 "unstable (>= 1000 recommended)"
             )
-        tiny = [str(c) for c in out.index[out["n"] < 10]]
+        tiny = [str(c) for c in out.index[out["n"] < 30]]
         if tiny:
             warnings.append(
-                f"small sample (n < 10) in column(s): {', '.join(tiny)} — "
-                "bootstrap CIs are unreliable"
+                f"small sample (n < 30) in column(s): {', '.join(tiny)} — "
+                "percentile bootstrap intervals are too narrow at small n "
+                "(a nominal 95% interval for a mean covers roughly 83% at "
+                "n = 5 and 93% at n = 30; intervals for a std are narrower "
+                "still)"
             )
         return BootstrapCIReport(
             out,
@@ -914,6 +985,9 @@ def bootstrap_ci_report(
                 "conf": conf,
                 "random_state": random_state,
                 "columns": list(cols),
+                "estimate": "the statistic of the sample (not the bootstrap mean)",
+                "std_ddof": 0 if stat == "std" else None,
+                "interval": "percentile bootstrap",
                 "nan_policy": "omit (non-finite dropped per column)",
             },
             warnings=warnings,
@@ -1353,7 +1427,46 @@ def _base_styler(frame):
         raise ImportError(_STYLER_HINT) from exc
 
 
+def _render_limit_note(frame) -> str | None:
+    """Explain pandas' render cap when `frame` is too big to show in full.
+
+    Above ``styler.render.max_elements`` cells pandas renders only the leading
+    rows/columns. Highlights further down are then simply absent from the
+    output, while the counts in a rich result still cover the whole frame.
+    """
+    pd = _pd()
+    try:
+        limit = int(pd.get_option("styler.render.max_elements"))
+    except (KeyError, TypeError, ValueError):  # option absent in old pandas
+        return None
+    if frame.size <= limit:
+        return None
+    return (
+        f"this table has {frame.size:,} cells but pandas renders at most "
+        f"{limit:,} (styler.render.max_elements), so the display is truncated "
+        "and highlighted cells beyond it are not shown. Style a filtered "
+        "subset of rows, or raise the option"
+    )
+
+
+def _warn_render_limit(frame) -> None:
+    """Emit the render-limit note as a UserWarning attributed to the caller.
+
+    Helpers call each other (``iqr_outlier_style`` -> ``outlier_style``), so a
+    fixed ``stacklevel`` points into this file for some of them. Walk out of
+    this module instead, so the warning always shows the user's own line.
+    """
+    note = _render_limit_note(frame)
+    if not note:
+        return
+    level, caller = 1, sys._getframe(1)
+    while caller is not None and caller.f_code.co_filename == __file__:
+        level, caller = level + 1, caller.f_back
+    _warnings.warn(note, UserWarning, stacklevel=level + 1)
+
+
 def _apply_css(frame, css):
+    _warn_render_limit(frame)
     return _base_styler(frame).apply(lambda _: css, axis=None)
 
 
@@ -1578,6 +1691,7 @@ def corr_heatmap(
         np.where(np.isfinite(matrix), "", undefined),
         index=corr.index, columns=corr.columns,
     )
+    _warn_render_limit(corr)
     styler = (
         _base_styler(corr)
         .background_gradient(cmap=cmap, vmin=-1.0, vmax=1.0)
@@ -2367,6 +2481,11 @@ class StyleResult:
         self.frame = frame
         self.metadata = dict(metadata)
         self._warnings = list(warnings or [])
+        # Counts in `metadata` describe the whole frame; say so when the
+        # rendered table cannot show all of it.
+        note = _render_limit_note(frame) if styler is not None else None
+        if note and note not in self._warnings:
+            self._warnings.append(note)
 
     @property
     def styler(self):

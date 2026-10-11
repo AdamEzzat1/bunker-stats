@@ -2,24 +2,11 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use statrs::distribution::{ContinuousCDF, StudentsT};
 
 use super::common::{mean, reject_nonfinite, var_sample, Alternative};
 
 fn p_from_t(t: f64, df: f64, alt: Alternative) -> f64 {
-    // Student-t with mean 0, scale 1
-    let dist = StudentsT::new(0.0, 1.0, df).unwrap();
-    let cdf = dist.cdf(t);
-
-    match alt {
-        Alternative::TwoSided => {
-            // two-sided p = 2 * min(CDF(t), 1-CDF(t))
-            let tail = if cdf < 0.5 { cdf } else { 1.0 - cdf };
-            (2.0 * tail).clamp(0.0, 1.0)
-        }
-        Alternative::Less => cdf.clamp(0.0, 1.0),
-        Alternative::Greater => (1.0 - cdf).clamp(0.0, 1.0),
-    }
+    super::common::t_pvalue(t, df, alt)
 }
 
 /// One-sample t-test vs `popmean`.
@@ -66,7 +53,8 @@ pub fn t_test_1samp_np(
 
     let df = (n - 1) as f64;
     let alt = Alternative::from_str(alternative)?;
-    let p = if t.is_finite() { p_from_t(t, df, alt) } else { 0.0 };
+    // t_pvalue handles an infinite or NaN statistic itself.
+    let p = p_from_t(t, df, alt);
 
     let d = PyDict::new_bound(py);
     d.set_item("statistic", t)?;
