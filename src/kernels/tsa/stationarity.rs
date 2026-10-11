@@ -162,7 +162,7 @@ pub fn adf_test(x: PyReadonlyArray1<f64>, regression: &str, max_lag: Option<usiz
         return Ok((f64::NAN, f64::NAN));
     }
 
-match df_ols(x, reg, p) {
+    match df_ols(x, reg, p) {
         Some((t_stat, _, _, _, _, _, _)) => Ok((t_stat, df_pvalue(t_stat, n, reg))),
         None => Ok((f64::NAN, f64::NAN)),
     }
@@ -459,7 +459,7 @@ pub fn variance_ratio_test(x: PyReadonlyArray1<f64>, lags: usize) -> PyResult<(f
 
     // `q >= n` first: `q + 2` wraps for an absurd lag.
     if q < 2 || q >= n || n < q + 2 {
-return Ok((f64::NAN, f64::NAN, f64::NAN));
+        return Ok((f64::NAN, f64::NAN, f64::NAN));
     }
 
     let nf = n as f64;

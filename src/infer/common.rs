@@ -24,6 +24,46 @@ impl Alternative {
     }
 }
 
+/// Below this the chi-square tail is evaluated in log space.
+///
+/// statrs' upper incomplete gamma returns exactly 0 once the prefactor of its
+/// continued fraction underflows (`exp` of less than about -709.8), i.e. for
+/// anything under ~2.2e-308, although f64 can represent values down to
+/// 4.9e-324. Doing the arithmetic on logarithms and exponentiating once keeps
+/// those. (Its incomplete beta, behind the t and F tails, already does.)
+const LOG_SPACE_BELOW: f64 = 1e-290;
+
+/// `ln Q(a, x)`, the log of the regularized upper incomplete gamma function,
+/// by the modified Lentz continued fraction. Requires `x > a + 1`.
+fn ln_gamma_q(a: f64, x: f64) -> f64 {
+    use statrs::function::gamma::ln_gamma;
+
+    const TINY: f64 = 1e-300;
+    let mut b = x + 1.0 - a;
+    let mut c = 1.0 / TINY;
+    let mut d = 1.0 / b;
+    let mut h = d;
+    for i in 1..10_000 {
+        let an = -(i as f64) * (i as f64 - a);
+        b += 2.0;
+        d = an * d + b;
+        if d.abs() < TINY {
+            d = TINY;
+        }
+        c = b + an / c;
+        if c.abs() < TINY {
+            c = TINY;
+        }
+        d = 1.0 / d;
+        let delta = d * c;
+        h *= delta;
+        if (delta - 1.0).abs() < 1e-16 {
+            break;
+        }
+    }
+    -x + a * x.ln() - ln_gamma(a) + h.ln()
+}
+
 /// Upper tail `P(T > t)` of a Student-t with `df` degrees of freedom, `t >= 0`.
 ///
 /// Evaluated as the lower tail at `-t` (the distribution is symmetric), never
@@ -96,7 +136,12 @@ pub fn chi2_sf(stat: f64, df: f64) -> f64 {
     if stat.is_infinite() {
         return 0.0;
     }
-    gamma_ur(0.5 * df, 0.5 * stat).clamp(0.0, 1.0)
+    let (a, x) = (0.5 * df, 0.5 * stat);
+    let q = gamma_ur(a, x);
+    if q < LOG_SPACE_BELOW && x > a + 1.0 {
+        return ln_gamma_q(a, x).exp();
+    }
+    q.clamp(0.0, 1.0)
 }
 
 /// Upper tail `P(F >= f)` of an F distribution with `(df1, df2)` degrees of
@@ -591,7 +636,7 @@ mod tail_tests {
         assert!(chi2_sf(f64::NAN, 3.0).is_nan());
         assert!(chi2_sf(1.0, 0.0).is_nan());
         assert!(chi2_sf(1.0, f64::NAN).is_nan());
-        // true value 3e-2651: underflows, and must do so to 0, not NaN
+        // true value 3e-2651: beyond even the subnormals, so exactly 0, not NaN
         assert_eq!(f_sf(1e8, 2.0, 1000.0), 0.0);
         assert_eq!(chi2_sf(1e6, 4.0), 0.0);
 
@@ -613,6 +658,95 @@ mod tail_tests {
         for &(f, d1, d2) in &[(0.3, 4.0, 7.0), (1.0, 59.0, 2.0), (2.2, 100.0, 1.0), (5.0, 3.0, 3.0)] {
             let total = f_sf(f, d1, d2) + f_sf(1.0 / f, d2, d1);
             assert!((total - 1.0).abs() < 1e-12, "f={f} ({d1}, {d2}): {total}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod subnormal_tail_tests {
+    use super::*;
+
+    /// Relative error allowed for a reference this small: 1e-9, plus one unit
+    /// in the last place of a subnormal (they are spaced 4.9e-324 apart, so a
+    /// value of 2e-321 has only about three significant digits).
+    fn tol(want: f64) -> f64 {
+        1e-9 + 2.0 * 5e-324 / want
+    }
+
+    fn rel(a: f64, b: f64) -> f64 {
+        ((a - b) / b).abs()
+    }
+
+    // References: mpmath at 60 digits. The chi-square tail used to be exactly
+    // 0 for everything under 2.2e-308; the F and t tails already reached the
+    // subnormals and are pinned here so that they keep doing so.
+
+    #[test]
+    fn chi2_tail_reaches_the_subnormals() {
+        let cases: &[(f64, f64, f64)] = &[
+            (1380.0, 1.0, 4.6611584556739129e-302),
+            (1600.0, 60.0, 6.6603915170946478e-295),
+            (1430.0, 2.0, 3.0160979341335354e-311),
+            (1440.0, 3.0, 6.1573751843156457e-312),
+            (1500.0, 10.0, 2.5205290499993794e-316),
+            (1460.0, 2.0, 9.2263135691221139e-318),
+            (1480.0, 2.0, 4.1887398800480489e-322),
+        ];
+        for &(x, df, want) in cases {
+            let p = chi2_sf(x, df);
+            assert!(p > 0.0 && rel(p, want) < tol(want), "chi2_sf({x}, {df}) = {p:e}, want {want:e}");
+        }
+    }
+
+    #[test]
+    fn f_tail_reaches_the_subnormals() {
+        let cases: &[(f64, f64, f64, f64)] = &[
+            (62.0, 30.0, 3000.0, 2.8151387607548225e-287),
+            (1900.0, 1.0, 2000.0, 2.3587769146868521e-292),
+            (160000000.0, 3.0, 90.0, 1.4713208488041584e-302),
+            (420000000.0, 3.0, 90.0, 2.0271730957439737e-321),
+        ];
+        for &(f, d1, d2, want) in cases {
+            let p = f_sf(f, d1, d2);
+            assert!(p > 0.0 && rel(p, want) < tol(want), "f_sf({f}, {d1}, {d2}) = {p:e}, want {want:e}");
+        }
+    }
+
+    #[test]
+    fn t_tail_reaches_the_subnormals() {
+        let cases: &[(f64, f64, f64)] = &[
+            (60.0, 800.0, 1.1158566140515707e-298),
+            (45.0, 2000.0, 2.3089162536949162e-306),
+            (45.5, 2000.0, 3.2050979215472708e-311),
+            (63.0, 800.0, 1.1325547603843053e-312),
+            (37.9, 100000.0, 2.1455760389286134e-312),
+            (4e20, 15.5, 7.7962381624257362e-312),
+        ];
+        for &(t, df, want) in cases {
+            let p = t_pvalue(t, df, Alternative::Greater);
+            assert!(p > 0.0 && rel(p, want) < tol(want), "t={t} df={df}: {p:e}, want {want:e}");
+            let two = t_pvalue(-t, df, Alternative::TwoSided);
+            assert!(rel(two, 2.0 * want) < tol(want), "two-sided t={t} df={df}: {two:e}");
+        }
+    }
+
+    /// Past the last subnormal the answer is 0, never NaN or a negative.
+    #[test]
+    fn beyond_the_subnormals_is_zero() {
+        assert_eq!(chi2_sf(1e6, 4.0), 0.0);
+        assert_eq!(chi2_sf(1500.0, 2.0), 0.0); // 2e-326
+        assert_eq!(f_sf(2.5e6, 2.0, 150.0), 0.0); // 6e-340
+        assert_eq!(t_pvalue(62000.0, 90.0, Alternative::Greater), 0.0); // 2e-345
+    }
+
+    /// The log-space branch must agree with the library where both work.
+    #[test]
+    fn log_space_matches_the_library_above_the_switch() {
+        use statrs::function::gamma::gamma_ur;
+
+        for &(a, x) in &[(1.0, 30.0), (2.5, 80.0), (30.0, 200.0), (0.5, 300.0), (200.0, 600.0)] {
+            let (lib, ours) = (gamma_ur(a, x), ln_gamma_q(a, x).exp());
+            assert!(rel(ours, lib) < 1e-11, "Q({a}, {x}): {ours:e} vs {lib:e}");
         }
     }
 }

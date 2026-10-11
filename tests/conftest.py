@@ -49,6 +49,29 @@ def pytest_terminal_summary(terminalreporter, exitstatus: int, config: pytest.Co
         for nodeid, reason in _SKIPPED:
             terminalreporter.line(f"SKIPPED {nodeid}: {reason}")
 
+def _best_time(fn, repeats: int = 5) -> float:
+    """Shortest of `repeats` timings of ``fn()``, in seconds.
+
+    A single wall-clock reading measures the machine as much as the code: one
+    scheduler hiccup or a cold cache fails a test that asserts on it. The
+    minimum over a few runs is the standard estimate of what the code costs
+    (as in ``timeit``), and a noisy neighbour can only make it larger.
+    """
+    import time
+
+    best = float("inf")
+    for _ in range(repeats):
+        start = time.perf_counter()
+        fn()
+        best = min(best, time.perf_counter() - start)
+    return best
+
+
+@pytest.fixture
+def best_time():
+    return _best_time
+
+
 @pytest.fixture(scope="session")
 def bs_debug(request: pytest.FixtureRequest) -> bool:
     return bool(request.config.getoption("--bs-debug"))

@@ -957,42 +957,33 @@ class TestMathematicalProperties:
 class TestPerformance:
     """Performance and large-scale tests"""
     
-    def test_large_array_exponential(self, rng):
+    def test_large_array_exponential(self, rng, best_time):
         """Should handle large arrays efficiently"""
         x = rng.exponential(1.0, 100000)
-        
-        import time
-        start = time.time()
+
         pdf = bs.exp_pdf(x, lam=1.0)
-        elapsed = time.time() - start
-        
-        assert elapsed < 0.1  # Should be very fast
+        # best of 5: a single reading fails on a busy machine
+        assert best_time(lambda: bs.exp_pdf(x, lam=1.0)) < 0.1
         assert pdf.shape == x.shape
         assert np.all(pdf >= 0)
     
-    def test_large_array_normal(self, rng):
+    def test_large_array_normal(self, rng, best_time):
         """Should handle large arrays efficiently"""
         x = rng.normal(0, 1, 100000)
-        
-        import time
-        start = time.time()
+
         pdf = bs.norm_pdf(x)
-        elapsed = time.time() - start
-        
-        assert elapsed < 0.1  # Should be very fast
+        # best of 5: a single reading fails on a busy machine
+        assert best_time(lambda: bs.norm_pdf(x)) < 0.1
         assert pdf.shape == x.shape
         assert np.all(pdf >= 0)
     
-    def test_large_array_uniform(self, rng):
+    def test_large_array_uniform(self, rng, best_time):
         """Should handle large arrays efficiently"""
         x = rng.uniform(0, 1, 100000)
-        
-        import time
-        start = time.time()
+
         pdf = bs.unif_pdf(x, a=0.0, b=1.0)
-        elapsed = time.time() - start
-        
-        assert elapsed < 0.1  # Should be very fast
+        # best of 5: a single reading fails on a busy machine
+        assert best_time(lambda: bs.unif_pdf(x, a=0.0, b=1.0)) < 0.1
         assert pdf.shape == x.shape
 
 

@@ -1282,7 +1282,7 @@ mod quantile_bin_tests {
 
 #[pyfunction]
 fn quantile_bins_np<'py>(
-py: Python<'py>,
+    py: Python<'py>,
     a: PyReadonlyArray1<f64>,
     n_bins: usize,
 ) -> PyResult<Bound<'py, PyArray1<i64>>> {

@@ -385,7 +385,7 @@ pub(crate) fn qn_scale_slice(xs: &[f64]) -> f64 {
     let n_neg = xs.iter().filter(|v| **v == f64::NEG_INFINITY).count();
     if n_pos + n_neg == 0 {
         return kth_pairwise_abs_diff(xs, k) * QN_CONSISTENCY;
-}
+    }
 
     let finite: Vec<f64> = xs.iter().copied().filter(|v| v.is_finite()).collect();
     let m = finite.len();
@@ -800,7 +800,7 @@ mod qn_tests {
     fn fast_qn_matches_brute_force_bit_for_bit() {
         let mut state = 0x9E3779B97F4A7C15u64;
         for n in 2..=120usize {
-for shape in 0..4 {
+            for shape in 0..4 {
                 let xs: Vec<f64> = (0..n)
                     .map(|_| {
                         let u = lcg(&mut state);

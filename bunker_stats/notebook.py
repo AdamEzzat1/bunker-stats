@@ -37,8 +37,9 @@ Conditions that make a result *misleading* are collected in ``.warnings`` on a
 rich result. A few mean the returned numbers are not what they appear to be,
 and those are also raised as a :class:`UserWarning` on the plain path: integer
 values too large for float64, a derived column replacing an existing one,
-robust scaling with a zero MAD, too few bootstrap resamples, and a table too
-large for pandas to render in full.
+robust scaling with a zero MAD, too few bootstrap resamples, a bootstrap
+interval from fewer than 30 values, and a table too large for pandas to render
+in full.
 
 Copy semantics
 --------------
@@ -1234,12 +1235,15 @@ def rolling_report(
         min_periods = window
 
     values = _as_float(df[column])
+    # full_length: one value per row, with partial leading windows once
+    # min_periods is met (a no-op for centered, which is already full length).
     roller = _bs.Rolling(
         values,
         window=window,
         min_periods=min_periods,
         alignment=alignment,
         nan_policy=nan_policy,
+        full_length=True,
     )
     computed = roller.aggregate(*stats)
 
@@ -1252,31 +1256,6 @@ def rolling_report(
             padded[n - arr.size:] = arr
             arr = padded
         out[_suffixed(column, f"_roll{window}_{stat}")] = arr
-
-    lead = window - 1
-    if alignment == "trailing" and min_periods is not None and min_periods < window and lead:
-        # The trailing kernel returns one value per *full* window, so the
-        # padding above leaves the first window - 1 rows NaN whatever
-        # min_periods says. Those rows have partial windows x[0..i]. Get them
-        # from the same kernel by putting window - 1 NaNs in front of the
-        # head of the series and skipping NaNs: the i-th full window of that
-        # array holds exactly x[0..i] plus padding.
-        head = np.concatenate([np.full(lead, np.nan), values[:lead]])
-        partial = _bs.Rolling(
-            head, window=window, min_periods=min_periods,
-            alignment="trailing", nan_policy="ignore",
-        ).aggregate(*stats)
-        # Skipping NaNs was for the padding. Under "propagate" a real NaN in
-        # the partial window still makes every statistic but the count NaN.
-        poisoned = (
-            np.maximum.accumulate(np.isnan(values[:lead]))
-            if nan_policy == "propagate" else np.zeros(lead, dtype=bool)
-        )
-        for stat, arr in zip(stats, out.values()):
-            rows = np.asarray(partial[stat], dtype=np.float64).copy()
-            if stat != "count":
-                rows[poisoned] = np.nan
-            arr[:lead] = rows
 
     frame = pd.DataFrame(out, index=df.index)
     if isinstance(df.columns, pd.MultiIndex):
@@ -1340,7 +1319,8 @@ def bootstrap_ci_report(
         ``ci_lower``, ``ci_upper``, ``conf``.
         ``estimate`` is the statistic of the sample itself; the interval is
         a percentile bootstrap interval, which is too narrow for small
-        samples (see the warning on the ``rich=True`` result for n < 30).
+        samples; a column with n < 30 raises a ``UserWarning`` saying so (or,
+        with ``rich=True``, a note in ``.warnings``).
         For ``stat="std"`` both the estimate and the draws are the ddof=0
         (population) standard deviation, which is smaller than
         :func:`bunker_stats.std` by a factor ``sqrt((n - 1) / n)``.
@@ -1411,6 +1391,19 @@ def bootstrap_ci_report(
     order = ["stat", "n", "n_missing", "estimate", "ci_lower", "ci_upper", "conf"]
     out = pd.DataFrame(rows, index=_column_index(df, cols))
     out = out.reindex(columns=order)
+    tiny = [str(c) for c in out.index[out["n"] < 30]]
+    small_sample = (
+        f"small sample (n < 30) in column(s): {', '.join(tiny)} — "
+        "percentile bootstrap intervals are too narrow at small n "
+        "(a nominal 95% interval for a mean covers roughly 83% at "
+        "n = 5 and 93% at n = 30; intervals for a std are narrower "
+        "still)"
+        if tiny else None
+    )
+    if small_sample and not rich:
+        # The interval looks like any other but under-covers, so say so
+        # without requiring rich=True.
+        _warn(small_sample)
     if rich:
         warnings = []
         if few_resamples:
@@ -1420,15 +1413,8 @@ def bootstrap_ci_report(
                 f"n_resamples={n_resamples} is low; CI endpoints may be "
                 "unstable (>= 1000 recommended)"
             )
-        tiny = [str(c) for c in out.index[out["n"] < 30]]
-        if tiny:
-            warnings.append(
-                f"small sample (n < 30) in column(s): {', '.join(tiny)} — "
-                "percentile bootstrap intervals are too narrow at small n "
-                "(a nominal 95% interval for a mean covers roughly 83% at "
-                "n = 5 and 93% at n = 30; intervals for a std are narrower "
-                "still)"
-            )
+        if small_sample:
+            warnings.append(small_sample)
         return BootstrapCIReport(
             out,
             meta={
@@ -2769,7 +2755,8 @@ def scale_compare_style(
     *,
     threshold: float = 3.0,
     scale_factor: float = _MAD_TO_SIGMA,
-    suffixes: Sequence[str] = ("_zscore", "_robust_z"),
+    suffixes: Sequence[str] | None = None,
+    suffix: Sequence[str] | None = None,
     theme: Any = "default",
     rich: bool = False,
 ):
@@ -2781,8 +2768,10 @@ def scale_compare_style(
     classical one are the signature of *masking*: extreme values inflating the
     mean and std enough to hide themselves.
 
-    ``suffixes`` is a pair because this helper adds two columns (as in
-    ``pandas.merge``); the single-column helpers take ``suffix``.
+    This helper adds two columns, so the suffix is a pair, default
+    ``("_zscore", "_robust_z")``. It is accepted as ``suffix=`` like on every
+    other helper, and as ``suffixes=`` (the original name, as in
+    ``pandas.merge``).
 
     The input DataFrame is never modified. When the MAD is 0 (more than half
     the values are identical) the robust score is undefined and its column is
@@ -2796,10 +2785,21 @@ def scale_compare_style(
     _check_stylable(df)
     threshold = _check_positive(threshold, "threshold")
     scale_factor = _check_positive(scale_factor, "scale_factor")
-    suffixes = tuple(suffixes)
+    if suffix is not None and suffixes is not None and tuple(suffix) != tuple(suffixes):
+        raise TypeError(
+            f"got both suffix={tuple(suffix)!r} and suffixes={tuple(suffixes)!r}; "
+            "they are the same option, pass only `suffix`"
+        )
+    chosen = suffix if suffix is not None else suffixes
+    if isinstance(chosen, str):
+        raise TypeError(
+            "this helper adds two columns, so the suffix must be a pair of "
+            f"strings, got the single string {chosen!r}"
+        )
+    suffixes = ("_zscore", "_robust_z") if chosen is None else tuple(chosen)
     if len(suffixes) != 2 or suffixes[0] == suffixes[1]:
         raise ValueError(
-            f"`suffixes` must be two different strings, got {suffixes!r}"
+            f"`suffix` must be two different strings, got {suffixes!r}"
         )
     z_col = _derived_name(column, suffixes[0], "suffixes")
     r_col = _derived_name(column, suffixes[1], "suffixes")

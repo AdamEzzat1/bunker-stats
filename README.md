@@ -75,6 +75,28 @@ Kernel fixes (Rust):
   digits. This reaches `robust_summary`, `describe_fast` and
   `robust_fit(scale="qn")`. No finite-sample correction is applied (as in
   statsmodels; R's `robustbase::Qn` applies one by default).
+- **`corr_matrix(skipna=True)` is pairwise-complete.** It divided the
+  pairwise covariance by standard deviations taken over each column's own
+  rows, which is not the correlation of any one set of rows when columns are
+  missing in different places (−0.696 where `DataFrame.corr()` gives −0.671
+  on an 8×3 example) and could leave [−1, 1]. Each pair that involves a
+  column with gaps is now computed on its own rows. **Results change** for
+  data with missing values; gap-free data is unchanged.
+- **Chi-square p-values between 4.9e-324 and 2.2e-308 are reported instead
+  of 0.** The chi-square tail gave exactly 0 below the smallest *normal*
+  float although smaller values are representable (the t and F tails already
+  reached them). It is now evaluated in log space there and checked against
+  60-digit references, for `chi2_gof`, `chi2_independence`, `bartlett_test`,
+  `jarque_bera` and the time-series tests. A p-value of exactly 0.0 means
+  the true value is below 4.9e-324.
+- **Permutation tests can be interrupted.** `permutation_corr_test` and
+  `permutation_mean_diff_test` do not store anything per permutation, so a
+  huge `n_permutations` neither fails nor aborts: it runs. They now work in
+  batches and check for Ctrl-C between them. Results are unchanged.
+- **`Rolling(..., full_length=True)`** returns one value per observation for a
+  trailing window, as pandas does: the first `window - 1` rows use partial
+  windows and honour `min_periods`. The default output (`n - window + 1`
+  values, one per full window) is unchanged. `rolling_report` uses it.
 - **t-based p-values are accurate in the far tail.** Upper tails were
   computed as `1 - cdf(t)`, which cancels below about 1e-16, so
   `pearson_corr_test`, `spearman_corr_test`, `t_test_1samp`, `t_test_2samp`
@@ -192,7 +214,8 @@ Further notebook-layer fixes:
 - **Warnings that were only on the rich result are also raised as
   `UserWarning` on the plain path** when they change what the numbers mean: a
   derived column replacing an existing one, robust scaling with a zero MAD
-  (the output is ~1e12, not a score), fewer than 100 bootstrap resamples.
+  (the output is ~1e12, not a score), fewer than 100 bootstrap resamples, a
+  bootstrap interval from fewer than 30 values (it under-covers).
   New: integer columns beyond 2**53 warn, because float64 collapses nearby
   values (`2**53 + [1, 3, 5, 2, 4]` has std 1.58; the computed value is 2.24).
 - New notes on rich results: a z-score threshold the sample size can never
@@ -216,17 +239,13 @@ Further notebook-layer fixes:
 - **`bunker_stats.pandas.corr_df` / `cov_df` default to `skipna=True`.** One
   NaN used to make the whole matrix NaN. They are now pairwise-complete, like
   `DataFrame.corr()` / `.cov()` and `correlation_report`, and ±inf is skipped
-  along with NaN. `skipna=False` keeps the strict behaviour. `corr_df` takes
-  both standard deviations from the pair's own rows, as pandas does. The
-  lower-level `corr_matrix(skipna=True)` deliberately does not (it
-  standardizes each column once, over that column's own rows; see the matrix
-  kernel README), so the two differ slightly when columns are missing in
-  different places.
+  along with NaN. `skipna=False` keeps the strict behaviour.
 - **One name per option.** `suffix=` works on every helper that adds a column;
   `add_suffix=` (on `zscore_style`, `demean_style`, `robust_scale_column`) is
   kept as an alias. Outlier style metadata carries `lower_bound` /
   `upper_bound` as well as `lower_fence` / `upper_fence`, matching
-  `outlier_report`. `scale_compare_style` keeps `suffixes`, since it adds two.
+  `outlier_report`. `scale_compare_style` takes its pair of suffixes as
+  `suffix=` too (`suffixes=` still works).
 - The Anderson-Darling p-value no longer flattens out at 5e-31: beyond the
   published fit it is continued log-linearly, so stronger departures still
   get smaller p-values. Treat values that small as an order of magnitude.
@@ -252,9 +271,8 @@ Further notebook-layer fixes:
   window.** The first `window - 1` rows were NaN whatever `min_periods` said;
   they now hold partial-window values once enough observations are in, as
   pandas `rolling(window, min_periods=m)` does, and match it on every row.
-  The default (`min_periods = window`) is unchanged. `bs.Rolling` itself
-  still returns one value per full window for trailing alignment (its output
-  is `n - window + 1` long, so it has no leading rows).
+  The default (`min_periods = window`) is unchanged. `bs.Rolling` has the
+  same behaviour behind `full_length=True`.
 - **Stylers warn when pandas will truncate the table.** Past
   `styler.render.max_elements` (262,144 cells by default) pandas renders only
   the leading rows, so highlights further down were silently missing while

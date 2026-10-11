@@ -111,7 +111,7 @@ fn mann_whitney_asymptotic(x: &[f64], y: &[f64], alt: Alternative) -> (f64, f64)
         Alternative::Greater => norm_sf(z),
         Alternative::Less => norm_cdf(z),
     }
-.clamp(0.0, 1.0);
+    .clamp(0.0, 1.0);
 
     // statistic returned: SciPy returns min(U1, U2) for two-sided, else U1
     let stat = match alt {

@@ -34,7 +34,7 @@ pub fn t_test_1samp_np(
     if !v.is_finite() || v < 0.0 {
         return Err(PyValueError::new_err(format!(
             "variance is not finite: var={:.6e}, mean={:.6e}, n={}",
-v, m, n
+            v, m, n
         )));
     }
 
@@ -115,7 +115,7 @@ pub fn t_test_2samp_np(
             // absolute tolerance (this was `< 1e-15`) calls 1e-20 and 2e-20
             // equal, and the means of constant samples are exact.
             if m1 == m2 {
-0.0
+                0.0
             } else {
                 f64::INFINITY * (m1 - m2).signum()
             }
@@ -132,7 +132,7 @@ pub fn t_test_2samp_np(
             // absolute tolerance (this was `< 1e-15`) calls 1e-20 and 2e-20
             // equal, and the means of constant samples are exact.
             if m1 == m2 {
-0.0
+                0.0
             } else {
                 f64::INFINITY * (m1 - m2).signum()
             }

@@ -75,17 +75,5 @@ def corr_df(df, columns=None, *, skipna: bool = True):
     """
     pd = _pd()
     matrix, cols = _numeric_frame(df, columns, skipna=skipna)
-    if skipna:
-        # One pair at a time, on the pair's own rows. corr_matrix(skipna=True)
-        # divides the pairwise covariance by standard deviations taken over
-        # each column's *own* rows, which is not the pairwise correlation
-        # whenever the two columns are missing in different places.
-        k = len(cols)
-        m = np.full((k, k), np.nan)
-        columns_ = [np.ascontiguousarray(matrix[:, j]) for j in range(k)]
-        for i in range(k):
-            for j in range(i, k):
-                m[i, j] = m[j, i] = _bs.corr_skipna(columns_[i], columns_[j])
-    else:
-        m = np.asarray(_bs.corr_matrix(matrix, skipna=False))
+    m = np.asarray(_bs.corr_matrix(matrix, skipna=skipna))
     return pd.DataFrame(m, index=pd.Index(cols, name="column"), columns=cols)
