@@ -14,3 +14,4 @@ pub mod config;
 pub mod masks;
 pub mod multi;
 pub mod multi_axis0;
+pub(crate) mod moments;

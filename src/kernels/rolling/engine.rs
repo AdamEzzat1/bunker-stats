@@ -1,80 +1,82 @@
+use super::moments::{Kahan, RollingMoments, RunningSum};
+
+/// Slide a window of `window` values over `xs`, calling `emit(k, moments)` for
+/// the k-th window (`xs[k..k + window]`).
+///
+/// The moments are updated in O(1) per step and re-summed from the window
+/// whenever `RollingMoments` reports that rounding error has built up, so no
+/// window is affected by values that have already left it.
+#[inline]
+pub(crate) fn for_each_window<S: RunningSum>(
+    xs: &[f64],
+    window: usize,
+    mut emit: impl FnMut(usize, &RollingMoments<S>),
+) {
+    let n = xs.len();
+    if window == 0 || window > n {
+        return;
+    }
+    let mut m = RollingMoments::<S>::new(&xs[..window]);
+    emit(0, &m);
+    for i in window..n {
+        m.remove(xs[i - window]);
+        m.add(xs[i]);
+        if m.needs_refresh() {
+            m.refresh(&xs[i + 1 - window..=i]);
+        }
+        emit(i + 1 - window, &m);
+    }
+}
+
+/// Like `for_each_window`, but with one call per input position: `emit(i, m)`
+/// sees the trailing window ending at `i`, which is shorter than `window` for
+/// the first `window - 1` positions.
+#[inline]
+pub(crate) fn for_each_trailing_window<S: RunningSum>(
+    xs: &[f64],
+    window: usize,
+    mut emit: impl FnMut(usize, &RollingMoments<S>),
+) {
+    if window == 0 {
+        return;
+    }
+    let mut m = RollingMoments::<S>::default();
+    for i in 0..xs.len() {
+        m.add(xs[i]);
+        if i >= window {
+            m.remove(xs[i - window]);
+        }
+        if m.needs_refresh() {
+            m.refresh(&xs[(i + 1).saturating_sub(window)..=i]);
+        }
+        emit(i, &m);
+    }
+}
+
+/// Sample standard deviation (ddof = 1) of a strict window: NaN if the window
+/// holds any NaN or infinity, or fewer than two values.
+#[inline(always)]
+pub(crate) fn strict_std<S: RunningSum>(m: &RollingMoments<S>) -> f64 {
+    m.var(1, false).sqrt()
+}
+
+/// Rolling mean and sample std (ddof = 1) over full windows; `n - window + 1`
+/// outputs each. A window containing NaN gives NaN for both; later windows are
+/// unaffected.
 pub(crate) fn rolling_mean_std_vec(xs: &[f64], window: usize) -> (Vec<f64>, Vec<f64>) {
     let n = xs.len();
     if window == 0 || window > n {
         return (Vec::new(), Vec::new());
     }
 
-    // Kahan-compensated rolling sums (more accurate than naive sum/sumsq, minimal overhead)
-    #[inline(always)]
-    fn kahan_add(sum: &mut f64, c: &mut f64, x: f64) {
-        let y = x - *c;
-        let t = *sum + y;
-        *c = (t - *sum) - y;
-        *sum = t;
-    }
-
     let out_len = n - window + 1;
     let mut means = Vec::with_capacity(out_len);
     let mut stds = Vec::with_capacity(out_len);
-
-    // Variance is translation-invariant, so we accumulate on values shifted by a
-    // finite constant `off`. Without this, `sumsq - sum^2/w` subtracts two
-    // O(magnitude^2) quantities whose difference is only O(spread^2): for
-    // large-offset data (e.g. ~1e8) that is catastrophic cancellation, and the
-    // old `.max(0.0)` then silently reported a *wrong zero* variance. Shifting by
-    // a value near the data magnitude keeps the accumulators O(spread^2).
-    // `off` must be finite so a NaN at xs[0] does not poison every window.
-    let off = if xs[0].is_finite() { xs[0] } else { 0.0 };
-
-    let mut sum = 0.0f64;
-    let mut sum_c = 0.0f64;
-    let mut sumsq = 0.0f64;
-    let mut sumsq_c = 0.0f64;
-    // Separate Kahan sum over RAW (unshifted) values, used only for the mean.
-    // Deriving the mean from the shifted sum as `sum/w + off` loses precision
-    // when |off| is huge relative to the true mean: the division result is
-    // O(off) and adding `off` back cancels. Example: [1e10, 1, -1e10, 1, 1] has
-    // mean 0.6, but `sum/w + off` rounds to ~0.6 ± 4e-7 at the 1e10 scale. The
-    // raw sum stays O(spread) under Kahan compensation and stays exact.
-    let mut sum_raw = 0.0f64;
-    let mut sum_raw_c = 0.0f64;
-
-    for &x in &xs[..window] {
-        let xs_ = x - off;
-        kahan_add(&mut sum, &mut sum_c, xs_);
-        kahan_add(&mut sumsq, &mut sumsq_c, xs_ * xs_);
-        kahan_add(&mut sum_raw, &mut sum_raw_c, x);
-    }
-
-    let mut push_stats = |sum_raw: f64, sum: f64, sumsq: f64| {
-        // Mean from the raw sum (accurate at any offset); variance from the
-        // shifted moments (translation-invariant and cancellation-safe).
-        let mean = sum_raw / window as f64;
-        // Sample variance (ddof=1). Clamp only genuine tiny-negative FP noise;
-        // preserve NaN (e.g. a NaN in the window) rather than masking it to 0.
-        let var = (sumsq - (sum * sum) / window as f64) / ((window - 1) as f64);
-        let std = if var.is_nan() { f64::NAN } else { var.max(0.0).sqrt() };
-        means.push(mean);
-        stds.push(std);
-    };
-
-    push_stats(sum_raw, sum, sumsq);
-
-    for i in window..n {
-        let x_new = xs[i] - off;
-        let x_old = xs[i - window] - off;
-        kahan_add(&mut sum, &mut sum_c, x_new);
-        kahan_add(&mut sum, &mut sum_c, -x_old);
-
-        kahan_add(&mut sumsq, &mut sumsq_c, x_new * x_new);
-        kahan_add(&mut sumsq, &mut sumsq_c, -(x_old * x_old));
-
-        kahan_add(&mut sum_raw, &mut sum_raw_c, xs[i]);
-        kahan_add(&mut sum_raw, &mut sum_raw_c, -xs[i - window]);
-
-        push_stats(sum_raw, sum, sumsq);
-    }
-
+    // Kahan sums: these are the reference-accuracy 1-D kernels.
+    for_each_window::<Kahan>(xs, window, |_, m| {
+        means.push(m.mean(false));
+        stds.push(strict_std(m));
+    });
     (means, stds)
 }
 

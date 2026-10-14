@@ -3,6 +3,8 @@
 // ======================
 
 use numpy::{PyArray1, PyReadonlyArray1};
+use crate::kernels::rolling::engine::{for_each_window, strict_std};
+use crate::kernels::rolling::moments::Kahan;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::collections::VecDeque;
@@ -664,45 +666,13 @@ pub fn rolling_cv<'py>(
     }
 
     let out = py.allow_threads(|| {
-        let out_len = n - window + 1;
-        let mut out = Vec::with_capacity(out_len);
-    
-        // Initial window
-        let mut mean = 0.0;
-        let mut m2 = 0.0;
-    
-        for (i, &val) in data[..window].iter().enumerate() {
-            let delta = val - mean;
-            mean += delta / (i + 1) as f64;
-            let delta2 = val - mean;
-            m2 += delta * delta2;
-        }
-    
-        let cv = if mean.abs() > 1e-10 {
-            let std = (m2 / (window - 1) as f64).sqrt();
-            std / mean.abs()
-        } else {
-            f64::NAN
-        };
-        out.push(cv);
-    
-        // Rolling updates
-        for i in window..n {
-            let old_val = data[i - window];
-            let new_val = data[i];
-        
-            let old_mean = mean;
-            mean += (new_val - old_val) / window as f64;
-            m2 = m2 + (new_val - old_val) * (new_val - mean + old_val - old_mean);
-        
-            let cv = if mean.abs() > 1e-10 {
-                let std = (m2 / (window - 1) as f64).sqrt();
-                std / mean.abs()
-            } else {
-                f64::NAN
-            };
-            out.push(cv);
-        }
+        // Coefficient of variation: sample std over |mean|, NaN when the mean
+        // is (numerically) zero or the window holds a NaN or infinity.
+        let mut out = Vec::with_capacity(n - window + 1);
+        for_each_window::<Kahan>(data, window, |_, m| {
+            let mean = m.mean(false);
+            out.push(if mean.abs() > 1e-10 { strict_std(m) / mean.abs() } else { f64::NAN });
+        });
         out
     });
 

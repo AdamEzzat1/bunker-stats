@@ -26,7 +26,9 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::types::{PyAny, PyTuple};
 use pyo3::prelude::*;
 
-use kernels::rolling::engine::rolling_mean_std_vec;
+use kernels::rolling::engine::{for_each_trailing_window, rolling_mean_std_vec};
+use kernels::rolling::covcorr::for_each_pair_window;
+use kernels::rolling::moments::Plain;
 use kernels::rolling::zscore::zscore_from_mean_std;
 use kernels::rolling::axis0::{rolling_mean_axis0_vec, rolling_std_axis0_vec, rolling_mean_std_axis0_vec};
 use kernels::rolling::covcorr::rolling_cov_vec;
@@ -803,29 +805,9 @@ fn rolling_mean_nan_np<'py>(
     }
 
     let out = py.allow_threads(|| {
+        // NaNs are skipped; a window with no usable value stays NaN.
         let mut out = vec![f64::NAN; n];
-        let mut sum = 0.0f64;
-        let mut cnt = 0usize;
-
-        for i in 0..n {
-            let x_new = xs[i];
-            if !x_new.is_nan() {
-                sum += x_new;
-                cnt += 1;
-            }
-
-            if i >= window {
-                let x_old = xs[i - window];
-                if !x_old.is_nan() {
-                    sum -= x_old;
-                    cnt -= 1;
-                }
-            }
-
-            if cnt > 0 {
-                out[i] = sum / (cnt as f64);
-            }
-        }
+        for_each_trailing_window::<Plain>(xs, window, |i, m| out[i] = m.mean(true));
         out
     });
 
@@ -847,40 +829,9 @@ fn rolling_std_nan_np<'py>(
     }
 
     let out = py.allow_threads(|| {
+        // Sample std (ddof = 1) of the non-NaN values; NaN with fewer than two.
         let mut out = vec![f64::NAN; n];
-        // Shift by a finite constant near the data magnitude: variance is
-        // translation-invariant and the shift prevents catastrophic cancellation
-        // in `sumsq - sum^2/c` on large-offset data (see rolling::engine).
-        let off = first_finite_offset(xs);
-        let mut sum = 0.0f64;
-        let mut sumsq = 0.0f64;
-        let mut cnt = 0usize;
-
-        for i in 0..n {
-            let x_new = xs[i];
-            if !x_new.is_nan() {
-                let xs_ = x_new - off;
-                sum += xs_;
-                sumsq += xs_ * xs_;
-                cnt += 1;
-            }
-
-            if i >= window {
-                let x_old = xs[i - window];
-                if !x_old.is_nan() {
-                    let xs_ = x_old - off;
-                    sum -= xs_;
-                    sumsq -= xs_ * xs_;
-                    cnt -= 1;
-                }
-            }
-
-            if cnt >= 2 {
-                let c = cnt as f64;
-                let var = (sumsq - (sum * sum) / c) / (c - 1.0);
-                out[i] = var.max(0.0).sqrt();
-            }
-        }
+        for_each_trailing_window::<Plain>(xs, window, |i, m| out[i] = m.var(1, true).sqrt());
         out
     });
 
@@ -903,52 +854,13 @@ fn rolling_zscore_nan_np<'py>(
 
     let out = py.allow_threads(|| {
         let mut out = vec![f64::NAN; n];
-        // Offset shift for cancellation safety (see rolling_std_nan_np). The
-        // z-score is invariant under a common shift of the data and the mean.
-        let off = first_finite_offset(xs);
-        let mut sum = 0.0f64;
-        let mut sumsq = 0.0f64;
-        let mut cnt = 0usize;
-
-        for i in 0..n {
-            let x_new = xs[i];
-            if !x_new.is_nan() {
-                let xs_ = x_new - off;
-                sum += xs_;
-                sumsq += xs_ * xs_;
-                cnt += 1;
-            }
-
-            if i >= window {
-                let x_old = xs[i - window];
-                if !x_old.is_nan() {
-                    let xs_ = x_old - off;
-                    sum -= xs_;
-                    sumsq -= xs_ * xs_;
-                    cnt -= 1;
-                }
-            }
-
+        for_each_trailing_window::<Plain>(xs, window, |i, m| {
             let x = xs[i];
-            if x.is_nan() {
-                out[i] = f64::NAN;
-                continue;
+            let std = m.var(1, true).sqrt();
+            if !x.is_nan() && std > 0.0 && std.is_finite() {
+                out[i] = (x - m.mean(true)) / std;
             }
-
-            if cnt >= 2 {
-                let c = cnt as f64;
-                let mean_shifted = sum / c;
-                let var = (sumsq - (sum * sum) / c) / (c - 1.0);
-                let std = var.max(0.0).sqrt();
-                out[i] = if std > 0.0 && std.is_finite() {
-                    ((x - off) - mean_shifted) / std
-                } else {
-                    f64::NAN
-                };
-            } else {
-                out[i] = f64::NAN;
-            }
-        }
+        });
         out
     });
 
@@ -1896,56 +1808,13 @@ fn rolling_corr_np<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
     let out = py.allow_threads(|| {
-        let mut out = Vec::with_capacity(n - window + 1);
-
-        // Offset shift (correlation is translation-invariant) to avoid
-        // catastrophic cancellation on large-offset data.
-        let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
-
-        let mut sum_x = 0.0;
-        let mut sum_y = 0.0;
-        let mut sum_x2 = 0.0;
-        let mut sum_y2 = 0.0;
-        let mut sum_xy = 0.0;
-
-        for i in 0..window {
-            let xi = xs[i] - ox;
-            let yi = ys[i] - oy;
-            sum_x += xi;
-            sum_y += yi;
-            sum_x2 += xi * xi;
-            sum_y2 += yi * yi;
-            sum_xy += xi * yi;
-        }
-
-        for i in (window - 1)..n {
-            if i > window - 1 {
-                let xi_new = xs[i] - ox;
-                let yi_new = ys[i] - oy;
-                let xi_old = xs[i - window] - ox;
-                let yi_old = ys[i - window] - oy;
-
-                sum_x += xi_new - xi_old;
-                sum_y += yi_new - yi_old;
-                sum_x2 += xi_new * xi_new - xi_old * xi_old;
-                sum_y2 += yi_new * yi_new - yi_old * yi_old;
-                sum_xy += xi_new * yi_new - xi_old * yi_old;
+        // Strict: a window holding a NaN or infinity in either series is NaN.
+        let mut out = vec![f64::NAN; n - window + 1];
+        for_each_pair_window(xs, ys, window, |k, m| {
+            if m.bad_count() == 0 {
+                out[k] = m.corr();
             }
-
-            let w = window as f64;
-            let mx = sum_x / w;
-            let my = sum_y / w;
-            let var_x = (sum_x2 - w * mx * mx) / ((window - 1) as f64);
-            let var_y = (sum_y2 - w * my * my) / ((window - 1) as f64);
-            let cov = (sum_xy - w * mx * my) / ((window - 1) as f64);
-
-            let denom = (var_x.max(0.0).sqrt()) * (var_y.max(0.0).sqrt());
-            out.push(if denom == 0.0 || denom.is_nan() {
-                f64::NAN
-            } else {
-                (cov / denom).clamp(-1.0, 1.0)
-            });
-        }
+        });
         out
     });
 
@@ -2088,82 +1957,6 @@ pub fn corr_nan_np(py: Python<'_>, x: PyReadonlyArray1<f64>, y: PyReadonlyArray1
 // Rolling skipna pair-state (used for rolling cov/corr/beta/linreg)
 // NOTE: This is deliberately pure Rust / slice-based logic. Keep PyO3 wrappers thin.
 // ======================================================================================
-
-#[derive(Default, Copy, Clone)]
-struct RollingPairState {
-    count: usize,
-    sum_x: f64,
-    sum_y: f64,
-    sum_xx: f64,
-    sum_yy: f64,
-    sum_xy: f64,
-}
-
-impl RollingPairState {
-    #[inline(always)]
-    fn add_pair(&mut self, x: f64, y: f64) {
-        if x.is_nan() || y.is_nan() {
-            return;
-        }
-        self.count += 1;
-        self.sum_x += x;
-        self.sum_y += y;
-        self.sum_xx += x * x;
-        self.sum_yy += y * y;
-        self.sum_xy += x * y;
-    }
-
-    #[inline(always)]
-    fn remove_pair(&mut self, x: f64, y: f64) {
-        if x.is_nan() || y.is_nan() {
-            return;
-        }
-        self.count -= 1;
-        self.sum_x -= x;
-        self.sum_y -= y;
-        self.sum_xx -= x * x;
-        self.sum_yy -= y * y;
-        self.sum_xy -= x * y;
-    }
-
-    #[inline(always)]
-    fn cov(&self) -> f64 {
-        if self.count < 2 {
-            return f64::NAN;
-        }
-        let c = self.count as f64;
-        (self.sum_xy - (self.sum_x * self.sum_y) / c) / (c - 1.0)
-    }
-
-    #[inline(always)]
-    fn var_x(&self) -> f64 {
-        if self.count < 2 {
-            return f64::NAN;
-        }
-        let c = self.count as f64;
-        (self.sum_xx - (self.sum_x * self.sum_x) / c) / (c - 1.0)
-    }
-
-    #[inline(always)]
-    fn corr(&self) -> f64 {
-        if self.count < 2 {
-            return f64::NAN;
-        }
-        let c = self.count as f64;
-        let denom = c - 1.0;
-
-        let cov = (self.sum_xy - (self.sum_x * self.sum_y) / c) / denom;
-        let varx = (self.sum_xx - (self.sum_x * self.sum_x) / c) / denom;
-        let vary = (self.sum_yy - (self.sum_y * self.sum_y) / c) / denom;
-
-        if varx <= 0.0 || vary <= 0.0 || !varx.is_finite() || !vary.is_finite() || !cov.is_finite() {
-            return f64::NAN;
-        }
-        (cov / (varx * vary).sqrt()).clamp(-1.0, 1.0)
-    }
-}
-
-
 #[pyfunction]
 pub fn rolling_cov_nan_np<'py>(
     py: Python<'py>,
@@ -2184,27 +1977,13 @@ pub fn rolling_cov_nan_np<'py>(
     }
 
     let out = py.allow_threads(|| {
-        let out_len = n - window + 1;
-        let mut out = vec![f64::NAN; out_len];
-
-        // init window. NaN pairs are dropped by add_pair; requiring a FULL window
-        // of valid pairs below matches pandas rolling(...).cov's default
-        // min_periods=window (NaN whenever any pair in the window is missing).
-        // Values are shifted by a finite offset for cancellation safety
-        // (covariance is translation-invariant).
-        let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
-        let mut st = RollingPairState::default();
-        for i in 0..window {
-            st.add_pair(xs[i] - ox, ys[i] - oy);
-        }
-        out[0] = if st.count == window { st.cov() } else { f64::NAN };
-
-        // slide
-        for i in window..n {
-            st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
-            st.add_pair(xs[i] - ox, ys[i] - oy);
-            out[i - window + 1] = if st.count == window { st.cov() } else { f64::NAN };
-        }
+        // Defined only for windows in which every pair is usable.
+        let mut out = vec![f64::NAN; n - window + 1];
+        for_each_pair_window(xs, ys, window, |k, m| {
+            if m.bad_count() == 0 {
+                out[k] = m.cov();
+            }
+        });
         out
     });
 
@@ -2231,25 +2010,13 @@ pub fn rolling_corr_nan_np<'py>(
     }
 
     let out = py.allow_threads(|| {
-        let out_len = n - window + 1;
-        let mut out = vec![f64::NAN; out_len];
-
-        // init window. Full-window requirement mirrors pandas rolling(...).corr
-        // default min_periods=window (see rolling_cov_nan_np). Values are shifted
-        // by a finite offset for cancellation safety.
-        let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
-        let mut st = RollingPairState::default();
-        for i in 0..window {
-            st.add_pair(xs[i] - ox, ys[i] - oy);
-        }
-        out[0] = if st.count == window { st.corr() } else { f64::NAN };
-
-        // slide
-        for i in window..n {
-            st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
-            st.add_pair(xs[i] - ox, ys[i] - oy);
-            out[i - window + 1] = if st.count == window { st.corr() } else { f64::NAN };
-        }
+        // Defined only for windows in which every pair is usable.
+        let mut out = vec![f64::NAN; n - window + 1];
+        for_each_pair_window(xs, ys, window, |k, m| {
+            if m.bad_count() == 0 {
+                out[k] = m.corr();
+            }
+        });
         out
     });
 
@@ -2311,26 +2078,13 @@ pub fn rolling_beta_skipna<'py>(
     }
 
     let out = py.allow_threads(|| {
-        let out_len = n - window + 1;
-        let mut out = vec![f64::NAN; out_len];
-
-        // Slope (cov/var) is translation-invariant, so shifted accumulation is
-        // exact and avoids catastrophic cancellation on large-offset data.
-        let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
-        let mut st = RollingPairState::default();
-        for i in 0..window {
-            st.add_pair(xs[i] - ox, ys[i] - oy);
-        }
-        let varx0 = st.var_x();
-        out[0] = if varx0 <= 0.0 || !varx0.is_finite() { f64::NAN } else { st.cov() / varx0 };
-
-        for i in window..n {
-            st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
-            st.add_pair(xs[i] - ox, ys[i] - oy);
-
-            let varx = st.var_x();
-            out[i - window + 1] = if varx <= 0.0 || !varx.is_finite() { f64::NAN } else { st.cov() / varx };
-        }
+        // Slope of y on x over the usable pairs of each window.
+        let mut out = vec![f64::NAN; n - window + 1];
+        for_each_pair_window(xs, ys, window, |k, m| {
+            if let Some((slope, _)) = m.linreg() {
+                out[k] = slope;
+            }
+        });
         out
     });
 
@@ -2363,53 +2117,12 @@ pub fn rolling_linreg_skipna<'py>(
         let out_len = n - window + 1;
         let mut slope = vec![f64::NAN; out_len];
         let mut intercept = vec![f64::NAN; out_len];
-
-        // Shifted accumulation for cancellation safety. The slope is
-        // translation-invariant; the intercept of the shifted fit is unshifted via
-        // a = a_shifted + oy - b*ox.
-        let (ox, oy) = (first_finite_offset(xs), first_finite_offset(ys));
-        let mut st = RollingPairState::default();
-        for i in 0..window {
-            st.add_pair(xs[i] - ox, ys[i] - oy);
-        }
-
-        // window 0
-        if st.count >= 2 {
-            let c = st.count as f64;
-            let denom = c - 1.0;
-            let sxx = (st.sum_xx - (st.sum_x * st.sum_x) / c) / denom; // var_x
-            if sxx > 0.0 && sxx.is_finite() {
-                let sxy = (st.sum_xy - (st.sum_x * st.sum_y) / c) / denom; // cov_xy
-                let b = sxy / sxx;
-                let a = (st.sum_y / c) - b * (st.sum_x / c) + oy - b * ox;
-                slope[0] = b;
-                intercept[0] = a;
+        for_each_pair_window(xs, ys, window, |k, m| {
+            if let Some((b, a)) = m.linreg() {
+                slope[k] = b;
+                intercept[k] = a;
             }
-        }
-
-        // slide
-        for i in window..n {
-            st.remove_pair(xs[i - window] - ox, ys[i - window] - oy);
-            st.add_pair(xs[i] - ox, ys[i] - oy);
-
-            let o = i - window + 1;
-            if st.count < 2 {
-                continue;
-            }
-
-            let c = st.count as f64;
-            let denom = c - 1.0;
-            let sxx = (st.sum_xx - (st.sum_x * st.sum_x) / c) / denom;
-            if sxx <= 0.0 || !sxx.is_finite() {
-                continue;
-            }
-            let sxy = (st.sum_xy - (st.sum_x * st.sum_y) / c) / denom;
-            let b = sxy / sxx;
-            let a = (st.sum_y / c) - b * (st.sum_x / c) + oy - b * ox;
-
-            slope[o] = b;
-            intercept[o] = a;
-        }
+        });
         (slope, intercept)
     });
 
