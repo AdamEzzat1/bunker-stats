@@ -2,6 +2,8 @@ use numpy::{PyReadonlyArray1, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use super::ols::ols_qr;
+
 // ======================
 // OPTIMIZED STATIONARITY TESTS
 // ======================
@@ -81,7 +83,6 @@ fn normalize_reg(reg: &str) -> PyResult<&'static str> {
 ///   (t_stat, se_β, β, residuals, m_obs, k_params, regression_stderr_s)
 /// or None if the design is rank-deficient / too small.
 fn df_ols(x: &[f64], reg: &str, p: usize) -> Option<(f64, f64, f64, Vec<f64>, usize, usize, f64)> {
-    use nalgebra::{DMatrix, DVector};
     let n = x.len();
     let det = match reg {
         "ct" => 2usize,
@@ -99,7 +100,7 @@ fn df_ols(x: &[f64], reg: &str, p: usize) -> Option<(f64, f64, f64, Vec<f64>, us
     }
     let ylag_idx = det; // column index of the y_{t-1} coefficient
 
-    let mut y = DVector::zeros(m);
+    let mut y = vec![0.0f64; m];
     let mut xd = vec![0.0f64; m * k]; // row-major design
     for (row, t) in (start..n).enumerate() {
         y[row] = x[t] - x[t - 1];
@@ -121,26 +122,22 @@ fn df_ols(x: &[f64], reg: &str, p: usize) -> Option<(f64, f64, f64, Vec<f64>, us
         }
     }
 
-    let xm = DMatrix::from_row_slice(m, k, &xd);
-    let xtx = xm.transpose() * &xm;
-    let xty = xm.transpose() * &y;
-    let beta = xtx.clone().lu().solve(&xty)?;
-    let resid_v = &y - &xm * &beta;
-    let rss: f64 = resid_v.iter().map(|e| e * e).sum();
+    // QR on the design itself: the level y_{t-1} beside a constant (and a
+    // trend) is badly conditioned whenever the series sits far from zero, and
+    // forming X'X would square that.
+    let fit = ols_qr(&xd, m, k, &y)?;
     let dof = m as f64 - k as f64;
     if dof <= 0.0 {
         return None;
     }
-    let sigma2 = rss / dof;
-    let xtx_inv = xtx.try_inverse()?;
-    let var_b = sigma2 * xtx_inv[(ylag_idx, ylag_idx)];
+    let sigma2 = fit.rss / dof;
+    let var_b = sigma2 * fit.xtx_inv_diag(ylag_idx);
     if !(var_b > 0.0) {
         return None;
     }
     let se = var_b.sqrt();
-    let b = beta[ylag_idx];
-    let residuals: Vec<f64> = resid_v.iter().copied().collect();
-    Some((b / se, se, b, residuals, m, k, sigma2.sqrt()))
+    let b = fit.beta[ylag_idx];
+    Some((b / se, se, b, fit.residuals, m, k, sigma2.sqrt()))
 }
 
 /// Augmented Dickey-Fuller test.
@@ -513,7 +510,6 @@ pub fn variance_ratio_test(py: Python<'_>, x: PyReadonlyArray1<f64>, lags: usize
 ///     zivot_andrews_test(x, max_lag=None) -> (min_stat, breakpoint, pvalue)
 #[pyfunction(signature = (x, max_lag=None))]
 pub fn zivot_andrews_test(py: Python<'_>, x: PyReadonlyArray1<f64>, max_lag: Option<usize>) -> PyResult<(f64, usize, f64)> {
-    use nalgebra::{DMatrix, DVector};
     
     let x = x.as_slice()?;
     py.allow_threads(|| {
@@ -593,50 +589,31 @@ pub fn zivot_andrews_test(py: Python<'_>, x: PyReadonlyArray1<f64>, max_lag: Opt
                 }
             }
         
-            // OLS regression: solve (X'X) β = X'y
-            // x_mat is built row-major (t*n_regressors + col). from_vec reads
-            // COLUMN-major and would scramble every regressor, silently producing
-            // garbage coefficients (breakpoints/t-stats were noise).
-            let x_matrix = DMatrix::from_row_slice(m, n_regressors, &x_mat);
-            let y_vector = DVector::from_vec(y_vec);
-        
-            let xtx = x_matrix.transpose() * &x_matrix;
-            let xty = x_matrix.transpose() * &y_vector;
-        
-            // Solve for coefficients
-    		let beta = match xtx.clone().lu().solve(&xty) {
-    			Some(b) => b,
-    			None => continue,
-    		};       
-            // Calculate residuals and RSS
-            let y_hat = &x_matrix * &beta;
-            let residuals = &y_vector - &y_hat;
-            let rss: f64 = residuals.iter().map(|&e| e * e).sum();
-        
+            // OLS by QR on the row-major design (see kernels::tsa::ols). A
+            // break point whose dummies make the design rank-deficient is skipped.
+            let fit = match ols_qr(&x_mat, m, n_regressors, &y_vec) {
+                Some(fit) => fit,
+                None => continue,
+            };
+
             // Degrees of freedom
             let df = m as f64 - n_regressors as f64;
             if df <= 0.0 {
                 continue;
             }
-        
-            let sigma2 = rss / df;
-        
-            // Compute (X'X)^-1 for variance-covariance matrix
-            let xtx_inv = match xtx.lu().try_inverse() {
-                Some(inv) => inv,
-                None => continue,  // Skip if singular
-            };
-        
+
+            let sigma2 = fit.rss / df;
+
             // Standard error of α (coefficient on y_{t-1}, which is regressor index 4)
-            let var_alpha = sigma2 * xtx_inv[(4, 4)];
+            let var_alpha = sigma2 * fit.xtx_inv_diag(4);
             if var_alpha <= 0.0 || !var_alpha.is_finite() {
                 continue;
             }
-        
+
             let se_alpha = var_alpha.sqrt();
-        
+
             // t-statistic for H0: α = 0 (unit root)
-            let alpha = beta[4];
+            let alpha = fit.beta[4];
             let t_stat = alpha / se_alpha;
         
             // Keep track of minimum (most negative) t-statistic

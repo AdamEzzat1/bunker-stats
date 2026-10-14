@@ -2,7 +2,7 @@ use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use statrs::distribution::{ChiSquared, ContinuousCDF};
 use std::cmp::min;
-use nalgebra::{DMatrix, DVector};
+use super::ols::ols_qr;
 
 // ======================
 // Serial-correlation diagnostics
@@ -181,38 +181,12 @@ pub fn bg_test(
             }
         }
 
-        let mut xtx = vec![0.0_f64; p * p];
-        let mut xty = vec![0.0_f64; p];
-
-        for t in 0..t_len {
-            for i in 0..p {
-                let xi = x_mat[t * p + i];
-                xty[i] += xi * y[t];
-                for j in 0..p {
-                    xtx[i * p + j] += xi * x_mat[t * p + j];
-                }
-            }
-        }
-
-        let xtx_mat = DMatrix::from_vec(p, p, xtx);
-        let xty_vec = DVector::from_vec(xty);
-
-        let beta = if let Some(sol) = xtx_mat.lu().solve(&xty_vec) {
-            sol
-        } else {
-            return Ok((f64::NAN, f64::NAN));
+        // Auxiliary regression by QR (see kernels::tsa::ols); user-supplied
+        // regressors can be arbitrarily badly scaled.
+        let rss = match ols_qr(&x_mat, t_len, p, &y) {
+            Some(fit) => fit.rss,
+            None => return Ok((f64::NAN, f64::NAN)),
         };
-
-        // Calculate RSS (Residual Sum of Squares from auxiliary regression)
-        let mut rss = 0.0;
-        for t in 0..t_len {
-            let mut y_hat = 0.0;
-            for i in 0..p {
-                y_hat += beta[i] * x_mat[t * p + i];
-            }
-            let residual = y[t] - y_hat;
-            rss += residual * residual;
-        }
 
         // Calculate TSS
         let mean_y: f64 = y.iter().sum::<f64>() / (t_len as f64);
