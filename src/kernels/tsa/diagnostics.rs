@@ -1,6 +1,6 @@
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
-use statrs::distribution::{ChiSquared, ContinuousCDF};
+use crate::infer::common::{chi2_sf, norm_two_sided_pvalue};
 use std::cmp::min;
 use super::ols::ols_qr;
 
@@ -60,8 +60,7 @@ pub fn ljung_box(py: Python<'_>, x: PyReadonlyArray1<f64>, lags: usize) -> PyRes
     
         q *= n_f * (n_f + 2.0);
 
-        let chi = ChiSquared::new(max_lag as f64).unwrap();
-        let p_val = 1.0 - chi.cdf(q);
+        let p_val = chi2_sf(q, max_lag as f64);
 
         Ok((q, p_val))
     })
@@ -124,7 +123,9 @@ pub fn bg_test(
 ) -> PyResult<(f64, f64)> {
     let e = resid.as_slice()?;
     let n = e.len();
-    if n <= max_lag + 1 || max_lag == 0 {
+    // `max_lag >= n` first: `max_lag + 1` wraps to 0 for usize::MAX, the
+    // check passes, and the regression below never finishes.
+    if max_lag == 0 || max_lag >= n || n <= max_lag + 1 {
         return Ok((f64::NAN, f64::NAN));
     }
 
@@ -211,10 +212,7 @@ pub fn bg_test(
         // P-value from chi-squared distribution with max_lag degrees of freedom.
         // max_lag >= 1 is guaranteed above, so ChiSquared::new cannot fail; fall
         // back to NaN defensively rather than risk an abort under panic="abort".
-        let p_val = match ChiSquared::new(max_lag as f64) {
-            Ok(chi) => 1.0 - chi.cdf(stat),
-            Err(_) => f64::NAN,
-        };
+        let p_val = chi2_sf(stat, max_lag as f64);
 
         Ok((stat, p_val))
     })
@@ -265,8 +263,7 @@ pub fn box_pierce(py: Python<'_>, x: PyReadonlyArray1<f64>, lags: usize) -> PyRe
         }
         q *= n as f64;
 
-        let chi = ChiSquared::new(max_lag as f64).unwrap();
-        let p_val = 1.0 - chi.cdf(q);
+        let p_val = chi2_sf(q, max_lag as f64);
 
         Ok((q, p_val))
     })
@@ -354,9 +351,7 @@ pub fn runs_test(py: Python<'_>, x: PyReadonlyArray1<f64>) -> PyResult<(usize, f
         };
     
         // Two-tailed p-value (approximate with normal)
-        use statrs::distribution::Normal;
-        let normal = Normal::new(0.0, 1.0).unwrap();
-        let p_val = 2.0 * (1.0 - normal.cdf(z.abs()));
+        let p_val = norm_two_sided_pvalue(z);
     
         Ok((runs, z, p_val))
     })

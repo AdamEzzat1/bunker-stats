@@ -5,9 +5,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use statrs::distribution::{ContinuousCDF, StudentsT};
 
-use super::common::{mean, var_sample, reject_nonfinite, Alternative};
+use super::common::{reject_nonfinite, Alternative};
 
 /// Paired (dependent) t-test.
 ///
@@ -42,8 +41,7 @@ pub fn t_test_paired_np(
         let diffs: Vec<f64> = xs.iter().zip(ys.iter()).map(|(&a, &b)| a - b).collect();
 
         // One-sample t-test on differences vs popmean=0
-        let m = mean(&diffs);
-        let v = var_sample(&diffs, m);
+        let (m, v) = super::common::mean_var_sample(&diffs);
 
         let alt = Alternative::from_str(alternative)?;
 
@@ -56,20 +54,8 @@ pub fn t_test_paired_np(
 
         let df = (n - 1) as f64;
 
-        let p = if t.is_finite() {
-            let dist = StudentsT::new(0.0, 1.0, df).unwrap();
-            let cdf = dist.cdf(t);
-            match alt {
-                Alternative::TwoSided => {
-                    let tail = if cdf < 0.5 { cdf } else { 1.0 - cdf };
-                    (2.0 * tail).clamp(0.0, 1.0)
-                }
-                Alternative::Less => cdf.clamp(0.0, 1.0),
-                Alternative::Greater => (1.0 - cdf).clamp(0.0, 1.0),
-            }
-        } else {
-            0.0
-        };
+        // t_pvalue handles an infinite or NaN statistic itself.
+        let p = super::common::t_pvalue(t, df, alt);
         Ok((m, t, df, p))
     })?;
 

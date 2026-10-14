@@ -41,7 +41,7 @@ pub fn corr_ci_np(
         if n < 4 {
             return Err(PyValueError::new_err("corr_ci requires n >= 4 (n-3 > 0 for Fisher z)"));
         }
-        if confidence <= 0.0 || confidence >= 1.0 {
+        if !(confidence > 0.0 && confidence < 1.0) {
             return Err(PyValueError::new_err("confidence must be in (0, 1)"));
         }
 

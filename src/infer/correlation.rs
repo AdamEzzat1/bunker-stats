@@ -2,7 +2,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use statrs::distribution::{ContinuousCDF, StudentsT};
 
 use super::common::{mean, reject_nonfinite, rankdata_average};
 
@@ -51,7 +50,9 @@ pub fn pearson_corr_test_np(
             return Err(PyValueError::new_err("zero variance in x or y"));
         }
     
-        let r = sxy / (sxx * syy).sqrt();
+        // sqrt each factor: the product sxx * syy under/overflows for data scaled
+        // by ~1e-100 or ~1e100 even though the correlation is scale-free.
+        let r = sxy / (sxx.sqrt() * syy.sqrt());
     
         // t-test for r != 0
         let df = (n - 2) as f64;
@@ -62,10 +63,7 @@ pub fn pearson_corr_test_np(
         };
     
         let p = if t.is_finite() {
-            let dist = StudentsT::new(0.0, 1.0, df).unwrap();
-            let cdf = dist.cdf(t);
-            let tail = if cdf < 0.5 { cdf } else { 1.0 - cdf };
-            (2.0 * tail).clamp(0.0, 1.0)
+            super::common::t_pvalue(t, df, super::common::Alternative::TwoSided)
         } else {
             0.0
         };
@@ -129,7 +127,7 @@ pub fn spearman_corr_test_np(
             return Err(PyValueError::new_err("zero variance in ranks"));
         }
     
-        let rho = sxy / (sxx * syy).sqrt();
+        let rho = sxy / (sxx.sqrt() * syy.sqrt());
     
         // t-test for rho != 0
         let df = (n - 2) as f64;
@@ -140,10 +138,7 @@ pub fn spearman_corr_test_np(
         };
     
         let p = if t.is_finite() {
-            let dist = StudentsT::new(0.0, 1.0, df).unwrap();
-            let cdf = dist.cdf(t);
-            let tail = if cdf < 0.5 { cdf } else { 1.0 - cdf };
-            (2.0 * tail).clamp(0.0, 1.0)
+            super::common::t_pvalue(t, df, super::common::Alternative::TwoSided)
         } else {
             0.0
         };

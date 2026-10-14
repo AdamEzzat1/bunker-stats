@@ -2,9 +2,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use statrs::distribution::{ContinuousCDF, FisherSnedecor};
 
-use super::common::{mean, reject_nonfinite, median, sum_of_squares_kahan};
+use super::common::{f_sf, mean, reject_nonfinite, median, sum_of_squares_kahan};
 
 /// One-way ANOVA F-test.
 ///
@@ -91,8 +90,7 @@ pub fn f_test_oneway_np(
         };
     
         let p = if f_stat.is_finite() && f_stat >= 0.0 {
-            let dist = FisherSnedecor::new(df_between, df_within).unwrap();
-            (1.0 - dist.cdf(f_stat)).clamp(0.0, 1.0)
+            f_sf(f_stat, df_between, df_within)
         } else if f_stat.is_infinite() {
             0.0
         } else {
@@ -185,8 +183,7 @@ pub fn levene_test_np(
         };
     
         let p = if w_stat.is_finite() && w_stat >= 0.0 {
-            let dist = FisherSnedecor::new(df_between, df_within).unwrap();
-            (1.0 - dist.cdf(w_stat)).clamp(0.0, 1.0)
+            f_sf(w_stat, df_between, df_within)
         } else {
             f64::NAN
         };

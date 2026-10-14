@@ -268,9 +268,8 @@ pub fn normality_summary_np(
         // Jarque-Bera
         let jb = (nf / 6.0) * (skewness * skewness + excess_kurtosis * excess_kurtosis / 4.0);
 
-        use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
-        let chi2_dist = ChiSquared::new(2.0).unwrap();
-        let jb_p = (1.0 - chi2_dist.cdf(jb)).clamp(0.0, 1.0);
+        use statrs::distribution::{ContinuousCDF, Normal};
+        let jb_p = super::common::chi2_sf(jb, 2.0);
 
         // Anderson-Darling
         let std_dev = (m2 * nf / (nf - 1.0)).sqrt(); // sample std (ddof=1)
@@ -286,14 +285,24 @@ pub fn normality_summary_np(
             let if64 = (i + 1) as f64;
 
             let cdf_i = norm.cdf(z_i).max(1e-300).min(1.0 - 1e-300);
-            let sf_ni = (1.0 - norm.cdf(z_ni)).max(1e-300).min(1.0 - 1e-300);
+            // Upper tail as the lower tail at -z (the normal is symmetric).
+            // `1 - cdf(z)` is exactly 0 from z ~ 8.3, and the clamp then stood
+            // in ln(1e-300) = -690 for the true log-tail, so one large
+            // positive value inflated the statistic while its mirror image
+            // did not.
+            let sf_ni = norm.cdf(-z_ni).max(1e-300).min(1.0 - 1e-300);
 
             a2 += (2.0 * if64 - 1.0) * (cdf_i.ln() + sf_ni.ln());
         }
         a2 = -nf - a2 / nf;
 
-        // Stephens correction
-        let ad_star = a2 * (1.0 + 4.0 / nf - 25.0 / (nf * nf));
+        // Stephens correction. The factor is negative for n <= 3, so the
+        // statistic is undefined there rather than negative.
+        let ad_star = if n < 4 {
+            f64::NAN
+        } else {
+            a2 * (1.0 + 4.0 / nf - 25.0 / (nf * nf))
+        };
         Ok((n, skewness, kurtosis, excess_kurtosis, jb, jb_p, ad_star))
     })?;
 

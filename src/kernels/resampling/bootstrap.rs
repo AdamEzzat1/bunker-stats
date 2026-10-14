@@ -39,6 +39,7 @@ pub fn bootstrap_mean(
     n_resamples: usize,
     random_state: Option<u64>,
 ) -> PyResult<f64> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     py.allow_threads(|| {
         let n = x.len();
@@ -86,6 +87,7 @@ pub fn bootstrap_mean_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     py.allow_threads(|| {
         let n = x.len();
@@ -144,6 +146,7 @@ fn bootstrap_draws_core(
     n_resamples: usize,
     base_seed: u64,
 ) -> PyResult<Vec<f64>> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let n = x.len();
     let vals: Vec<f64> = match stat {
         "mean" => (0..n_resamples)
@@ -248,6 +251,7 @@ pub fn bootstrap_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
 
     py.allow_threads(|| {
@@ -276,6 +280,7 @@ pub fn bootstrap_ci_with_draws<'py>(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64, Bound<'py, PyArray1<f64>>)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
 
     if x.is_empty() || n_resamples == 0 {
@@ -309,6 +314,7 @@ pub fn bootstrap_corr(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     let y = y.as_slice()?;
     py.allow_threads(|| {
@@ -542,6 +548,7 @@ pub fn bootstrap_se(
     n_resamples: usize,
     random_state: Option<u64>,
 ) -> PyResult<f64> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     py.allow_threads(|| {
         let n = x.len();
@@ -611,6 +618,7 @@ pub fn bootstrap_var(
     n_resamples: usize,
     random_state: Option<u64>,
 ) -> PyResult<f64> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     // bootstrap_se releases the GIL itself.
     let se = bootstrap_se(py, x, stat, n_resamples, random_state)?;
     Ok(se * se)
@@ -625,6 +633,7 @@ pub fn bootstrap_t_ci_mean(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     py.allow_threads(|| {
         let n = x.len();
@@ -698,6 +707,7 @@ pub fn bootstrap_bca_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     py.allow_threads(|| {
         let n = x.len();
@@ -922,6 +932,7 @@ pub fn bayesian_bootstrap_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     py.allow_threads(|| {
         let n = x.len();
@@ -1055,6 +1066,30 @@ pub fn bayesian_bootstrap_ci(
 // PERMUTATION TESTS - OPTIMIZED (NOW PARALLEL!)
 // ==============================================
 
+/// Run `count` over `0..total` in batches and sum the results. Each batch runs
+/// with the GIL released; it is taken back between batches only to check for a
+/// pending signal.
+///
+/// A permutation count is not bounded by memory (nothing is stored per
+/// permutation), so an absurd value does not fail: it runs, for hours, and
+/// without this the interpreter cannot deliver Ctrl-C until it finishes. Each
+/// permutation is seeded from its own index, so batching does not change the
+/// result. A batch is sized to about 2^26 element visits.
+fn sum_in_batches<F>(py: Python<'_>, total: usize, n: usize, count: F) -> PyResult<usize>
+where
+    F: Fn(std::ops::Range<usize>) -> usize + Sync,
+{
+    let batch = ((1usize << 26) / n.max(1)).max(1);
+    let (mut done, mut acc) = (0usize, 0usize);
+    while done < total {
+        let end = done.saturating_add(batch).min(total);
+        acc += py.allow_threads(|| count(done..end));
+        done = end;
+        py.check_signals()?;
+    }
+    Ok(acc)
+}
+
 /// Permutation test for correlation - OPTIMIZED
 ///
 /// Returns (observed_corr, p_value)
@@ -1069,24 +1104,24 @@ pub fn permutation_corr_test(
 ) -> PyResult<(f64, f64)> {
     let x = x.as_slice()?;
     let y = y.as_slice()?;
-    py.allow_threads(|| {
-        let n = x.len();
-    
-        if n == 0 || n_permutations == 0 || y.len() != n {
-            return Ok((f64::NAN, f64::NAN));
-        }
+    let n = x.len();
 
-        // Compute observed correlation
+    if n == 0 || n_permutations == 0 || y.len() != n {
+        return Ok((f64::NAN, f64::NAN));
+    }
+
+    // Compute observed correlation
+    let (nf, mx, vx, obs) = py.allow_threads(|| {
         let mut sx = 0.0; let mut sy = 0.0;
         let mut sx2 = 0.0; let mut sy2 = 0.0; let mut sxy = 0.0;
-    
+
         for i in 0..n {
             let xi = x[i]; let yi = y[i];
             sx += xi; sy += yi;
             sx2 += xi * xi; sy2 += yi * yi;
             sxy += xi * yi;
         }
-    
+
         let nf = n as f64;
         let mx = sx / nf; let my = sy / nf;
         let vx = sx2 / nf - mx * mx;
@@ -1096,15 +1131,19 @@ pub fn permutation_corr_test(
         } else {
             (sxy / nf - mx * my) / (vx * vy).sqrt()
         };
-    
-        if !obs.is_finite() {
-            return Ok((obs, f64::NAN));
-        }
+        (nf, mx, vx, obs)
+    });
 
-        let base_seed = random_state.unwrap_or(0);
+    if !obs.is_finite() {
+        return Ok((obs, f64::NAN));
+    }
 
-        // OPTIMIZED: Parallel permutation test (2-4Ã— speedup!)
-        let extreme: usize = (0..n_permutations)
+    let base_seed = random_state.unwrap_or(0);
+
+    // OPTIMIZED: Parallel permutation test (2-4x speedup!)
+    // sum_in_batches releases the GIL while each batch runs.
+    let count_extreme = |range: std::ops::Range<usize>| -> usize {
+        range
             .into_par_iter()
             .map_init(
                 || {
@@ -1118,7 +1157,7 @@ pub fn permutation_corr_test(
 
                     let seed = mix_seed(base_seed, p as u64);
                     let mut rng = Pcg64::seed_from_u64(seed);
-                
+
                     // Fisher-Yates shuffle
                     for i in (1..n).rev() {
                         let j = rng.gen_range(0..=i);
@@ -1131,7 +1170,7 @@ pub fn permutation_corr_test(
                         let yi = work[i];
                         sy += yi; sy2 += yi * yi; sxy += x[i] * yi;
                     }
-                
+
                     let my = sy / nf;
                     let vy = sy2 / nf - my * my;
                     let r = if vx <= 0.0 || vy <= 0.0 {
@@ -1139,7 +1178,7 @@ pub fn permutation_corr_test(
                     } else {
                         (sxy / nf - mx * my) / (vx * vy).sqrt()
                     };
-                
+
                     if !r.is_finite() {
                         return 0;
                     }
@@ -1152,12 +1191,13 @@ pub fn permutation_corr_test(
                     }
                 }
             )
-            .sum();
+            .sum()
+    };
+    let extreme = sum_in_batches(py, n_permutations, n, count_extreme)?;
 
-        // Add-one smoothing
-        let p = (extreme as f64 + 1.0) / (n_permutations as f64 + 1.0);
-        Ok((obs, p))
-    })
+    // Add-one smoothing
+    let p = (extreme as f64 + 1.0) / (n_permutations as f64 + 1.0);
+    Ok((obs, p))
 }
 
 /// Permutation test for mean difference - OPTIMIZED
@@ -1174,22 +1214,25 @@ pub fn permutation_mean_diff_test(
 ) -> PyResult<(f64, f64)> {
     let x = x.as_slice()?;
     let y = y.as_slice()?;
-    py.allow_threads(|| {
-        let nx = x.len();
-        let ny = y.len();
-    
-        if nx == 0 || ny == 0 || n_permutations == 0 {
-            return Ok((f64::NAN, f64::NAN));
-        }
+    let nx = x.len();
+    let ny = y.len();
 
+    if nx == 0 || ny == 0 || n_permutations == 0 {
+        return Ok((f64::NAN, f64::NAN));
+    }
+
+    let obs = py.allow_threads(|| {
         let mx = x.iter().copied().sum::<f64>() / (nx as f64);
         let my = y.iter().copied().sum::<f64>() / (ny as f64);
-        let obs = mx - my;
+        mx - my
+    });
 
-        let base_seed = random_state.unwrap_or(0);
+    let base_seed = random_state.unwrap_or(0);
 
-        // OPTIMIZED: Parallel permutation test (2-4Ã— speedup!)
-        let extreme: usize = (0..n_permutations)
+    // OPTIMIZED: Parallel permutation test (2-4x speedup!)
+    // sum_in_batches releases the GIL while each batch runs.
+    let count_extreme = |range: std::ops::Range<usize>| -> usize {
+        range
             .into_par_iter()
             .map_init(
                 || {
@@ -1205,14 +1248,14 @@ pub fn permutation_mean_diff_test(
 
                     let seed = mix_seed(base_seed, p as u64);
                     let mut rng = Pcg64::seed_from_u64(seed);
-                
+
                     // Fisher-Yates shuffle
                     let n = work.len();
                     for i in (1..n).rev() {
                         let j = rng.gen_range(0..=i);
                         work.swap(i, j);
                     }
-                
+
                     // Compute mean difference
                     let sx: f64 = work[0..nx].iter().copied().sum();
                     let sy: f64 = work[nx..(nx + ny)].iter().copied().sum();
@@ -1226,11 +1269,12 @@ pub fn permutation_mean_diff_test(
                     }
                 }
             )
-            .sum();
+            .sum()
+    };
+    let extreme = sum_in_batches(py, n_permutations, nx + ny, count_extreme)?;
 
-        let p = (extreme as f64 + 1.0) / (n_permutations as f64 + 1.0);
-        Ok((obs, p))
-    })
+    let p = (extreme as f64 + 1.0) / (n_permutations as f64 + 1.0);
+    Ok((obs, p))
 }
 
 // ==============================================
@@ -1247,6 +1291,7 @@ pub fn moving_block_bootstrap_mean_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     py.allow_threads(|| {
         let n = x.len();
@@ -1295,6 +1340,7 @@ pub fn circular_block_bootstrap_mean_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     py.allow_threads(|| {
         let n = x.len();
@@ -1344,6 +1390,7 @@ pub fn stationary_bootstrap_mean_ci(
     conf: f64,
     random_state: Option<u64>,
 ) -> PyResult<(f64, f64, f64)> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     py.allow_threads(|| {
         let n = x.len();

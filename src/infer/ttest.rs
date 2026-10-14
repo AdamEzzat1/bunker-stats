@@ -2,24 +2,11 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use statrs::distribution::{ContinuousCDF, StudentsT};
 
-use super::common::{mean, reject_nonfinite, var_sample, Alternative};
+use super::common::{mean_var_sample, reject_nonfinite, Alternative};
 
 fn p_from_t(t: f64, df: f64, alt: Alternative) -> f64 {
-    // Student-t with mean 0, scale 1
-    let dist = StudentsT::new(0.0, 1.0, df).unwrap();
-    let cdf = dist.cdf(t);
-
-    match alt {
-        Alternative::TwoSided => {
-            // two-sided p = 2 * min(CDF(t), 1-CDF(t))
-            let tail = if cdf < 0.5 { cdf } else { 1.0 - cdf };
-            (2.0 * tail).clamp(0.0, 1.0)
-        }
-        Alternative::Less => cdf.clamp(0.0, 1.0),
-        Alternative::Greater => (1.0 - cdf).clamp(0.0, 1.0),
-    }
+    super::common::t_pvalue(t, df, alt)
 }
 
 /// One-sample t-test vs `popmean`.
@@ -43,8 +30,7 @@ pub fn t_test_1samp_np(
             return Err(PyValueError::new_err("t_test_1samp requires n >= 2"));
         }
 
-        let m = mean(xs);
-        let v = var_sample(xs, m);
+        let (m, v) = mean_var_sample(xs);
 
         if !v.is_finite() || v < 0.0 {
             return Err(PyValueError::new_err(format!(
@@ -67,7 +53,8 @@ pub fn t_test_1samp_np(
 
         let df = (n - 1) as f64;
         let alt = Alternative::from_str(alternative)?;
-        let p = if t.is_finite() { p_from_t(t, df, alt) } else { 0.0 };
+        // t_pvalue handles an infinite or NaN statistic itself.
+        let p = p_from_t(t, df, alt);
         Ok((m, t, df, p))
     })?;
 
@@ -109,10 +96,8 @@ pub fn t_test_2samp_np(
             ));
         }
 
-        let m1 = mean(xs);
-        let m2 = mean(ys);
-        let v1 = var_sample(xs, m1);
-        let v2 = var_sample(ys, m2);
+        let (m1, v1) = mean_var_sample(xs);
+        let (m2, v2) = mean_var_sample(ys);
 
         if !v1.is_finite() || !v2.is_finite() || v1 < 0.0 || v2 < 0.0 {
             return Err(PyValueError::new_err(format!(
@@ -130,8 +115,10 @@ pub fn t_test_2samp_np(
 
             let se = (sp2 * (1.0 / (n1 as f64) + 1.0 / (n2 as f64))).sqrt();
             let t = if se == 0.0 { 
-                // Both samples have zero variance
-                if (m1 - m2).abs() < 1e-15 {
+                // Both samples have zero variance. Compare the means exactly: an
+                // absolute tolerance (this was `< 1e-15`) calls 1e-20 and 2e-20
+                // equal, and the means of constant samples are exact.
+                if m1 == m2 {
                     0.0
                 } else {
                     f64::INFINITY * (m1 - m2).signum()
@@ -145,8 +132,10 @@ pub fn t_test_2samp_np(
             let se2 = v1 / (n1 as f64) + v2 / (n2 as f64);
             let se = se2.sqrt();
             let t = if se == 0.0 { 
-                // Both samples have zero variance
-                if (m1 - m2).abs() < 1e-15 {
+                // Both samples have zero variance. Compare the means exactly: an
+                // absolute tolerance (this was `< 1e-15`) calls 1e-20 and 2e-20
+                // equal, and the means of constant samples are exact.
+                if m1 == m2 {
                     0.0
                 } else {
                     f64::INFINITY * (m1 - m2).signum()

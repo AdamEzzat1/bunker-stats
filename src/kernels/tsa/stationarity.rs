@@ -153,6 +153,12 @@ pub fn adf_test(py: Python<'_>, x: PyReadonlyArray1<f64>, regression: &str, max_
         let n = x.len();
         let reg = normalize_reg(regression)?;
         let p = max_lag.unwrap_or(0);
+        // A lag count at or beyond the series length leaves no regression rows.
+        // Decide that before any `p + k`: for an absurd lag those sums wrap, the
+        // "too few rows" checks pass, and the kernel indexes out of bounds.
+        if p >= n {
+            return Ok((f64::NAN, f64::NAN));
+        }
 
         match df_ols(x, reg, p) {
             Some((t_stat, _, _, _, _, _, _)) => Ok((t_stat, df_pvalue(t_stat, n, reg))),
@@ -456,7 +462,8 @@ pub fn variance_ratio_test(py: Python<'_>, x: PyReadonlyArray1<f64>, lags: usize
         let n = r.len();
         let q = lags;
 
-        if q < 2 || n < q + 2 {
+        // `q >= n` first: `q + 2` wraps for an absurd lag.
+        if q < 2 || q >= n || n < q + 2 {
             return Ok((f64::NAN, f64::NAN, f64::NAN));
         }
 
@@ -494,9 +501,7 @@ pub fn variance_ratio_test(py: Python<'_>, x: PyReadonlyArray1<f64>, lags: usize
         let theta = 2.0 * (2.0 * qf - 1.0) * (qf - 1.0) / (3.0 * qf * nf);
         let z = (vr - 1.0) / theta.sqrt();
 
-        use statrs::distribution::{ContinuousCDF, Normal};
-        let normal = Normal::new(0.0, 1.0).unwrap();
-        let p_val = 2.0 * (1.0 - normal.cdf(z.abs()));
+        let p_val = crate::infer::common::norm_two_sided_pvalue(z);
 
         Ok((vr, z, p_val))
     })
@@ -525,7 +530,8 @@ pub fn zivot_andrews_test(py: Python<'_>, x: PyReadonlyArray1<f64>, max_lag: Opt
             p_max.min(12).max(1)
         });
     
-        if n <= p + 5 {
+        // `p >= n` first: `p + 5` wraps for an absurd lag.
+        if p >= n || n <= p + 5 {
             return Ok((f64::NAN, 0, f64::NAN));
         }
     

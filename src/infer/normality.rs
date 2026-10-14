@@ -56,9 +56,7 @@ pub fn jarque_bera_np(
         let jb = (nf / 6.0) * (skewness * skewness + excess_kurtosis * excess_kurtosis / 4.0);
     
         // Chi-square with df=2
-        use statrs::distribution::ChiSquared;
-        let dist = ChiSquared::new(2.0).unwrap();
-        let p = (1.0 - dist.cdf(jb)).clamp(0.0, 1.0);
+        let p = super::common::chi2_sf(jb, 2.0);
         Ok((skewness, kurtosis, jb, p))
     })?;
     
@@ -82,8 +80,12 @@ pub fn anderson_darling_np(
     
     let a2_star = py.allow_threads(|| -> PyResult<_> {
         let n = xs.len();
-        if n < 2 {
-            return Err(PyValueError::new_err("anderson_darling requires n >= 2"));
+        // The small-sample factor (1 + 4/n - 25/n^2) is negative for n <= 3, which
+        // made the reported statistic negative; A^2 is a sum of squares.
+        if n < 4 {
+            return Err(PyValueError::new_err(
+                "anderson_darling requires n >= 4 (the small-sample correction is not positive below that)",
+            ));
         }
     
         reject_nonfinite(xs, "x")?;
@@ -118,7 +120,12 @@ pub fn anderson_darling_np(
             let if64 = (i + 1) as f64;
         
             let cdf_i = norm.cdf(z_i).max(1e-300).min(1.0 - 1e-300);
-            let sf_ni = (1.0 - norm.cdf(z_ni)).max(1e-300).min(1.0 - 1e-300);
+            // Upper tail as the lower tail at -z (the normal is symmetric).
+            // `1 - cdf(z)` is exactly 0 from z ~ 8.3, and the clamp then stood
+            // in ln(1e-300) = -690 for the true log-tail, so one large
+            // positive value inflated the statistic while its mirror image
+            // did not.
+            let sf_ni = norm.cdf(-z_ni).max(1e-300).min(1.0 - 1e-300);
         
             a2 += (2.0 * if64 - 1.0) * (cdf_i.ln() + sf_ni.ln());
         }

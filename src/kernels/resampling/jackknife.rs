@@ -42,24 +42,22 @@ pub fn jackknife_mean(py: Python<'_>, x: PyReadonlyArray1<f64>) -> PyResult<(f64
         let total: f64 = x.iter().copied().sum();
         let theta_full = total / n_f;
 
-        let mut loo_means = vec![0.0_f64; n];
-        for i in 0..n {
-            let loo_sum = total - x[i];
-            loo_means[i] = loo_sum / (n_f - 1.0);
-        }
-
-        let mean_loo = loo_means.iter().copied().sum::<f64>() / n_f;
-        let theta_jack = n_f * theta_full - (n_f - 1.0) * mean_loo;
-        let bias = theta_jack - theta_full;
-
+        // For the mean the jackknife has a closed form. The leave-one-out means
+        // average to the full mean exactly, so the estimate *is* the mean and the
+        // bias is zero, and each one deviates from it by (mean - x_i) / (n - 1).
+        //
+        // Forming `n * theta - (n - 1) * mean(loo)` instead subtracts two numbers
+        // of the size of the data to get one of the size of the mean: for
+        // [0, 0, 0, 999999, -999945, 0] it returned 9.000000000014559, not 9, and
+        // reported that rounding error as a "bias".
         let mut sum_sq = 0.0;
-        for v in &loo_means {
-            let d = *v - mean_loo;
+        for &v in x {
+            let d = (theta_full - v) / (n_f - 1.0);
             sum_sq += d * d;
         }
         let se = ((n_f - 1.0) / n_f * sum_sq).sqrt();
 
-        Ok((theta_jack, bias, se))
+        Ok((theta_full, 0.0, se))
     })
 }
 
@@ -236,6 +234,7 @@ pub fn jackknife_after_bootstrap_se_mean(
     n_resamples: usize,
     random_state: Option<u64>,
 ) -> PyResult<f64> {
+    crate::util::ensure_allocatable::<f64>(n_resamples, "n_resamples")?;
     let x = x.as_slice()?;
     py.allow_threads(|| {
         let n = x.len();

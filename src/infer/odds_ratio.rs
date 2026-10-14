@@ -36,7 +36,7 @@ pub fn odds_ratio_np(
         if shape[0] != 2 || shape[1] != 2 {
             return Err(PyValueError::new_err("table must be a 2x2 array"));
         }
-        if confidence <= 0.0 || confidence >= 1.0 {
+        if !(confidence > 0.0 && confidence < 1.0) {
             return Err(PyValueError::new_err("confidence must be in (0, 1)"));
         }
 

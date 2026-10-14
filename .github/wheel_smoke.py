@@ -50,4 +50,6 @@ assert plain == (boot.estimate, boot.ci_lower, boot.ci_upper), "draws path diver
 import bunker_stats.notebook  # noqa: E402, F401
 import bunker_stats.pandas_helpers  # noqa: E402, F401
 
+assert "pandas" not in sys.modules, "notebook layer imported pandas eagerly"
+
 print(f"wheel smoke OK: {len(bs.__all__)} names, python {sys.version.split()[0]}")

@@ -427,8 +427,8 @@ class TestNormalityReport:
     def test_columns_and_kernel_agreement(self, clean_df):
         out = nb.normality_report(clean_df)
         expected = {
-            "n", "skewness", "kurtosis", "jb_statistic", "jb_pvalue",
-            "ad_statistic", "normal", "conclusion",
+            "n", "n_missing", "skewness", "kurtosis", "jb_statistic", "jb_pvalue",
+            "ad_statistic", "ad_pvalue", "normal", "conclusion",
         }
         assert set(out.columns) == expected
         jb = bs.jarque_bera(clean_df["x"].to_numpy(dtype=float))
@@ -436,11 +436,12 @@ class TestNormalityReport:
         assert out.loc["x", "jb_pvalue"] == pytest.approx(jb["pvalue"])
 
     def test_ad_statistic_reported(self, clean_df):
-        """Anderson-Darling has no p-value in the kernel; A* must still appear."""
+        """A* comes from the kernel; the p-value is added by this layer (see
+        test_notebook_hardening.py for its check against statsmodels)."""
         out = nb.normality_report(clean_df)
         ad = bs.anderson_darling(clean_df["x"].to_numpy(dtype=float))
         assert out.loc["x", "ad_statistic"] == pytest.approx(ad["statistic"])
-        assert "ad_pvalue" not in out.columns
+        assert 0.0 < out.loc["x", "ad_pvalue"] <= 1.0
 
     def test_normal_data_not_rejected(self):
         rng = np.random.default_rng(7)
@@ -471,7 +472,7 @@ class TestNormalityReport:
         out = nb.normality_report(empty_col_df, ["x"])
         assert out.loc["x", "n"] == 0
         assert out.loc["x", "normal"] is None
-        assert "inconclusive" in out.loc["x", "conclusion"]
+        assert out.loc["x", "conclusion"] == "no finite values"
 
     @pytest.mark.parametrize("alpha", [0.0, 1.0, -0.1, 1.5])
     def test_bad_alpha_rejected(self, clean_df, alpha):
@@ -1167,6 +1168,7 @@ class TestPublicSurface:
         assert set(stylers) == {
             "outlier_style", "style_significance", "style_effect_size",
             "demean_style", "zscore_style", "iqr_outlier_style",
+            "missingness_style", "scale_compare_style",
         }
         assert set(transforms) == {"scale_columns", "winsorize_columns"}
 

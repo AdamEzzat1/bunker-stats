@@ -455,11 +455,24 @@ class TestCovMatrixSkipnaBlockedKernel:
             scale = np.sqrt(self._pairwise_cov(X, i, i) * self._pairwise_cov(X, j, j))
             assert abs(got[i, j] - self._pairwise_cov(X, i, j)) / scale < 1e-12, (i, j)
 
-    def test_corr_skipna_is_cov_skipna_normalized_by_its_diagonal(self):
+    def test_corr_skipna_is_pairwise_complete(self):
+        """Each entry is the correlation of the rows where both columns are
+        finite. (Up to 0.3.1 this test pinned the old rule, the pairwise
+        covariance over the square roots of its own diagonal, which
+        standardizes each column over its own rows instead.)"""
         X = self._holed(6_000, 12, 0.05, seed=9)
+        got = bsr.corr_matrix_skipna_np(X)
+        p = X.shape[1]
+        want = np.eye(p)
+        for i in range(p):
+            for j in range(i + 1, p):
+                both = np.isfinite(X[:, i]) & np.isfinite(X[:, j])
+                want[i, j] = want[j, i] = np.corrcoef(X[both, i], X[both, j])[0, 1]
+        np.testing.assert_allclose(got, want, rtol=0, atol=1e-12)
+        # and it is not the old rule on this input
         cov = bsr.cov_matrix_skipna_np(X)
         sd = np.sqrt(np.diag(cov))
-        np.testing.assert_allclose(bsr.corr_matrix_skipna_np(X), cov / np.outer(sd, sd), rtol=0, atol=1e-14)
+        assert np.abs(cov / np.outer(sd, sd) - want).max() > 1e-5
 
     def test_inf_is_treated_as_missing(self):
         X = self._holed(3_000, 5, 0.0, seed=10)

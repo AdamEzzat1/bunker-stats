@@ -2,8 +2,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use statrs::distribution::{ChiSquared, ContinuousCDF};
-
 use super::common::reject_nonfinite;
 
 /// Chi-square survival function with improved numerical stability.
@@ -12,18 +10,7 @@ fn chi2_sf(stat: f64, df: f64) -> f64 {
         return f64::NAN;
     }
     
-    let dist = ChiSquared::new(df).unwrap();
-    let cdf = dist.cdf(stat);
-    
-    // Better handling of numerical precision at extremes
-    if cdf >= 1.0 {
-        return 0.0;
-    }
-    if cdf <= 0.0 {
-        return 1.0;
-    }
-    
-    (1.0 - cdf).max(0.0).min(1.0)
+    super::common::chi2_sf(stat, df)
 }
 
 #[pyfunction]

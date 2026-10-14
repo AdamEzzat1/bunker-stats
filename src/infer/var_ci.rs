@@ -32,7 +32,7 @@ pub fn var_ci_np(
         if xs.len() < 2 {
             return Err(PyValueError::new_err("var_ci requires n >= 2"));
         }
-        if confidence <= 0.0 || confidence >= 1.0 {
+        if !(confidence > 0.0 && confidence < 1.0) {
             return Err(PyValueError::new_err("confidence must be in (0, 1)"));
         }
 

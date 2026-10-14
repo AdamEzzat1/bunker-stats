@@ -94,6 +94,11 @@ pub fn mean_diff_ci_np(
     if xs.len() < 2 {
         return Err(PyValueError::new_err("x must have n>=2"));
     }
+    // Written so that NaN fails too. An out-of-range alpha reaches the
+    // quantile function's assertion, which aborts the process.
+    if !(alpha > 0.0 && alpha < 1.0) {
+        return Err(PyValueError::new_err("alpha must be in (0, 1)"));
+    }
 
     let (diff, se, df) = if let Some(yarr) = y {
         let ys = yarr.as_slice()?;

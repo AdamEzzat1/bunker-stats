@@ -2,9 +2,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use statrs::distribution::{ContinuousCDF, FisherSnedecor};
 
-use super::common::{mean, var_sample, reject_nonfinite};
+use super::common::{chi2_sf, f_sf, mean, var_sample, reject_nonfinite};
 
 /// F-test for equality of two variances.
 ///
@@ -35,6 +34,14 @@ pub fn f_test_var_np(
         if vx <= 0.0 || vy <= 0.0 {
             return Err(PyValueError::new_err("variances must be positive"));
         }
+        // Finite data can still overflow the sum of squares. An infinite variance
+        // makes F infinite or NaN, and the F distribution's CDF panics on that --
+        // which aborts the process in release builds.
+        if !vx.is_finite() || !vy.is_finite() {
+            return Err(PyValueError::new_err(
+                "variance overflowed to infinity; rescale the data",
+            ));
+        }
     
         // F = larger_var / smaller_var (always >= 1)
         let (f_stat, df1, df2) = if vx >= vy {
@@ -43,14 +50,18 @@ pub fn f_test_var_np(
             (vy / vx, (ys.len() - 1) as f64, (xs.len() - 1) as f64)
         };
     
-        let dist = FisherSnedecor::new(df1, df2).unwrap();
-    
-        // Two-sided p-value: 2 * min(P(F >= f), P(F <= f))
-        let upper_tail = 1.0 - dist.cdf(f_stat);
-        let p = (2.0 * upper_tail).clamp(0.0, 1.0);
+        // Two-sided p-value: 2 * min(P(F >= f), P(F <= f)). The lower tail is the
+        // upper tail of the reciprocal with the degrees of freedom swapped, so
+        // neither side is ever formed by subtraction. Putting the larger variance
+        // on top does NOT make the upper tail the smaller one when the degrees of
+        // freedom differ (the median of F(100, 1) is about 2.2), so both are needed.
+        // The ratio of two finite variances can itself overflow; f_sf returns 0.
+        let upper_tail = f_sf(f_stat, df1, df2);
+        let lower_tail = f_sf(1.0 / f_stat, df2, df1);
+        let p = (2.0 * upper_tail.min(lower_tail)).clamp(0.0, 1.0);
         Ok((f_stat, df1, df2, p))
     })?;
-    
+
     let d = PyDict::new_bound(py);
     d.set_item("statistic", f_stat)?;
     d.set_item("pvalue", p)?;
@@ -138,10 +149,8 @@ pub fn bartlett_test_np(
         let chi2_stat = t / c;
     
         // Chi-square with df = k-1
-        use statrs::distribution::ChiSquared;
         let df = (k - 1) as f64;
-        let dist = ChiSquared::new(df).unwrap();
-        let p = (1.0 - dist.cdf(chi2_stat)).clamp(0.0, 1.0);
+        let p = chi2_sf(chi2_stat, df);
         Ok((chi2_stat, df, p))
     })?;
     
