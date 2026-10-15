@@ -115,7 +115,10 @@ pub fn periodogram<'py>(
     x: PyReadonlyArray1<f64>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
     let x = x.as_slice()?;
-    let (freqs, power) = periodogram_fft(x);
+    let (freqs, power) = py.allow_threads(|| {
+        let (freqs, power) = periodogram_fft(x);
+        (freqs, power)
+    });
     let f_arr = PyArray1::from_vec_bound(py, freqs);
     let p_arr = PyArray1::from_vec_bound(py, power);
     Ok((f_arr, p_arr))
@@ -168,61 +171,75 @@ pub fn welch_psd<'py>(
         ));
     }
     
-    use rustfft::{FftPlanner, num_complex::Complex};
+    let (psd_sum, freqs) = py.allow_threads(|| {
+        use rustfft::{FftPlanner, num_complex::Complex};
     
-    // Setup FFT
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(nperseg);
+        // Setup FFT
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(nperseg);
     
-    // Precompute Hann window
-    let nperseg_f = nperseg as f64;
-    let window: Vec<f64> = (0..nperseg)
-        .map(|t| 0.5 * (1.0 - (2.0 * PI * t as f64 / nperseg_f).cos()))
-        .collect();
-    
-    // Window normalization factor
-    let window_norm: f64 = window.iter().map(|w| w * w).sum::<f64>().sqrt();
-    
-    // Accumulate PSDs
-    let k_max = nperseg / 2;
-    let mut psd_sum = vec![0.0; k_max + 1];
-    let freqs: Vec<f64> = (0..=k_max).map(|k| k as f64 / nperseg_f).collect();
-    
-    let mut count = 0;
-    for i in 0..n_segments {
-        let start = i * step;
-        let end = start + nperseg;
-        if end > n {
-            break;
-        }
-        
-        let segment = &x_slice[start..end];
-        
-        // Demean and apply window
-        let mean = segment.iter().sum::<f64>() / nperseg_f;
-        let mut buffer: Vec<Complex<f64>> = segment.iter()
-            .zip(window.iter())
-            .map(|(&s, &w)| Complex::new((s - mean) * w, 0.0))
+        // Precompute Hann window
+        let nperseg_f = nperseg as f64;
+        let window: Vec<f64> = (0..nperseg)
+            .map(|t| 0.5 * (1.0 - (2.0 * PI * t as f64 / nperseg_f).cos()))
             .collect();
-        
-        // FFT
-        fft.process(&mut buffer);
-        
-        // Accumulate power
-        let scale = 1.0 / (nperseg_f * window_norm * window_norm);
-        for k in 0..=k_max {
-            psd_sum[k] += buffer[k].norm_sqr() * scale;
+    
+        // Window power normalization: sum(w^2)
+        let win_sumsq: f64 = window.iter().map(|w| w * w).sum::<f64>();
+
+        // Accumulate PSDs
+        let k_max = nperseg / 2;
+        let mut psd_sum = vec![0.0; k_max + 1];
+        let freqs: Vec<f64> = (0..=k_max).map(|k| k as f64 / nperseg_f).collect();
+
+        let mut count = 0;
+        for i in 0..n_segments {
+            let start = i * step;
+            let end = start + nperseg;
+            if end > n {
+                break;
+            }
+
+            let segment = &x_slice[start..end];
+
+            // Demean and apply window
+            let mean = segment.iter().sum::<f64>() / nperseg_f;
+            let mut buffer: Vec<Complex<f64>> = segment.iter()
+                .zip(window.iter())
+                .map(|(&s, &w)| Complex::new((s - mean) * w, 0.0))
+                .collect();
+
+            // FFT
+            fft.process(&mut buffer);
+
+            // Accumulate power with density scaling: |X_k|^2 / (fs * sum(w^2)),
+            // fs = 1. Matches scipy.signal.welch(scaling='density').
+            let scale = 1.0 / win_sumsq;
+            for k in 0..=k_max {
+                psd_sum[k] += buffer[k].norm_sqr() * scale;
+            }
+
+            count += 1;
         }
-        
-        count += 1;
-    }
-    
-    // Average PSDs
-    let count_f = count as f64;
-    for p in &mut psd_sum {
-        *p /= count_f;
-    }
-    
+
+        // Average PSDs
+        let count_f = count as f64;
+        for p in &mut psd_sum {
+            *p /= count_f;
+        }
+
+        // One-sided spectrum: double every interior bin. DC is never doubled; the
+        // last bin is the Nyquist bin only when nperseg is even, in which case it
+        // is not doubled either (scipy semantics).
+        for k in 1..=k_max {
+            if k == k_max && nperseg % 2 == 0 {
+                continue;
+            }
+            psd_sum[k] *= 2.0;
+        }
+        (psd_sum, freqs)
+    });
+
     Ok((
         PyArray1::from_vec_bound(py, freqs),
         PyArray1::from_vec_bound(py, psd_sum),
@@ -243,22 +260,25 @@ pub fn cumulative_periodogram<'py>(
     x: PyReadonlyArray1<f64>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
     let x = x.as_slice()?;
-    let (freqs, power) = periodogram_fft(x);
+    let (freqs, cumulative) = py.allow_threads(|| {
+        let (freqs, power) = periodogram_fft(x);
     
-    // Compute cumulative sum
-    let mut cumulative = Vec::with_capacity(power.len());
-    let mut sum = 0.0;
-    for &p in &power {
-        sum += p;
-        cumulative.push(sum);
-    }
-    
-    // Normalize by total power
-    if sum > 0.0 {
-        for c in &mut cumulative {
-            *c /= sum;
+        // Compute cumulative sum
+        let mut cumulative = Vec::with_capacity(power.len());
+        let mut sum = 0.0;
+        for &p in &power {
+            sum += p;
+            cumulative.push(sum);
         }
-    }
+    
+        // Normalize by total power
+        if sum > 0.0 {
+            for c in &mut cumulative {
+                *c /= sum;
+            }
+        }
+        (freqs, cumulative)
+    });
     
     Ok((
         PyArray1::from_vec_bound(py, freqs),
@@ -271,22 +291,24 @@ pub fn cumulative_periodogram<'py>(
 /// Python signature:
 ///     dominant_frequency(x) -> float
 #[pyfunction]
-pub fn dominant_frequency(x: PyReadonlyArray1<f64>) -> PyResult<f64> {
+pub fn dominant_frequency(py: Python<'_>, x: PyReadonlyArray1<f64>) -> PyResult<f64> {
     let x = x.as_slice()?;
-    let (freqs, power) = periodogram_fft(x);
+    py.allow_threads(|| {
+        let (freqs, power) = periodogram_fft(x);
     
-    if freqs.len() <= 1 {
-        return Ok(f64::NAN);
-    }
+        if freqs.len() <= 1 {
+            return Ok(f64::NAN);
+        }
     
-    // Skip DC component
-    let max_idx = power[1..].iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(i, _)| i + 1)
-        .unwrap_or(1);
+        // Skip DC component
+        let max_idx = power[1..].iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i + 1)
+            .unwrap_or(1);
     
-    Ok(freqs[max_idx])
+        Ok(freqs[max_idx])
+    })
 }
 
 /// Spectral entropy (FFT-based)
@@ -294,29 +316,31 @@ pub fn dominant_frequency(x: PyReadonlyArray1<f64>) -> PyResult<f64> {
 /// Python signature:
 ///     spectral_entropy(x) -> float
 #[pyfunction]
-pub fn spectral_entropy(x: PyReadonlyArray1<f64>) -> PyResult<f64> {
+pub fn spectral_entropy(py: Python<'_>, x: PyReadonlyArray1<f64>) -> PyResult<f64> {
     let x = x.as_slice()?;
-    let (_, power) = periodogram_fft(x);
+    py.allow_threads(|| {
+        let (_, power) = periodogram_fft(x);
     
-    if power.is_empty() {
-        return Ok(f64::NAN);
-    }
-    
-    let total_power: f64 = power.iter().sum();
-    
-    if total_power <= 0.0 {
-        return Ok(f64::NAN);
-    }
-    
-    let mut entropy = 0.0;
-    for &p in &power {
-        if p > 0.0 {
-            let prob = p / total_power;
-            entropy -= prob * prob.ln();
+        if power.is_empty() {
+            return Ok(f64::NAN);
         }
-    }
     
-    Ok(entropy)
+        let total_power: f64 = power.iter().sum();
+    
+        if total_power <= 0.0 {
+            return Ok(f64::NAN);
+        }
+    
+        let mut entropy = 0.0;
+        for &p in &power {
+            if p > 0.0 {
+                let prob = p / total_power;
+                entropy -= prob * prob.ln();
+            }
+        }
+    
+        Ok(entropy)
+    })
 }
 
 // ======================
@@ -349,7 +373,10 @@ pub fn spectral_peaks<'py>(
     min_height: f64,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
     let x = x.as_slice()?;
-    let (freqs, power) = periodogram_fft(x);
+    let (freqs, power) = py.allow_threads(|| {
+        let (freqs, power) = periodogram_fft(x);
+        (freqs, power)
+    });
     
     if freqs.len() <= 1 {
         return Ok((
@@ -389,38 +416,40 @@ pub fn spectral_peaks<'py>(
 /// Python signature:
 ///     spectral_flatness(x) -> float
 #[pyfunction]
-pub fn spectral_flatness(x: PyReadonlyArray1<f64>) -> PyResult<f64> {
+pub fn spectral_flatness(py: Python<'_>, x: PyReadonlyArray1<f64>) -> PyResult<f64> {
     let x = x.as_slice()?;
-    let (_, power) = periodogram_fft(x);
+    py.allow_threads(|| {
+        let (_, power) = periodogram_fft(x);
     
-    if power.is_empty() {
-        return Ok(f64::NAN);
-    }
+        if power.is_empty() {
+            return Ok(f64::NAN);
+        }
     
-    // Filter out zeros and very small values
-    let valid_power: Vec<f64> = power.iter()
-        .filter(|&&p| p > 1e-10)
-        .copied()
-        .collect();
+        // Filter out zeros and very small values
+        let valid_power: Vec<f64> = power.iter()
+            .filter(|&&p| p > 1e-10)
+            .copied()
+            .collect();
     
-    if valid_power.is_empty() {
-        return Ok(f64::NAN);
-    }
+        if valid_power.is_empty() {
+            return Ok(f64::NAN);
+        }
     
-    let n = valid_power.len() as f64;
+        let n = valid_power.len() as f64;
     
-    // Geometric mean (use log to avoid overflow)
-    let log_geo_mean = valid_power.iter().map(|p| p.ln()).sum::<f64>() / n;
-    let geo_mean = log_geo_mean.exp();
+        // Geometric mean (use log to avoid overflow)
+        let log_geo_mean = valid_power.iter().map(|p| p.ln()).sum::<f64>() / n;
+        let geo_mean = log_geo_mean.exp();
     
-    // Arithmetic mean
-    let arith_mean = valid_power.iter().sum::<f64>() / n;
+        // Arithmetic mean
+        let arith_mean = valid_power.iter().sum::<f64>() / n;
     
-    if arith_mean <= 0.0 {
-        return Ok(f64::NAN);
-    }
+        if arith_mean <= 0.0 {
+            return Ok(f64::NAN);
+        }
     
-    Ok(geo_mean / arith_mean)
+        Ok(geo_mean / arith_mean)
+    })
 }
 
 /// Band power (integrate power in frequency band)
@@ -429,26 +458,29 @@ pub fn spectral_flatness(x: PyReadonlyArray1<f64>) -> PyResult<f64> {
 ///     band_power(x, freq_low=0.0, freq_high=0.5) -> float
 #[pyfunction(signature = (x, freq_low=0.0, freq_high=0.5))]
 pub fn band_power(
+    py: Python<'_>,
     x: PyReadonlyArray1<f64>,
     freq_low: f64,
     freq_high: f64,
 ) -> PyResult<f64> {
     let x = x.as_slice()?;
-    let (freqs, power) = periodogram_fft(x);
+    py.allow_threads(|| {
+        let (freqs, power) = periodogram_fft(x);
     
-    if freqs.is_empty() {
-        return Ok(f64::NAN);
-    }
-    
-    // Find indices in frequency band
-    let mut total_power = 0.0;
-    for (i, &freq) in freqs.iter().enumerate() {
-        if freq >= freq_low && freq <= freq_high {
-            total_power += power[i];
+        if freqs.is_empty() {
+            return Ok(f64::NAN);
         }
-    }
     
-    Ok(total_power)
+        // Find indices in frequency band
+        let mut total_power = 0.0;
+        for (i, &freq) in freqs.iter().enumerate() {
+            if freq >= freq_low && freq <= freq_high {
+                total_power += power[i];
+            }
+        }
+    
+        Ok(total_power)
+    })
 }
 
 /// Spectral centroid (center of mass of spectrum)
@@ -456,26 +488,28 @@ pub fn band_power(
 /// Python signature:
 ///     spectral_centroid(x) -> float
 #[pyfunction]
-pub fn spectral_centroid(x: PyReadonlyArray1<f64>) -> PyResult<f64> {
+pub fn spectral_centroid(py: Python<'_>, x: PyReadonlyArray1<f64>) -> PyResult<f64> {
     let x = x.as_slice()?;
-    let (freqs, power) = periodogram_fft(x);
+    py.allow_threads(|| {
+        let (freqs, power) = periodogram_fft(x);
     
-    if freqs.is_empty() {
-        return Ok(f64::NAN);
-    }
+        if freqs.is_empty() {
+            return Ok(f64::NAN);
+        }
     
-    let total_power: f64 = power.iter().sum();
+        let total_power: f64 = power.iter().sum();
     
-    if total_power <= 0.0 {
-        return Ok(f64::NAN);
-    }
+        if total_power <= 0.0 {
+            return Ok(f64::NAN);
+        }
     
-    let weighted_sum: f64 = freqs.iter()
-        .zip(power.iter())
-        .map(|(f, p)| f * p)
-        .sum();
+        let weighted_sum: f64 = freqs.iter()
+            .zip(power.iter())
+            .map(|(f, p)| f * p)
+            .sum();
     
-    Ok(weighted_sum / total_power)
+        Ok(weighted_sum / total_power)
+    })
 }
 
 /// Spectral rolloff (frequency below which X% of power is contained)
@@ -484,31 +518,34 @@ pub fn spectral_centroid(x: PyReadonlyArray1<f64>) -> PyResult<f64> {
 ///     spectral_rolloff(x, percentile=0.85) -> float
 #[pyfunction(signature = (x, percentile=0.85))]
 pub fn spectral_rolloff(
+    py: Python<'_>,
     x: PyReadonlyArray1<f64>,
     percentile: f64,
 ) -> PyResult<f64> {
     let x = x.as_slice()?;
-    let (freqs, power) = periodogram_fft(x);
+    py.allow_threads(|| {
+        let (freqs, power) = periodogram_fft(x);
     
-    if freqs.is_empty() {
-        return Ok(f64::NAN);
-    }
-    
-    let total_power: f64 = power.iter().sum();
-    
-    if total_power <= 0.0 {
-        return Ok(f64::NAN);
-    }
-    
-    let threshold = total_power * percentile;
-    let mut cumsum = 0.0;
-    
-    for (i, &p) in power.iter().enumerate() {
-        cumsum += p;
-        if cumsum >= threshold {
-            return Ok(freqs[i]);
+        if freqs.is_empty() {
+            return Ok(f64::NAN);
         }
-    }
     
-    Ok(freqs[freqs.len() - 1])
+        let total_power: f64 = power.iter().sum();
+    
+        if total_power <= 0.0 {
+            return Ok(f64::NAN);
+        }
+    
+        let threshold = total_power * percentile;
+        let mut cumsum = 0.0;
+    
+        for (i, &p) in power.iter().enumerate() {
+            cumsum += p;
+            if cumsum >= threshold {
+                return Ok(freqs[i]);
+            }
+        }
+    
+        Ok(freqs[freqs.len() - 1])
+    })
 }

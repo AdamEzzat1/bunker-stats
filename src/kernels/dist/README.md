@@ -20,6 +20,26 @@ the `bunker_stats` Python facade (`bunker_stats/__init__.py`), so
 `from bunker_stats import norm_cdf` and `from bunker_stats_rs import norm_cdf`
 resolve to the same native function.
 
+
+## Using the Python facade
+
+New code should reach these kernels through the `bunker_stats` facade, which
+exposes clean names with keyword arguments. The raw `bunker_stats_rs` names
+documented below remain available and stable; the facade adds ergonomics on
+top of the same kernels:
+
+```python
+import bunker_stats as bs
+
+bs.norm_ppf(q)     # facade re-exports the distribution family unchanged
+bs.exp_pdf(x, 2.0)  # rate-parameterized
+```
+
+Where a statistic has strict and skip-NaN variants, the facade exposes ONE
+name with a `skipna=` keyword; `skipna=True` dispatches to the skip-NaN kernel
+documented below (the twin kernels stay separate in Rust, so there is no
+branch inside the hot loop).
+
 ## Input and output conventions
 
 Every function maps a 1-D `float64` NumPy array to a new 1-D `float64` NumPy

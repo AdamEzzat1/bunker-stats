@@ -144,10 +144,10 @@ class TestTrimmedMean:
         assert abs(clean_result - outlier_result) < 1.0
     
     def test_invalid_proportion(self):
-        """Test that over-trimming returns NaN"""
+        """v0.3: over-trimming raises ValueError instead of returning NaN"""
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        result = bs.trimmed_mean(data, 0.5)  # 50% from each end = no data left
-        assert np.isnan(result)
+        with pytest.raises(ValueError):
+            bs.trimmed_mean(data, 0.5)  # 50% from each end = no data left
 
 
 class TestTrimmedStd:
@@ -182,20 +182,26 @@ class TestWinsorizedMean:
     """Test Winsorized mean"""
     
     def test_basic(self):
-        """Test basic Winsorization"""
+        """Test basic Winsorization (v0.3: quantile fractions in [0, 1])"""
         data = np.array([1.0, 2.0, 3.0, 4.0, 100.0])
-        result = bs.winsorized_mean(data, 10.0, 90.0)
-        
+        result = bs.winsorized_mean(data, 0.1, 0.9)
+
         # Should clip 100 to something reasonable
         assert result < 20.0
         assert result > np.mean(data[:4])
-    
+
     def test_no_winsorization(self):
-        """With extreme percentiles, should approximate regular mean"""
+        """With extreme quantiles, should approximate regular mean"""
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        result = bs.winsorized_mean(data, 0.0, 100.0)
+        result = bs.winsorized_mean(data, 0.0, 1.0)
         expected = np.mean(data)
         assert abs(result - expected) < EPSILON
+
+    def test_percent_units_rejected(self):
+        """v0.3: percent-style arguments raise instead of being reinterpreted"""
+        data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        with pytest.raises(ValueError):
+            bs.winsorized_mean(data, 10.0, 90.0)
 
 
 class TestIQR:

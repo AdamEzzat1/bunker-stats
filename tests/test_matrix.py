@@ -15,6 +15,7 @@ Run with: pytest test_matrix.py -v
 For coverage: pytest test_matrix.py -v --cov=bunker_stats_rs --cov-report=html
 """
 
+import importlib.util
 import pytest
 import numpy as np
 from scipy import stats
@@ -22,8 +23,11 @@ from scipy.spatial.distance import pdist, squareform
 import sys
 
 # Build first: maturin develop --release
+# The compiled module's import path varies by layout (in-package for mixed
+# maturin builds, top-level for old wheels); the facade's _rs handle already
+# resolves all of them, so tests must go through it rather than guessing.
 try:
-    import bunker_stats_rs as bsr
+    from bunker_stats import _rs as bsr
 except ImportError:
     print("ERROR: bunker_stats_rs not installed. Run: maturin develop --release")
     sys.exit(1)
@@ -291,6 +295,220 @@ class TestCovMatrixSkipna:
         # Only 1 valid pair for cov[0,1], should be NaN
         assert np.isnan(cov[0, 1])
         assert np.isnan(cov[1, 0])
+
+
+class TestCovMatrixBlockedKernel:
+    """The dense covariance kernels process rows in cache-sized blocks.
+
+    These shapes cross block boundaries (ragged last block, lane tails) and pin
+    the reproducibility contract: same values -> same bytes, whatever the input
+    layout and however many times or from however many threads it is called.
+    """
+
+    @pytest.mark.parametrize("n,p", [(20_003, 3), (9_001, 40), (333, 700)])
+    def test_multi_block_matches_numpy(self, n, p):
+        X = np.random.default_rng(n + p).normal(size=(n, p))
+        want = np.cov(X, rowvar=False)
+        scale = np.sqrt(np.outer(np.diag(want), np.diag(want)))
+
+        # Error in correlation units, so near-zero covariances don't dominate.
+        assert np.max(np.abs(bsr.cov_matrix_np(X) - want) / scale) < 1e-12
+        assert np.max(np.abs(bsr.cov_matrix_bias_np(X) * n / (n - 1) - want) / scale) < 1e-12
+
+        Xc = X - X.mean(axis=0)
+        assert np.max(np.abs(bsr.cov_matrix_centered_np(Xc) - want) / scale) < 1e-12
+
+    def test_exactly_symmetric(self):
+        cov = bsr.cov_matrix_np(np.random.default_rng(1).normal(size=(5_000, 60)))
+        assert np.array_equal(cov, cov.T)
+
+    def test_layout_does_not_change_the_bytes(self):
+        X = np.random.default_rng(2).normal(size=(12_345, 17))
+        wide = np.empty((12_345, 34))
+        wide[:, ::2] = X
+
+        base = bsr.cov_matrix_np(X).tobytes()
+        assert bsr.cov_matrix_np(np.asfortranarray(X)).tobytes() == base
+        assert bsr.cov_matrix_np(wide[:, ::2]).tobytes() == base
+
+    def test_repeated_and_concurrent_calls_are_bit_identical(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        X = np.random.default_rng(3).normal(size=(4_000, 120))
+        base = bsr.cov_matrix_np(X).tobytes()
+        assert bsr.cov_matrix_np(X).tobytes() == base
+
+        # The binding releases the GIL, so these genuinely overlap.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(lambda _: bsr.cov_matrix_np(X).tobytes(), range(8)))
+        assert all(r == base for r in results)
+
+    def test_large_offset_stays_accurate(self):
+        X = np.random.default_rng(4).normal(size=(50_000, 4))
+        want = bsr.cov_matrix_np(X)
+        got = bsr.cov_matrix_np(X + 1.0e8)
+        np.testing.assert_allclose(got, want, rtol=0, atol=1e-7)
+
+    def test_nan_poisons_only_its_own_column(self):
+        X = np.random.default_rng(5).normal(size=(300, 4))
+        X[17, 2] = np.nan
+        nan = np.isnan(bsr.cov_matrix_np(X))
+        expected = np.zeros((4, 4), dtype=bool)
+        expected[2, :] = expected[:, 2] = True
+        assert np.array_equal(nan, expected)
+
+
+class TestGramAndDistanceBlockedKernels:
+    """X^T X, X X^T and the column-distance kernels share the blocked routine."""
+
+    @pytest.mark.parametrize("n,p", [(20_003, 3), (5_001, 24), (500, 300)])
+    def test_multi_block_matches_numpy_and_scipy(self, n, p):
+        X = np.random.default_rng(n + p).normal(size=(n, p)) + 0.25
+
+        xtx = X.T @ X
+        scale = np.sqrt(np.outer(np.diag(xtx), np.diag(xtx)))
+        assert np.max(np.abs(bsr.xtx_matrix_np(X) - xtx) / scale) < 1e-12
+
+        np.testing.assert_allclose(
+            bsr.pairwise_euclidean_cols_np(X), squareform(pdist(X.T, "euclidean")), rtol=1e-12, atol=0
+        )
+        np.testing.assert_allclose(
+            bsr.pairwise_cosine_cols_np(X), squareform(pdist(X.T, "cosine")), rtol=0, atol=1e-12
+        )
+
+    @pytest.mark.parametrize("n,p", [(7, 1), (60, 37), (25, 5_003), (300, 1_200)])
+    def test_xxt_matches_numpy_across_column_blocks(self, n, p):
+        X = np.random.default_rng(n + p).normal(size=(n, p)) + 0.25
+        want = X @ X.T
+        scale = np.sqrt(np.outer(np.diag(want), np.diag(want)))
+        got = bsr.xxt_matrix_np(X)
+        assert np.max(np.abs(got - want) / scale) < 1e-12
+        assert np.array_equal(got, got.T)
+
+    @pytest.mark.parametrize(
+        "name", ["xtx_matrix_np", "xxt_matrix_np", "pairwise_euclidean_cols_np", "pairwise_cosine_cols_np"]
+    )
+    def test_layout_repeats_and_threads_do_not_change_the_bytes(self, name):
+        from concurrent.futures import ThreadPoolExecutor
+
+        fn = getattr(bsr, name)
+        X = np.random.default_rng(6).normal(size=(1_500, 130))
+        wide = np.empty((1_500, 260))
+        wide[:, ::2] = X
+
+        base = fn(X).tobytes()
+        assert fn(X).tobytes() == base
+        assert fn(np.asfortranarray(X)).tobytes() == base
+        assert fn(wide[:, ::2]).tobytes() == base
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            assert all(r == base for r in pool.map(lambda _: fn(X).tobytes(), range(8)))
+
+    def test_identical_columns_are_at_distance_exactly_zero(self):
+        X = np.random.default_rng(7).normal(size=(10_000, 3)) + 1.0e6
+        X[:, 2] = X[:, 0]
+        dist = bsr.pairwise_euclidean_cols_np(X)
+        assert dist[0, 2] == 0.0 and dist[2, 0] == 0.0
+        assert dist[0, 1] > 0.0
+        assert np.array_equal(np.diag(dist), np.zeros(3))
+
+    def test_cosine_zero_norm_column_is_nan(self):
+        X = np.random.default_rng(8).normal(size=(500, 4))
+        X[:, 1] = 0.0
+        nan = np.isnan(bsr.pairwise_cosine_cols_np(X))
+        expected = np.zeros((4, 4), dtype=bool)
+        expected[1, :] = expected[:, 1] = True
+        assert np.array_equal(nan, expected)
+
+
+class TestCovMatrixSkipnaBlockedKernel:
+    """Pairwise-complete covariance on the blocked routine."""
+
+    @staticmethod
+    def _holed(n, p, frac, seed):
+        rng = np.random.default_rng(seed)
+        X = rng.normal(size=(n, p)) + 0.25
+        X[rng.random((n, p)) < frac] = np.nan
+        return X
+
+    @staticmethod
+    def _pairwise_cov(X, i, j):
+        """Two-pass covariance over the rows where both columns are finite.
+
+        (np.ma.cov is not a reference here: it centers each column with the
+        mean of all its own values, not the pairwise-complete mean.)
+        """
+        keep = np.isfinite(X[:, i]) & np.isfinite(X[:, j])
+        a, b = X[keep, i], X[keep, j]
+        return np.dot(a - a.mean(), b - b.mean()) / (keep.sum() - 1)
+
+    @pytest.mark.parametrize("n,p", [(20_003, 3), (5_001, 24), (500, 300)])
+    @pytest.mark.parametrize("frac", [0.0, 0.01, 0.3])
+    def test_multi_block_matches_pairwise_reference(self, n, p, frac):
+        X = self._holed(n, p, frac, seed=n + p)
+        got = bsr.cov_matrix_skipna_np(X)
+        assert np.array_equal(got, got.T)
+
+        rng = np.random.default_rng(0)
+        pairs = {(0, 0), (0, p - 1), (p - 1, p - 1)} | {tuple(rng.integers(0, p, 2)) for _ in range(60)}
+        for i, j in pairs:
+            scale = np.sqrt(self._pairwise_cov(X, i, i) * self._pairwise_cov(X, j, j))
+            assert abs(got[i, j] - self._pairwise_cov(X, i, j)) / scale < 1e-12, (i, j)
+
+    def test_corr_skipna_is_pairwise_complete(self):
+        """Each entry is the correlation of the rows where both columns are
+        finite. (Up to 0.3.1 this test pinned the old rule, the pairwise
+        covariance over the square roots of its own diagonal, which
+        standardizes each column over its own rows instead.)"""
+        X = self._holed(6_000, 12, 0.05, seed=9)
+        got = bsr.corr_matrix_skipna_np(X)
+        p = X.shape[1]
+        want = np.eye(p)
+        for i in range(p):
+            for j in range(i + 1, p):
+                both = np.isfinite(X[:, i]) & np.isfinite(X[:, j])
+                want[i, j] = want[j, i] = np.corrcoef(X[both, i], X[both, j])[0, 1]
+        np.testing.assert_allclose(got, want, rtol=0, atol=1e-12)
+        # and it is not the old rule on this input
+        cov = bsr.cov_matrix_skipna_np(X)
+        sd = np.sqrt(np.diag(cov))
+        assert np.abs(cov / np.outer(sd, sd) - want).max() > 1e-5
+
+    def test_inf_is_treated_as_missing(self):
+        X = self._holed(3_000, 5, 0.0, seed=10)
+        with_inf, with_nan = X.copy(), X.copy()
+        with_inf[::9, 1], with_nan[::9, 1] = np.inf, np.nan
+        with_inf[4::11, 3], with_nan[4::11, 3] = -np.inf, np.nan
+        assert bsr.cov_matrix_skipna_np(with_inf).tobytes() == bsr.cov_matrix_skipna_np(with_nan).tobytes()
+
+    def test_nans_in_one_column_do_not_change_other_entries_bytes(self):
+        X = self._holed(25_000, 3, 0.0, seed=11)
+        holed = X.copy()
+        holed[::7, 2] = np.nan
+        a, b = bsr.cov_matrix_skipna_np(X), bsr.cov_matrix_skipna_np(holed)
+        assert a[:2, :2].tobytes() == b[:2, :2].tobytes()
+        assert a[0, 2] != b[0, 2]
+
+    def test_layout_repeats_and_threads_do_not_change_the_bytes(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        X = self._holed(1_500, 130, 0.05, seed=12)
+        wide = np.empty((1_500, 260))
+        wide[:, ::2] = X
+
+        base = bsr.cov_matrix_skipna_np(X).tobytes()
+        assert bsr.cov_matrix_skipna_np(X).tobytes() == base
+        assert bsr.cov_matrix_skipna_np(np.asfortranarray(X)).tobytes() == base
+        assert bsr.cov_matrix_skipna_np(wide[:, ::2]).tobytes() == base
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            assert all(r == base for r in pool.map(lambda _: bsr.cov_matrix_skipna_np(X).tobytes(), range(8)))
+
+    def test_too_few_shared_rows_is_nan(self):
+        X = np.array([[1.0, np.nan], [np.nan, 2.0], [3.0, np.nan], [4.0, 5.0]])
+        cov = bsr.cov_matrix_skipna_np(X)
+        assert np.isnan(cov[0, 1]) and np.isnan(cov[1, 0])
+        np.testing.assert_allclose(np.diag(cov), [7.0 / 3.0, 4.5], rtol=1e-15)
 
 
 # ==============================================================================
@@ -882,14 +1100,17 @@ class TestShapeAndTypes:
 # PERFORMANCE REGRESSION TESTS
 # ==============================================================================
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("pytest_benchmark") is None,
+    reason="pytest-benchmark plugin not installed (pip install pytest-benchmark)",
+)
 class TestPerformanceRegression:
     """Tests to catch performance regressions"""
-    
+
     def test_medium_matrix_timing(self, medium_matrix, benchmark):
         """Benchmark medium matrix covariance"""
-        if 'benchmark' in dir():
-            result = benchmark(bsr.cov_matrix_np, medium_matrix)
-            assert result.shape == (20, 20)
+        result = benchmark(bsr.cov_matrix_np, medium_matrix)
+        assert result.shape == (20, 20)
     
     def test_parallel_gives_same_result(self, large_matrix):
         """Parallel and sequential should give identical results"""

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "bunker-stats-rs"
-version = "0.2.9"
+version = "0.3.1"
 description = "Ultra-fast Rust-powered statistics and time-series utilities for Python."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -13,7 +13,8 @@ authors = [
     { name = "Adam Ezzat", email = "adamezzat24@gmail.com" }
 ]
 
-# Runtime Python deps used by the extension / Python helpers
+# Runtime Python deps used by the extension / Python helpers.
+# Deliberately numpy-only: `import bunker_stats` must not require pandas.
 dependencies = [
     "numpy>=1.22"
 ]
@@ -41,6 +42,33 @@ classifiers = [
     "Topic :: Utilities"
 ]
 
+# -------------------------------
+# Optional extras
+# -------------------------------
+# NOTE: this sub-table must stay AFTER every plain `[project]` key above --
+# in TOML a table header terminates the preceding table, so placing it earlier
+# would swallow `classifiers` into optional-dependencies.
+#
+# `notebook` powers bunker_stats.notebook -- the pandas/Jupyter reporting layer:
+#   pandas     -- DataFrame inputs and the *_report / *_columns return types
+#   jinja2     -- pandas ships Styler as an *optional* feature; `df.style` raises
+#                 AttributeError without it, so every *_style helper needs it
+#   matplotlib -- required by Styler.background_gradient, used by corr_heatmap
+#
+#   pip install "bunker-stats-rs[notebook]"
+#
+# `pandas` is the minimal extra: reports and column transforms only, no Stylers.
+[project.optional-dependencies]
+pandas = [
+    "pandas>=1.3",
+]
+notebook = [
+    "pandas>=1.3",
+    "jinja2>=3.0",
+    "matplotlib>=3.4",   # pandas Styler.background_gradient colormaps only
+    "plotly>=5.0",       # interactive .plot_* figure methods
+]
+
 [project.urls]
 homepage = "https://github.com/AdamEzzat1/bunker-stats"
 repository = "https://github.com/AdamEzzat1/bunker-stats"
@@ -54,9 +82,19 @@ issues = "https://github.com/AdamEzzat1/bunker-stats/issues"
 # Build the extension with the pyo3/extension-module feature enabled (it is not a
 # default dependency feature so that `cargo test`/`cargo bolero` can link libpython).
 features = ["extension-module"]
+# Mixed Rust/Python layout: ship the pure-Python `bunker_stats` package (facade,
+# notebook layer, rich results, resampling/rolling/tsa wrappers) in the wheel,
+# with the compiled extension embedded as `bunker_stats.bunker_stats_rs` — the
+# first path the facade's import resolution tries. Without these two lines the
+# wheel contains ONLY the bare extension module and `import bunker_stats` fails
+# for installed users (the 0.2.x wheels had exactly that gap).
+python-source = "."
+module-name = "bunker_stats.bunker_stats_rs"
 exclude = [
     ".venv/**",
+    ".venv*/**",
     "venv/**",
+    "examples/social/**",
     "target/**",
     "dist/**",
     ".hypothesis/**",
@@ -64,4 +102,12 @@ exclude = [
     "**/__pycache__/**",
     "**/*.pyc",
     ".ipynb_checkpoints/**",
+]
+
+# -------------------------------
+# pytest configuration
+# -------------------------------
+[tool.pytest.ini_options]
+markers = [
+    "slow: long-running stress/property tests (deselect with -m 'not slow')",
 ]

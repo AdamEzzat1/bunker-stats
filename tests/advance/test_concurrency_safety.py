@@ -52,6 +52,22 @@ def _permutation_test(x, y, n_permutations=1000, seed=0):
     return {"pvalue": pvalue, "statistic": stat}
 
 
+# ---------------------------------------------------------------------------
+# Module-level workers for the ProcessPoolExecutor tests. Windows uses the
+# `spawn` start method, which pickles the submitted callable — a function
+# defined inside a test body is unpicklable there ("Can't pickle local
+# object"), so these must live at module scope and receive the data as an
+# argument instead of closing over it.
+# ---------------------------------------------------------------------------
+
+def _proc_bootstrap_worker(data, seed):
+    return _bootstrap_ci(data, np.mean, n_resamples=1000, seed=seed)
+
+
+def _proc_rolling_worker(data):
+    return bs.rolling_mean_std_axis0_np(data, 50)
+
+
 # ============================================================================
 # Determinism Tests
 # ============================================================================
@@ -246,12 +262,9 @@ class TestProcessSafety:
         """Bootstrap works correctly in multi-process context"""
         np.random.seed(42)
         data = np.random.randn(1000)
-        
-        def run_bootstrap(seed):
-            return _bootstrap_ci(data, np.mean, n_resamples=1000, seed=seed)
-        
+
         with ProcessPoolExecutor(max_workers=2) as executor:
-            futures = [executor.submit(run_bootstrap, i) for i in range(4)]
+            futures = [executor.submit(_proc_bootstrap_worker, data, i) for i in range(4)]
             results = [f.result() for f in futures]
         
         # All results should be valid
@@ -264,12 +277,9 @@ class TestProcessSafety:
         """Rolling stats work in multi-process context"""
         np.random.seed(42)
         data = np.random.randn(10000, 10)
-        
-        def compute_rolling(_):
-            return bs.rolling_mean_std_axis0_np(data, 50)
-        
+
         with ProcessPoolExecutor(max_workers=2) as executor:
-            futures = [executor.submit(compute_rolling, i) for i in range(4)]
+            futures = [executor.submit(_proc_rolling_worker, data) for _ in range(4)]
             results = [f.result() for f in futures]
         
         # All results should be identical

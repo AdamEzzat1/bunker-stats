@@ -338,7 +338,32 @@ pub(crate) fn biweight_midvariance_slice(xs: &[f64], c: f64) -> f64 {
     (n as f64) * numerator / (denominator * denominator)
 }
 
-/// Qn scale estimator - uses select_nth for quartile (Optimization #1)
+/// Normal-consistency constant of Qn: `1 / (sqrt(2) * Phi^-1(5/8))`.
+const QN_CONSISTENCY: f64 = 2.219_144_465_985_076;
+
+/// 0-indexed rank of the pairwise difference Qn selects.
+///
+/// Rousseeuw & Croux (1993) take the `k`-th smallest of the `C(n, 2)`
+/// differences with `k = C(h, 2)` and `h = floor(n/2) + 1` (1-indexed).
+/// That is close to, but not the same as, the first quartile of the
+/// differences: `floor(C(n,2) / 4)` agrees for odd n up to 9 and is a lower
+/// rank otherwise, by enough to make the estimate ~25% smaller at n = 10.
+#[inline]
+fn qn_rank(n: usize) -> usize {
+    let h = n / 2 + 1;
+    h * (h - 1) / 2 - 1
+}
+
+/// Rousseeuw & Croux's Qn scale estimator: `QN_CONSISTENCY` times the
+/// `C(floor(n/2) + 1, 2)`-th smallest pairwise absolute difference.
+///
+/// No finite-sample correction factor is applied, as in
+/// `statsmodels.robust.scale.qn_scale` (R's `robustbase::Qn` applies one by
+/// default).
+///
+/// Runs in O(n log n) time and O(n) memory. Materialising the `n(n-1)/2`
+/// differences needs 160 GB at n = 200,000, and a failed allocation aborts
+/// the process.
 pub(crate) fn qn_scale_slice(xs: &[f64]) -> f64 {
     let n = xs.len();
     if n < 2 {
@@ -349,14 +374,40 @@ pub(crate) fn qn_scale_slice(xs: &[f64]) -> f64 {
         return f64::NAN;
     }
 
-    if n == 2 {
-        return (xs[0] - xs[1]).abs() * 0.8224;
+    let k = qn_rank(n);
+
+    // +/-Inf needs no quadratic buffer either. Sorted with `total_cmp`, the
+    // pairwise differences fall into three runs: the finite ones (both values
+    // finite), then +Inf (one infinite value, or two of opposite sign), then
+    // NaN (`Inf - Inf` for two of the same sign). Only the first run has to be
+    // searched; the others are identified by counting.
+    let n_pos = xs.iter().filter(|v| **v == f64::INFINITY).count();
+    let n_neg = xs.iter().filter(|v| **v == f64::NEG_INFINITY).count();
+    if n_pos + n_neg == 0 {
+        return kth_pairwise_abs_diff(xs, k) * QN_CONSISTENCY;
     }
 
-    // Compute pairwise differences
-    let num_pairs = n * (n - 1) / 2;
-    let mut diffs = Vec::with_capacity(num_pairs);
-    
+    let finite: Vec<f64> = xs.iter().copied().filter(|v| v.is_finite()).collect();
+    let m = finite.len();
+    let finite_pairs = m * m.saturating_sub(1) / 2;
+    if k < finite_pairs {
+        return kth_pairwise_abs_diff(&finite, k) * QN_CONSISTENCY;
+}
+    let infinite_pairs = m * (n_pos + n_neg) + n_pos * n_neg;
+    if k < finite_pairs + infinite_pairs {
+        f64::INFINITY
+    } else {
+        f64::NAN
+    }
+}
+
+/// Reference Qn: select among all materialised pairwise differences. Test
+/// only -- it allocates n(n-1)/2 values.
+#[cfg(test)]
+fn qn_scale_brute_force(xs: &[f64]) -> f64 {
+    let n = xs.len();
+    let mut diffs = Vec::with_capacity(n * (n - 1) / 2);
+
     for i in 0..n {
         for j in (i + 1)..n {
             diffs.push((xs[i] - xs[j]).abs());
@@ -367,11 +418,54 @@ pub(crate) fn qn_scale_slice(xs: &[f64]) -> f64 {
         return f64::NAN;
     }
 
-    // Use selection for first quartile (Optimization #1)
-    let k = diffs.len() / 4;
+    let k = qn_rank(n);
     let (_, selected, _) = diffs.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
 
-    *selected * 2.2219
+    *selected * QN_CONSISTENCY
+}
+
+/// The `k`-th smallest (0-indexed) of the `n(n-1)/2` values `|x_i - x_j|`,
+/// for finite `xs`, without materialising them.
+///
+/// After sorting, the number of pairs with difference `<= d` is a two-pointer
+/// sweep. That count is a step function of `d` that only rises at values some
+/// pair actually attains, so the smallest `d` whose count exceeds `k` *is* the
+/// answer, bit for bit. Non-negative floats order the same as their bit
+/// patterns, so that smallest `d` is found by bisecting on the bits: at most
+/// 64 sweeps regardless of the data's scale.
+fn kth_pairwise_abs_diff(xs: &[f64], k: usize) -> f64 {
+    let mut sorted = xs.to_vec();
+    sorted.sort_unstable_by(|a, b| a.total_cmp(b));
+    let n = sorted.len();
+
+    // Pairs (i < j) with sorted[j] - sorted[i] <= d. Floating-point
+    // subtraction is monotone in each argument, so the left pointer only
+    // ever moves right as j grows.
+    let count_within = |d: f64| -> usize {
+        let mut i = 0;
+        let mut count = 0;
+        for j in 0..n {
+            while sorted[j] - sorted[i] > d {
+                i += 1;
+            }
+            count += j - i;
+        }
+        count
+    };
+
+    // The range may overflow to +Inf for extreme inputs; its bit pattern still
+    // bounds every finite difference from above.
+    let mut lo = 0u64;
+    let mut hi = (sorted[n - 1] - sorted[0]).to_bits();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if count_within(f64::from_bits(mid)) > k {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    f64::from_bits(lo)
 }
 
 /// Huber M-estimator
@@ -635,6 +729,201 @@ mod proptests {
             let lhs = mad_slice(&scaled);
             let rhs = a.abs() * mad_slice(&xs);
             prop_assert!((lhs - rhs).abs() <= 1e-6 * (1.0 + rhs.abs()));
+        }
+    }
+}
+#[cfg(test)]
+mod qn_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Deterministic pseudo-random stream (no extra dev-dependency).
+    fn lcg(state: &mut u64) -> f64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((*state >> 11) as f64) / ((1u64 << 53) as f64)
+    }
+
+    /// Values from `statsmodels.robust.scale.qn_scale`, which implements the
+    /// Rousseeuw-Croux definition independently (their O(n log n) algorithm).
+    /// The brute-force reference below shares `qn_rank` with the kernel, so
+    /// it cannot catch a wrong rank; these can. The even-n rows are the ones
+    /// the old first-quartile rank got wrong (it gave 2.2219, 2.2219 and
+    /// 4.6660 for the 6-, 8- and 10-point samples).
+    #[test]
+    fn qn_matches_statsmodels() {
+        let cases: &[(&[f64], f64)] = &[
+            (&[1.0, 2.0], 2.219144465985076),
+            (&[1.0, 2.0, 4.0], 2.219144465985076),
+            (&[1.0, 2.0, 3.0, 4.0, 5.0, 100.0], 4.438288931970152),
+            (&[3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0], 4.438288931970152),
+            (&[2.5, -1.0, 0.3, 7.0, 7.0, 4.2, -3.3, 0.0, 1.1, 9.4], 6.213604504758212),
+            (
+                &[0.1, 0.4, 0.9, 1.6, 2.5, 3.6, 4.9, 6.4, 8.1, 10.0, 12.1],
+                4.660203378568658,
+            ),
+        ];
+        for (xs, want) in cases {
+            let got = qn_scale_slice(xs);
+            assert!(((got - want) / want).abs() < 1e-13, "{xs:?}: {got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn qn_rank_is_the_rousseeuw_croux_k() {
+        // (n, k) with k = C(floor(n/2) + 1, 2), 1-indexed
+        for &(n, k) in &[(2usize, 1usize), (3, 1), (4, 3), (5, 3), (6, 6), (7, 6), (10, 15), (11, 15), (100, 1275)] {
+            assert_eq!(qn_rank(n) + 1, k, "n = {n}");
+            assert!(qn_rank(n) < n * (n - 1) / 2);
+        }
+    }
+
+    /// For normal data Qn estimates sigma (that is what the constant is for).
+    #[test]
+    fn qn_is_consistent_for_normal_sigma() {
+        let mut state = 0xD1B54A32D192ED03u64;
+        let xs: Vec<f64> = (0..40_000)
+            .map(|_| {
+                // Box-Muller
+                let (u, v) = (lcg(&mut state).max(1e-300), lcg(&mut state));
+                3.0 * (-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * v).cos()
+            })
+            .collect();
+        let qn = qn_scale_slice(&xs);
+        assert!((qn / 3.0 - 1.0).abs() < 0.02, "got {qn}");
+    }
+
+    /// The O(n log n) path must return the same bits as selecting among all
+    /// materialised differences, including with heavy ties and huge ranges.
+    #[test]
+    fn fast_qn_matches_brute_force_bit_for_bit() {
+        let mut state = 0x9E3779B97F4A7C15u64;
+        for n in 2..=120usize {
+            for shape in 0..4 {
+                let xs: Vec<f64> = (0..n)
+                    .map(|_| {
+                        let u = lcg(&mut state);
+                        match shape {
+                            0 => u * 2.0 - 1.0,
+                            1 => (u * 4.0).floor(),              // heavy ties
+                            2 => (u - 0.5) * 1e300,               // near overflow
+                            _ => 1e9 + u * 1e-3,                  // tiny spread, big offset
+                        }
+                    })
+                    .collect();
+                let fast = qn_scale_slice(&xs);
+                let slow = qn_scale_brute_force(&xs);
+                assert_eq!(fast.to_bits(), slow.to_bits(), "n={n} shape={shape}");
+            }
+        }
+    }
+
+    #[test]
+    fn qn_constant_and_extreme_inputs() {
+        assert_eq!(qn_scale_slice(&[3.0; 50]), 0.0);
+        assert_eq!(qn_scale_slice(&[0.0, -0.0, 0.0, -0.0]), 0.0);
+        // The range overflows to +Inf; the estimate must still be the right
+        // finite order statistic, not Inf or NaN.
+        let wide = [-1.7e308, -1.0, 0.0, 1.0, 1.7e308, 2.0, 3.0];
+        assert_eq!(qn_scale_slice(&wide).to_bits(), qn_scale_brute_force(&wide).to_bits());
+    }
+
+    /// Same value class as the all-pairs reference: equal bits when finite,
+    /// otherwise both +Inf or both NaN (NaN payload/sign is not specified).
+    fn same_as_reference(xs: &[f64]) -> bool {
+        let (fast, slow) = (qn_scale_slice(xs), qn_scale_brute_force(xs));
+        if slow.is_nan() {
+            fast.is_nan()
+        } else {
+            fast.to_bits() == slow.to_bits()
+        }
+    }
+
+    /// +/-Inf: one infinity among many values must still give a finite
+    /// estimate (that is what a robust scale is for), and every mix of signs
+    /// and counts must land in the same run -- finite, +Inf or NaN -- as the
+    /// all-pairs definition.
+    #[test]
+    fn qn_with_infinities_matches_the_all_pairs_definition() {
+        let p = f64::INFINITY;
+        let m = f64::NEG_INFINITY;
+        let cases: &[&[f64]] = &[
+            &[1.0, 2.0, 3.0, p, m],
+            &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, p],
+            &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, m],
+            &[1.0, 2.0, 4.0, 8.0, p, p],
+            &[1.0, 2.0, 4.0, p, p, p],          // k lands among the +Inf run
+            &[1.0, p, p, p, p, p],              // ... or the NaN run
+            &[p, p, p],
+            &[p, m, p, m],
+            &[p, m, 0.0],
+            &[1.0, 2.0, p],
+        ];
+        for xs in cases {
+            assert!(same_as_reference(xs), "{xs:?}: {} vs {}",
+                    qn_scale_slice(xs), qn_scale_brute_force(xs));
+        }
+
+        let mut state = 0x2545F4914F6CDD1Du64;
+        for n in 3..=60usize {
+            for n_inf in 1..=n.min(8) {
+                let mut xs: Vec<f64> = (0..n).map(|_| lcg(&mut state) * 10.0).collect();
+                for slot in xs.iter_mut().take(n_inf) {
+                    *slot = if lcg(&mut state) < 0.5 { p } else { m };
+                }
+                assert!(same_as_reference(&xs), "n={n} n_inf={n_inf}");
+            }
+        }
+    }
+
+    /// The case the first rewrite got wrong: it returned NaN for any Inf once
+    /// n exceeded a cap. One infinity in thousands must not change the answer
+    /// class, and needs no quadratic buffer.
+    #[test]
+    fn qn_one_infinity_in_a_large_sample_is_finite() {
+        let mut state = 99u64;
+        let mut xs: Vec<f64> = (0..20_000).map(|_| lcg(&mut state)).collect();
+        xs[17] = f64::INFINITY;
+        let with_inf = qn_scale_slice(&xs);
+        assert!(with_inf.is_finite() && with_inf > 0.1 && with_inf < 0.6, "got {with_inf}");
+
+        // Small enough to check against the reference directly.
+        let mut small: Vec<f64> = (0..1500).map(|_| lcg(&mut state)).collect();
+        small[3] = f64::NEG_INFINITY;
+        small[900] = f64::INFINITY;
+        assert!(same_as_reference(&small));
+    }
+
+    /// The reason for the rewrite: this size needed a 160 GB buffer and aborted
+    /// the process. It must now finish, in O(n) memory.
+    #[test]
+    fn qn_handles_a_large_column() {
+        let mut state = 7u64;
+        let xs: Vec<f64> = (0..200_000).map(|_| lcg(&mut state)).collect();
+        let qn = qn_scale_slice(&xs);
+        // Uniform(0,1): sd = 0.2887; Qn is not consistent for the sd of a
+        // uniform, so only bracket it.
+        assert!(qn > 0.1 && qn < 0.6, "got {qn}");
+    }
+
+    proptest! {
+        #[test]
+        fn fast_qn_equals_brute_force(xs in prop::collection::vec(-1e6f64..1e6f64, 3..64)) {
+            prop_assert_eq!(
+                qn_scale_slice(&xs).to_bits(),
+                qn_scale_brute_force(&xs).to_bits()
+            );
+        }
+
+        #[test]
+        fn fast_qn_equals_brute_force_with_ties(
+            xs in prop::collection::vec((0i32..6).prop_map(f64::from), 3..64)
+        ) {
+            prop_assert_eq!(
+                qn_scale_slice(&xs).to_bits(),
+                qn_scale_brute_force(&xs).to_bits()
+            );
         }
     }
 }

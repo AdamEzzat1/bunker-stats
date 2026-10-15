@@ -3,6 +3,8 @@
 // ======================
 
 use numpy::{PyArray1, PyReadonlyArray1};
+use crate::kernels::rolling::engine::{for_each_window, strict_std};
+use crate::kernels::rolling::moments::Kahan;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::collections::VecDeque;
@@ -24,25 +26,31 @@ pub fn rolling_mean<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out_len = n - window + 1;
-    let mut out = Vec::with_capacity(out_len);
+    let out = py.allow_threads(|| {
+        let out_len = n - window + 1;
+        let mut out = Vec::with_capacity(out_len);
     
-    // Initial window sum
-    let mut sum: f64 = data[..window].iter().sum();
-    let w_f = window as f64;
-    out.push(sum / w_f);
-    
-    // Rolling updates: O(1) per step
-    for i in window..n {
-        sum = sum - data[i - window] + data[i];
+        // Initial window sum
+        let mut sum: f64 = data[..window].iter().sum();
+        let w_f = window as f64;
         out.push(sum / w_f);
-    }
+    
+        // Rolling updates: O(1) per step
+        for i in window..n {
+            sum = sum - data[i - window] + data[i];
+            out.push(sum / w_f);
+        }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -60,22 +68,28 @@ pub fn rolling_sum<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out_len = n - window + 1;
-    let mut out = Vec::with_capacity(out_len);
+    let out = py.allow_threads(|| {
+        let out_len = n - window + 1;
+        let mut out = Vec::with_capacity(out_len);
     
-    let mut sum: f64 = data[..window].iter().sum();
-    out.push(sum);
-    
-    for i in window..n {
-        sum = sum - data[i - window] + data[i];
+        let mut sum: f64 = data[..window].iter().sum();
         out.push(sum);
-    }
+    
+        for i in window..n {
+            sum = sum - data[i - window] + data[i];
+            out.push(sum);
+        }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -98,50 +112,56 @@ pub fn rolling_var<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
     
-    if ddof >= window {
-        return Err(PyValueError::new_err(
-            "ddof must be less than window",
-        ));
-    }
+    let out = py.allow_threads(|| -> PyResult<_> {
+        if ddof >= window {
+            return Err(PyValueError::new_err(
+                "ddof must be less than window",
+            ));
+        }
 
-    let out_len = n - window + 1;
-    let mut out = Vec::with_capacity(out_len);
+        let out_len = n - window + 1;
+        let mut out = Vec::with_capacity(out_len);
     
-    // Initial window using Welford
-    let mut mean = 0.0;
-    let mut m2 = 0.0;
+        // Initial window using Welford
+        let mut mean = 0.0;
+        let mut m2 = 0.0;
     
-    for (i, &val) in data[..window].iter().enumerate() {
-        let delta = val - mean;
-        mean += delta / (i + 1) as f64;
-        let delta2 = val - mean;
-        m2 += delta * delta2;
-    }
+        for (i, &val) in data[..window].iter().enumerate() {
+            let delta = val - mean;
+            mean += delta / (i + 1) as f64;
+            let delta2 = val - mean;
+            m2 += delta * delta2;
+        }
     
-    let variance = m2 / (window - ddof) as f64;
-    out.push(variance);
-    
-    // Rolling Welford update (O(1) per step)
-    for i in window..n {
-        let old_val = data[i - window];
-        let new_val = data[i];
-        
-        // Update mean
-        let old_mean = mean;
-        mean += (new_val - old_val) / window as f64;
-        
-        // Update M2 (sum of squared deviations)
-        m2 = m2 + (new_val - old_val) * (new_val - mean + old_val - old_mean);
-        
         let variance = m2 / (window - ddof) as f64;
         out.push(variance);
-    }
+    
+        // Rolling Welford update (O(1) per step)
+        for i in window..n {
+            let old_val = data[i - window];
+            let new_val = data[i];
+        
+            // Update mean
+            let old_mean = mean;
+            mean += (new_val - old_val) / window as f64;
+        
+            // Update M2 (sum of squared deviations)
+            m2 = m2 + (new_val - old_val) * (new_val - mean + old_val - old_mean);
+        
+            let variance = m2 / (window - ddof) as f64;
+            out.push(variance);
+        }
+        Ok(out)
+    })?;
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -160,47 +180,53 @@ pub fn rolling_std<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
     
-    if ddof >= window {
-        return Err(PyValueError::new_err(
-            "ddof must be less than window",
-        ));
-    }
+    let out = py.allow_threads(|| -> PyResult<_> {
+        if ddof >= window {
+            return Err(PyValueError::new_err(
+                "ddof must be less than window",
+            ));
+        }
 
-    let out_len = n - window + 1;
-    let mut out = Vec::with_capacity(out_len);
+        let out_len = n - window + 1;
+        let mut out = Vec::with_capacity(out_len);
     
-    // Initial window
-    let mut mean = 0.0;
-    let mut m2 = 0.0;
+        // Initial window
+        let mut mean = 0.0;
+        let mut m2 = 0.0;
     
-    for (i, &val) in data[..window].iter().enumerate() {
-        let delta = val - mean;
-        mean += delta / (i + 1) as f64;
-        let delta2 = val - mean;
-        m2 += delta * delta2;
-    }
+        for (i, &val) in data[..window].iter().enumerate() {
+            let delta = val - mean;
+            mean += delta / (i + 1) as f64;
+            let delta2 = val - mean;
+            m2 += delta * delta2;
+        }
     
-    let std = (m2 / (window - ddof) as f64).sqrt();
-    out.push(std);
-    
-    // Rolling updates
-    for i in window..n {
-        let old_val = data[i - window];
-        let new_val = data[i];
-        
-        let old_mean = mean;
-        mean += (new_val - old_val) / window as f64;
-        m2 = m2 + (new_val - old_val) * (new_val - mean + old_val - old_mean);
-        
         let std = (m2 / (window - ddof) as f64).sqrt();
         out.push(std);
-    }
+    
+        // Rolling updates
+        for i in window..n {
+            let old_val = data[i - window];
+            let new_val = data[i];
+        
+            let old_mean = mean;
+            mean += (new_val - old_val) / window as f64;
+            m2 = m2 + (new_val - old_val) * (new_val - mean + old_val - old_mean);
+        
+            let std = (m2 / (window - ddof) as f64).sqrt();
+            out.push(std);
+        }
+        Ok(out)
+    })?;
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -222,55 +248,61 @@ pub fn rolling_min<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out_len = n - window + 1;
-    let mut out = Vec::with_capacity(out_len);
+    let out = py.allow_threads(|| {
+        let out_len = n - window + 1;
+        let mut out = Vec::with_capacity(out_len);
     
-    // Monotonic deque: stores indices of potential minimums
-    let mut deque: VecDeque<usize> = VecDeque::new();
+        // Monotonic deque: stores indices of potential minimums
+        let mut deque: VecDeque<usize> = VecDeque::new();
     
-    // Initialize first window
-    for i in 0..window {
-        while let Some(&back_idx) = deque.back() {
-            if data[back_idx] >= data[i] {
-                deque.pop_back();
-            } else {
-                break;
+        // Initialize first window
+        for i in 0..window {
+            while let Some(&back_idx) = deque.back() {
+                if data[back_idx] >= data[i] {
+                    deque.pop_back();
+                } else {
+                    break;
+                }
             }
+            deque.push_back(i);
         }
-        deque.push_back(i);
-    }
     
-    out.push(data[*deque.front().unwrap()]);
-    
-    // Slide window (O(1) amortized)
-    for i in window..n {
-        // Remove elements outside window
-        while let Some(&front_idx) = deque.front() {
-            if front_idx <= i - window {
-                deque.pop_front();
-            } else {
-                break;
-            }
-        }
-        
-        // Add new element
-        while let Some(&back_idx) = deque.back() {
-            if data[back_idx] >= data[i] {
-                deque.pop_back();
-            } else {
-                break;
-            }
-        }
-        deque.push_back(i);
-        
         out.push(data[*deque.front().unwrap()]);
-    }
+    
+        // Slide window (O(1) amortized)
+        for i in window..n {
+            // Remove elements outside window
+            while let Some(&front_idx) = deque.front() {
+                if front_idx <= i - window {
+                    deque.pop_front();
+                } else {
+                    break;
+                }
+            }
+        
+            // Add new element
+            while let Some(&back_idx) = deque.back() {
+                if data[back_idx] >= data[i] {
+                    deque.pop_back();
+                } else {
+                    break;
+                }
+            }
+            deque.push_back(i);
+        
+            out.push(data[*deque.front().unwrap()]);
+        }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -288,52 +320,58 @@ pub fn rolling_max<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out_len = n - window + 1;
-    let mut out = Vec::with_capacity(out_len);
+    let out = py.allow_threads(|| {
+        let out_len = n - window + 1;
+        let mut out = Vec::with_capacity(out_len);
     
-    let mut deque: VecDeque<usize> = VecDeque::new();
+        let mut deque: VecDeque<usize> = VecDeque::new();
     
-    // Initialize first window
-    for i in 0..window {
-        while let Some(&back_idx) = deque.back() {
-            if data[back_idx] <= data[i] {
-                deque.pop_back();
-            } else {
-                break;
+        // Initialize first window
+        for i in 0..window {
+            while let Some(&back_idx) = deque.back() {
+                if data[back_idx] <= data[i] {
+                    deque.pop_back();
+                } else {
+                    break;
+                }
             }
+            deque.push_back(i);
         }
-        deque.push_back(i);
-    }
     
-    out.push(data[*deque.front().unwrap()]);
-    
-    // Slide window
-    for i in window..n {
-        while let Some(&front_idx) = deque.front() {
-            if front_idx <= i - window {
-                deque.pop_front();
-            } else {
-                break;
-            }
-        }
-        
-        while let Some(&back_idx) = deque.back() {
-            if data[back_idx] <= data[i] {
-                deque.pop_back();
-            } else {
-                break;
-            }
-        }
-        deque.push_back(i);
-        
         out.push(data[*deque.front().unwrap()]);
-    }
+    
+        // Slide window
+        for i in window..n {
+            while let Some(&front_idx) = deque.front() {
+                if front_idx <= i - window {
+                    deque.pop_front();
+                } else {
+                    break;
+                }
+            }
+        
+            while let Some(&back_idx) = deque.back() {
+                if data[back_idx] <= data[i] {
+                    deque.pop_back();
+                } else {
+                    break;
+                }
+            }
+            deque.push_back(i);
+        
+            out.push(data[*deque.front().unwrap()]);
+        }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -351,79 +389,85 @@ pub fn rolling_range<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out_len = n - window + 1;
-    let mut out = Vec::with_capacity(out_len);
+    let out = py.allow_threads(|| {
+        let out_len = n - window + 1;
+        let mut out = Vec::with_capacity(out_len);
     
-    let mut min_deque: VecDeque<usize> = VecDeque::new();
-    let mut max_deque: VecDeque<usize> = VecDeque::new();
+        let mut min_deque: VecDeque<usize> = VecDeque::new();
+        let mut max_deque: VecDeque<usize> = VecDeque::new();
     
-    // Initialize first window
-    for i in 0..window {
-        while let Some(&back) = min_deque.back() {
-            if data[back] >= data[i] {
-                min_deque.pop_back();
-            } else {
-                break;
+        // Initialize first window
+        for i in 0..window {
+            while let Some(&back) = min_deque.back() {
+                if data[back] >= data[i] {
+                    min_deque.pop_back();
+                } else {
+                    break;
+                }
             }
-        }
-        min_deque.push_back(i);
+            min_deque.push_back(i);
         
-        while let Some(&back) = max_deque.back() {
-            if data[back] <= data[i] {
-                max_deque.pop_back();
-            } else {
-                break;
+            while let Some(&back) = max_deque.back() {
+                if data[back] <= data[i] {
+                    max_deque.pop_back();
+                } else {
+                    break;
+                }
             }
+            max_deque.push_back(i);
         }
-        max_deque.push_back(i);
-    }
     
-    out.push(data[*max_deque.front().unwrap()] - data[*min_deque.front().unwrap()]);
-    
-    // Slide window
-    for i in window..n {
-        // Update min deque
-        while let Some(&front) = min_deque.front() {
-            if front <= i - window {
-                min_deque.pop_front();
-            } else {
-                break;
-            }
-        }
-        while let Some(&back) = min_deque.back() {
-            if data[back] >= data[i] {
-                min_deque.pop_back();
-            } else {
-                break;
-            }
-        }
-        min_deque.push_back(i);
-        
-        // Update max deque
-        while let Some(&front) = max_deque.front() {
-            if front <= i - window {
-                max_deque.pop_front();
-            } else {
-                break;
-            }
-        }
-        while let Some(&back) = max_deque.back() {
-            if data[back] <= data[i] {
-                max_deque.pop_back();
-            } else {
-                break;
-            }
-        }
-        max_deque.push_back(i);
-        
         out.push(data[*max_deque.front().unwrap()] - data[*min_deque.front().unwrap()]);
-    }
+    
+        // Slide window
+        for i in window..n {
+            // Update min deque
+            while let Some(&front) = min_deque.front() {
+                if front <= i - window {
+                    min_deque.pop_front();
+                } else {
+                    break;
+                }
+            }
+            while let Some(&back) = min_deque.back() {
+                if data[back] >= data[i] {
+                    min_deque.pop_back();
+                } else {
+                    break;
+                }
+            }
+            min_deque.push_back(i);
+        
+            // Update max deque
+            while let Some(&front) = max_deque.front() {
+                if front <= i - window {
+                    max_deque.pop_front();
+                } else {
+                    break;
+                }
+            }
+            while let Some(&back) = max_deque.back() {
+                if data[back] <= data[i] {
+                    max_deque.pop_back();
+                } else {
+                    break;
+                }
+            }
+            max_deque.push_back(i);
+        
+            out.push(data[*max_deque.front().unwrap()] - data[*min_deque.front().unwrap()]);
+        }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -446,29 +490,35 @@ pub fn rolling_count_above<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out_len = n - window + 1;
-    let mut out = Vec::with_capacity(out_len);
+    let out = py.allow_threads(|| {
+        let out_len = n - window + 1;
+        let mut out = Vec::with_capacity(out_len);
     
-    // Initial count
-    let mut count = data[..window].iter().filter(|&&x| x > threshold).count();
-    out.push(count as f64);
-    
-    // Rolling update (O(1))
-    for i in window..n {
-        if data[i - window] > threshold {
-            count -= 1;
-        }
-        if data[i] > threshold {
-            count += 1;
-        }
+        // Initial count
+        let mut count = data[..window].iter().filter(|&&x| x > threshold).count();
         out.push(count as f64);
-    }
+    
+        // Rolling update (O(1))
+        for i in window..n {
+            if data[i - window] > threshold {
+                count -= 1;
+            }
+            if data[i] > threshold {
+                count += 1;
+            }
+            out.push(count as f64);
+        }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -487,28 +537,34 @@ pub fn rolling_pct_above<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out_len = n - window + 1;
-    let mut out = Vec::with_capacity(out_len);
-    let w_f = window as f64;
+    let out = py.allow_threads(|| {
+        let out_len = n - window + 1;
+        let mut out = Vec::with_capacity(out_len);
+        let w_f = window as f64;
     
-    let mut count = data[..window].iter().filter(|&&x| x > threshold).count();
-    out.push((count as f64) / w_f);
-    
-    for i in window..n {
-        if data[i - window] > threshold {
-            count -= 1;
-        }
-        if data[i] > threshold {
-            count += 1;
-        }
+        let mut count = data[..window].iter().filter(|&&x| x > threshold).count();
         out.push((count as f64) / w_f);
-    }
+    
+        for i in window..n {
+            if data[i - window] > threshold {
+                count -= 1;
+            }
+            if data[i] > threshold {
+                count += 1;
+            }
+            out.push((count as f64) / w_f);
+        }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -530,53 +586,59 @@ pub fn rolling_zscore<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out_len = n - window + 1;
-    let mut out = Vec::with_capacity(out_len);
+    let out = py.allow_threads(|| {
+        let out_len = n - window + 1;
+        let mut out = Vec::with_capacity(out_len);
     
-    // Initial window
-    let mut mean = 0.0;
-    let mut m2 = 0.0;
+        // Initial window
+        let mut mean = 0.0;
+        let mut m2 = 0.0;
     
-    for (i, &val) in data[..window].iter().enumerate() {
-        let delta = val - mean;
-        mean += delta / (i + 1) as f64;
-        let delta2 = val - mean;
-        m2 += delta * delta2;
-    }
+        for (i, &val) in data[..window].iter().enumerate() {
+            let delta = val - mean;
+            mean += delta / (i + 1) as f64;
+            let delta2 = val - mean;
+            m2 += delta * delta2;
+        }
     
-    let std = (m2 / (window - 1) as f64).sqrt();
-    let center_idx = window / 2;
-    let z = if std > 0.0 {
-        (data[center_idx] - mean) / std
-    } else {
-        f64::NAN
-    };
-    out.push(z);
-    
-    // Rolling updates
-    for i in window..n {
-        let old_val = data[i - window];
-        let new_val = data[i];
-        
-        let old_mean = mean;
-        mean += (new_val - old_val) / window as f64;
-        m2 = m2 + (new_val - old_val) * (new_val - mean + old_val - old_mean);
-        
         let std = (m2 / (window - 1) as f64).sqrt();
-        let center_idx = i - window / 2;
+        let center_idx = window / 2;
         let z = if std > 0.0 {
             (data[center_idx] - mean) / std
         } else {
             f64::NAN
         };
         out.push(z);
-    }
+    
+        // Rolling updates
+        for i in window..n {
+            let old_val = data[i - window];
+            let new_val = data[i];
+        
+            let old_mean = mean;
+            mean += (new_val - old_val) / window as f64;
+            m2 = m2 + (new_val - old_val) * (new_val - mean + old_val - old_mean);
+        
+            let std = (m2 / (window - 1) as f64).sqrt();
+            let center_idx = i - window / 2;
+            let z = if std > 0.0 {
+                (data[center_idx] - mean) / std
+            } else {
+                f64::NAN
+            };
+            out.push(z);
+        }
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }
@@ -594,51 +656,25 @@ pub fn rolling_cv<'py>(
     let data = x.as_slice()?;
     let n = data.len();
 
-    if window == 0 || window > n {
-        return Err(PyValueError::new_err(
-            "window must be between 1 and len(x)",
-        ));
+    if window == 0 {
+        return Err(PyValueError::new_err("window must be >= 1"));
+    }
+    if window > n {
+        // v0.3 edge rule shared by strict rolling kernels: window larger than
+        // the series yields an empty result, not an error.
+        return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
 
-    let out_len = n - window + 1;
-    let mut out = Vec::with_capacity(out_len);
-    
-    // Initial window
-    let mut mean = 0.0;
-    let mut m2 = 0.0;
-    
-    for (i, &val) in data[..window].iter().enumerate() {
-        let delta = val - mean;
-        mean += delta / (i + 1) as f64;
-        let delta2 = val - mean;
-        m2 += delta * delta2;
-    }
-    
-    let cv = if mean.abs() > 1e-10 {
-        let std = (m2 / (window - 1) as f64).sqrt();
-        std / mean.abs()
-    } else {
-        f64::NAN
-    };
-    out.push(cv);
-    
-    // Rolling updates
-    for i in window..n {
-        let old_val = data[i - window];
-        let new_val = data[i];
-        
-        let old_mean = mean;
-        mean += (new_val - old_val) / window as f64;
-        m2 = m2 + (new_val - old_val) * (new_val - mean + old_val - old_mean);
-        
-        let cv = if mean.abs() > 1e-10 {
-            let std = (m2 / (window - 1) as f64).sqrt();
-            std / mean.abs()
-        } else {
-            f64::NAN
-        };
-        out.push(cv);
-    }
+    let out = py.allow_threads(|| {
+        // Coefficient of variation: sample std over |mean|, NaN when the mean
+        // is (numerically) zero or the window holds a NaN or infinity.
+        let mut out = Vec::with_capacity(n - window + 1);
+        for_each_window::<Kahan>(data, window, |_, m| {
+            let mean = m.mean(false);
+            out.push(if mean.abs() > 1e-10 { strict_std(m) / mean.abs() } else { f64::NAN });
+        });
+        out
+    });
 
     Ok(PyArray1::from_vec_bound(py, out))
 }

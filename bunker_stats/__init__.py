@@ -281,6 +281,19 @@ spearman_corr_test = _get_rs("spearman_corr_test", "spearman_corr_test_np")
 f_test_var = _get_rs("f_test_var", "f_test_var_np")
 bartlett_test = _get_rs("bartlett_test", "bartlett_test_np")
 
+# v0.3.1: additional inference functions
+t_test_paired = _get_rs("t_test_paired", "t_test_paired_np")
+p_adjust = _get_rs("p_adjust", "p_adjust_np")
+proportion_ztest = _get_rs("proportion_ztest", "proportion_ztest_np")
+two_proportions_ztest = _get_rs("two_proportions_ztest", "two_proportions_ztest_np")
+corr_ci = _get_rs("corr_ci", "corr_ci_np")
+var_ci = _get_rs("var_ci", "var_ci_np")
+odds_ratio = _get_rs("odds_ratio", "odds_ratio_np")
+rank_biserial = _get_rs("rank_biserial", "rank_biserial_np")
+cliffs_delta = _get_rs("cliffs_delta", "cliffs_delta_np")
+anova_effect_sizes = _get_rs("anova_effect_sizes", "anova_effect_sizes_np")
+normality_summary = _get_rs("normality_summary", "normality_summary_np")
+
 # prefer new name, fallback to older wheels
 hedges_g_2samp = _get_rs("hedges_g_2samp", "hedges_g_2samp_2", "hedges_g_2samp_np", "hedges_g_2samp_np2")
 
@@ -292,6 +305,30 @@ ks_1samp = _get_rs("ks_1samp", "ks_1samp_np")
 
 # utilities
 pad_nan = _get_rs("pad_nan", "pad_nan_np")
+
+
+# ======================================================================================
+# Rich result objects (opt-in) — bunker_stats.infer.* via rich=True
+# ======================================================================================
+# The hypothesis tests above return plain dicts by default. Re-bind each to a thin
+# facade that ALSO accepts `rich=True`, returning a rich result object (tuple-
+# unpackable, with .to_dict() / .info() / .conclusion()). The facade forwards every
+# other argument untouched, so the default dict return is byte-for-byte unchanged.
+#
+# NOTE: the actual re-binding happens further down (see `_apply_rich_inference`),
+# AFTER the hand-written "modern facade" defs (e.g. `def t_test_2samp`) so that we
+# wrap the final public callables rather than the raw kernels they shadow.
+from bunker_stats.infer.facade import wrap_inference as _wrap_inference
+
+from bunker_stats.infer import (  # noqa: E402  (result classes for direct use)
+    TTestResult,
+    ChiSquareResult,
+    MannWhitneyResult,
+    KSResult,
+    ANOVAResult,
+    CorrelationTestResult,
+    NormalityResult,
+)
 
 
 # ======================================================================================
@@ -526,19 +563,25 @@ try:
         BootstrapCorrConfig,
         PermutationConfig,
         JackknifeConfig,
-        
+
+        # Rich result objects
+        BootstrapResult,
+        PermutationTestResult,
+
         # Convenience functions
         bootstrap,
         bootstrap_corr,
         permutation_test,
         jackknife,
     )
-    
+
     _resampling_config_exports = [
         "BootstrapConfig",
         "BootstrapCorrConfig",
         "PermutationConfig",
         "JackknifeConfig",
+        "BootstrapResult",
+        "PermutationTestResult",
         "bootstrap",
         "bootstrap_corr",
         "permutation_test",
@@ -561,18 +604,22 @@ try:
     from bunker_stats.rolling import (
         # Config dataclasses
         RollingConfig,
-        
+
         # Main user-facing class
         Rolling,
-        
+
+        # Rich result object
+        RollingResult,
+
         # Type hints
         Alignment,
         NanPolicy,
     )
-    
+
     _rolling_config_exports = [
         "Rolling",
         "RollingConfig",
+        "RollingResult",
         "Alignment",
         "NanPolicy",
     ]
@@ -585,6 +632,245 @@ except ImportError:
 # NEW v0.2.9: Low-level multi-stat functions (for advanced users)
 rolling_multi = _get_rs("rolling_multi", "rolling_multi_np")
 rolling_multi_axis0 = _get_rs("rolling_multi_axis0", "rolling_multi_axis0_np")
+
+
+# ======================================================================================
+# Modern keyword layer (v0.3 API)
+#
+# Design rules:
+#   1. One public name per statistic; NaN handling is a `skipna=` keyword, not a
+#      twin function. The strict and skip-NaN Rust kernels stay separate under
+#      the hood (no branch in the hot loop) — dispatch happens once, here.
+#   2. Options are keyword-only with sensible defaults (`equal_var=True`,
+#      `lower_q=0.05`), so `bs.t_test_2samp(x, y)` just works.
+#   3. Keyword names carry their unit (`lower_q` is a quantile in [0, 1];
+#      `q` in `percentile` is in [0, 100], matching numpy).
+# The *_skipna names remain available and are NOT deprecated; they are the same
+# kernels the `skipna=True` path dispatches to.
+# ======================================================================================
+
+zscore_skipna = _get_rs("zscore_skipna", "zscore_skipna_np")
+
+
+def _check_window(window) -> int:
+    """Validate an integer window argument at the facade boundary.
+
+    Converts index-like values (Python ints, numpy integer scalars) and raises
+    ValueError for window < 1 — including negative values, which would
+    otherwise surface as OverflowError from the Rust usize conversion.
+    """
+    import operator
+
+    w = operator.index(window)
+    if w < 1:
+        raise ValueError("window must be >= 1")
+    return w
+
+
+_VALID_ALTERNATIVES = ("two-sided", "less", "greater")
+
+
+def _check_alternative(alternative: str) -> str:
+    if alternative not in _VALID_ALTERNATIVES:
+        raise ValueError(
+            f"alternative must be one of {list(_VALID_ALTERNATIVES)}, got {alternative!r}"
+        )
+    return alternative
+
+
+# Preserve raw kernel bindings before rebinding the public names to wrappers.
+_strict = {
+    "mean": mean, "std": std, "var": var, "median": median, "mad": mad,
+    "zscore": zscore, "iqr": iqr, "trimmed_mean": trimmed_mean,
+    "cov": cov, "corr": corr, "cov_matrix": cov_matrix, "corr_matrix": corr_matrix,
+    "rolling_mean": rolling_mean, "rolling_std": rolling_std,
+    "rolling_zscore": rolling_zscore, "rolling_cov": rolling_cov,
+    "rolling_corr": rolling_corr, "winsorize": winsorize,
+    "t_test_2samp": t_test_2samp, "cohens_d_2samp": cohens_d_2samp,
+    "hedges_g_2samp": hedges_g_2samp,
+}
+_skipna_kernel = {
+    "mean": mean_skipna, "std": std_skipna, "var": var_skipna,
+    "median": median_skipna, "mad": mad_skipna, "zscore": zscore_skipna,
+    "iqr": iqr_skipna, "trimmed_mean": trimmed_mean_skipna,
+    "cov": cov_skipna, "corr": corr_skipna,
+    "cov_matrix": cov_matrix_skipna, "corr_matrix": corr_matrix_skipna,
+    "rolling_cov": rolling_cov_skipna, "rolling_corr": rolling_corr_skipna,
+    "rolling_mean": rolling_mean_skipna, "rolling_std": rolling_std_skipna,
+    "rolling_zscore": rolling_zscore_skipna,
+}
+
+
+def mean(x, *, skipna: bool = False):
+    """Arithmetic mean. `skipna=True` ignores NaNs (numpy.nanmean semantics)."""
+    return _skipna_kernel["mean"](x) if skipna else _strict["mean"](x)
+
+def std(x, *, skipna: bool = False):
+    """Sample standard deviation (ddof=1). `skipna=True` ignores NaNs."""
+    return _skipna_kernel["std"](x) if skipna else _strict["std"](x)
+
+def var(x, *, skipna: bool = False):
+    """Sample variance (ddof=1). `skipna=True` ignores NaNs."""
+    return _skipna_kernel["var"](x) if skipna else _strict["var"](x)
+
+def median(x, *, skipna: bool = False):
+    """Median. `skipna=True` ignores NaNs (numpy.nanmedian semantics)."""
+    return _skipna_kernel["median"](x) if skipna else _strict["median"](x)
+
+def mad(x, *, skipna: bool = False):
+    """Median absolute deviation (unscaled). `skipna=True` ignores NaNs."""
+    return _skipna_kernel["mad"](x) if skipna else _strict["mad"](x)
+
+def zscore(x, *, skipna: bool = False):
+    """Standard scores using the sample std (ddof=1). `skipna=True` ignores NaNs."""
+    return _skipna_kernel["zscore"](x) if skipna else _strict["zscore"](x)
+
+def iqr(x, *, skipna: bool = False):
+    """Interquartile range width (Q3 - Q1). `skipna=True` ignores NaNs."""
+    return _skipna_kernel["iqr"](x) if skipna else _strict["iqr"](x)
+
+def trimmed_mean(x, proportion_to_cut: float = 0.1, *, skipna: bool = False):
+    """Mean after trimming `proportion_to_cut` from each tail (scipy.trim_mean)."""
+    k = _skipna_kernel["trimmed_mean"] if skipna else _strict["trimmed_mean"]
+    return k(x, proportion_to_cut)
+
+def cov(x, y, *, skipna: bool = False):
+    """Sample covariance (ddof=1). `skipna=True` uses pairwise-complete observations."""
+    k = _skipna_kernel["cov"] if skipna else _strict["cov"]
+    return k(x, y)
+
+def corr(x, y, *, skipna: bool = False):
+    """Pearson correlation. `skipna=True` uses pairwise-complete observations."""
+    k = _skipna_kernel["corr"] if skipna else _strict["corr"]
+    return k(x, y)
+
+def cov_matrix(X, *, skipna: bool = False):
+    """Covariance matrix, columns as variables (numpy.cov(rowvar=False, ddof=1))."""
+    k = _skipna_kernel["cov_matrix"] if skipna else _strict["cov_matrix"]
+    return k(X)
+
+def corr_matrix(X, *, skipna: bool = False):
+    """Correlation matrix, columns as variables (numpy.corrcoef(rowvar=False))."""
+    k = _skipna_kernel["corr_matrix"] if skipna else _strict["corr_matrix"]
+    return k(X)
+
+def rolling_mean(x, window: int, *, skipna: bool = False):
+    """Trailing rolling mean. Strict: length n-window+1; `skipna=True`: length n,
+    pandas min_periods=1 semantics."""
+    window = _check_window(window)
+    k = _skipna_kernel["rolling_mean"] if skipna else _strict["rolling_mean"]
+    return k(x, window)
+
+def rolling_std(x, window: int, *, skipna: bool = False):
+    """Trailing rolling sample std (ddof=1). See `rolling_mean` for shape rules."""
+    window = _check_window(window)
+    k = _skipna_kernel["rolling_std"] if skipna else _strict["rolling_std"]
+    return k(x, window)
+
+def rolling_zscore(x, window: int, *, skipna: bool = False):
+    """Rolling standard score within each trailing window."""
+    window = _check_window(window)
+    k = _skipna_kernel["rolling_zscore"] if skipna else _strict["rolling_zscore"]
+    return k(x, window)
+
+def rolling_cov(x, y, window: int, *, skipna: bool = False):
+    """Trailing rolling covariance. `skipna=True` matches pandas
+    rolling(window).cov default semantics (NaN unless the window is complete)."""
+    window = _check_window(window)
+    k = _skipna_kernel["rolling_cov"] if skipna else _strict["rolling_cov"]
+    return k(x, y, window)
+
+def rolling_corr(x, y, window: int, *, skipna: bool = False):
+    """Trailing rolling Pearson correlation. See `rolling_cov` for NaN rules."""
+    window = _check_window(window)
+    k = _skipna_kernel["rolling_corr"] if skipna else _strict["rolling_corr"]
+    return k(x, y, window)
+
+def winsorize(x, *, lower_q: float = 0.05, upper_q: float = 0.95):
+    """Clip tails at the `lower_q` / `upper_q` quantiles (both in [0, 1])."""
+    return _strict["winsorize"](x, lower_q, upper_q)
+
+_winsorized_mean_kernel = winsorized_mean
+
+def winsorized_mean(x, lower_q: float = 0.05, upper_q: float = 0.95):
+    """Winsorized mean with tail bounds given as quantile fractions in [0, 1].
+
+    The underlying kernel works in percentile units [0, 100]; this wrapper
+    validates fraction inputs and converts, so `winsorize` and
+    `winsorized_mean` share one unit convention.
+    """
+    if not (0.0 <= lower_q < upper_q <= 1.0):
+        raise ValueError(
+            "winsorized_mean quantiles must satisfy 0 <= lower_q < upper_q <= 1"
+        )
+    return _winsorized_mean_kernel(x, lower_q * 100.0, upper_q * 100.0)
+
+_quantile_bins_kernel = quantile_bins
+
+def quantile_bins(x, n_bins: int):
+    """Assign each value to one of `n_bins` quantile bins (n_bins >= 1)."""
+    import operator
+
+    n = operator.index(n_bins)
+    if n < 1:
+        raise ValueError("n_bins must be >= 1")
+    return _quantile_bins_kernel(x, n)
+
+def t_test_2samp(x, y, *, equal_var: bool = True, alternative: str = "two-sided"):
+    """Two-sample t-test. `equal_var=False` gives Welch's t (scipy semantics)."""
+    return _strict["t_test_2samp"](x, y, equal_var, _check_alternative(alternative))
+
+def cohens_d_2samp(x, y, *, pooled: bool = True):
+    """Cohen's d effect size for two samples."""
+    return _strict["cohens_d_2samp"](x, y, pooled)
+
+def hedges_g_2samp(x, y, *, pooled: bool = True):
+    """Hedges' g (small-sample corrected Cohen's d)."""
+    return _strict["hedges_g_2samp"](x, y, pooled)
+
+
+# Apply the opt-in `rich=True` wrappers now that every public inference callable
+# (raw kernels AND the modern facades above, e.g. `t_test_2samp`) is in its final
+# form. Wrapping here means the facade wraps the real public function, not a raw
+# kernel it shadows.
+globals().update(_wrap_inference({
+    "t_test_1samp": t_test_1samp,
+    "t_test_2samp": t_test_2samp,
+    "t_test_paired": t_test_paired,
+    "chi2_gof": chi2_gof,
+    "chi2_independence": chi2_independence,
+    "mann_whitney_u": mann_whitney_u,
+    "ks_1samp": ks_1samp,
+    "f_test_oneway": f_test_oneway,
+    "pearson_corr_test": pearson_corr_test,
+    "spearman_corr_test": spearman_corr_test,
+    "jarque_bera": jarque_bera,
+    "anderson_darling": anderson_darling,
+}))
+
+# Matrix (corr_matrix / cov_matrix) and robust (robust_fit / *_outliers) rich
+# wrappers, applied after their modern facades are defined, same as inference.
+from bunker_stats.matrix.facade import wrap_matrix as _wrap_matrix
+from bunker_stats.robust.facade import wrap_robust as _wrap_robust
+
+globals().update(_wrap_matrix({
+    "corr_matrix": corr_matrix,
+    "cov_matrix": cov_matrix,
+}))
+globals().update(_wrap_robust({
+    "robust_fit": robust_fit,
+    "iqr_outliers": iqr_outliers,
+    "zscore_outliers": zscore_outliers,
+}))
+
+from bunker_stats.matrix import (  # noqa: E402
+    CorrelationMatrixResult,
+    CovarianceMatrixResult,
+)
+from bunker_stats.robust import (  # noqa: E402
+    RobustFitResult,
+    OutlierResult,
+)
 
 
 # ======================================================================================
@@ -661,12 +947,27 @@ __all__ = [
     # Inference - NEW: Variance tests
     "f_test_var", "bartlett_test",
 
+    # Inference - v0.3.1: additional functions
+    "t_test_paired", "p_adjust", "proportion_ztest", "two_proportions_ztest",
+    "corr_ci", "var_ci", "odds_ratio",
+    "rank_biserial", "cliffs_delta", "anova_effect_sizes", "normality_summary",
+
+    # Rich result objects (returned via rich=True, or from Rolling.result())
+    "TTestResult", "ChiSquareResult", "MannWhitneyResult", "KSResult",
+    "ANOVAResult", "CorrelationTestResult", "NormalityResult",
+    "CorrelationMatrixResult", "CovarianceMatrixResult",
+    "RobustFitResult", "OutlierResult",
+    "RollingResult",
+
 
     # utilities
     "pad_nan",
     
     # NEW: resampling (bootstrap & jackknife) - flat functions
-    "bootstrap_mean", "bootstrap_mean_ci", "bootstrap_ci", "bootstrap_corr",
+    # NOTE: "bootstrap_corr" is intentionally NOT listed here — the resampling
+    # config layer rebinds that name and exports it via
+    # _resampling_config_exports; listing it twice duplicated __all__.
+    "bootstrap_mean", "bootstrap_mean_ci", "bootstrap_ci",
     "jackknife_mean", "jackknife_mean_ci",
     "permutation_test_corr", "permutation_mean_diff_test",
     
@@ -707,3 +1008,32 @@ __all__ = [
     "unif_pdf", "unif_logpdf", "unif_cdf", "unif_sf", "unif_logsf", "unif_cumhazard", "unif_ppf",
 
 ]
+
+# ======================================================================================
+# Optional notebook / reporting layer  (pandas-backed, lazily imported)
+# ======================================================================================
+# `bunker_stats.notebook` is the ergonomic pandas/Jupyter bridge. pandas is NOT a
+# runtime dependency of bunker-stats, so the submodule is resolved through PEP 562
+# `__getattr__` rather than imported at package import time. This keeps
+# `import bunker_stats` numpy-only while still allowing `bs.notebook.robust_summary(df)`
+# after `pip install "bunker-stats-rs[notebook]"`.
+#
+# Deliberately NOT added to __all__: this facade's __all__ is a list of callables
+# (enforced by tests/test_hardening_v030.py) and drives `from bunker_stats import *`.
+# The submodules stay reachable via attribute access and are advertised in __dir__
+# so tab-completion still finds them.
+_LAZY_SUBMODULES = ("notebook", "pandas", "pandas_helpers")
+
+
+def __getattr__(name):
+    if name in _LAZY_SUBMODULES:
+        import importlib
+
+        module = importlib.import_module(f"{__name__}.{name}")
+        globals()[name] = module  # cache so subsequent lookups skip __getattr__
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY_SUBMODULES))

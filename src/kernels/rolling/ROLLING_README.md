@@ -15,6 +15,27 @@ b.rolling_std_np(x, 3)           # array([1., 1., 1.])
 
 ---
 
+
+## Using the Python facade
+
+New code should reach these kernels through the `bunker_stats` facade, which
+exposes clean names with keyword arguments. The raw `bunker_stats_rs` names
+documented below remain available and stable; the facade adds ergonomics on
+top of the same kernels:
+
+```python
+import bunker_stats as bs
+
+bs.rolling_mean(x, window=20)              # strict: length n-window+1
+bs.rolling_mean(x, window=20, skipna=True) # NaN-aware: length n, min_periods=1
+bs.rolling_cov(x, y, window=50, skipna=True)
+```
+
+Where a statistic has strict and skip-NaN variants, the facade exposes ONE
+name with a `skipna=` keyword; `skipna=True` dispatches to the skip-NaN kernel
+documented below (the twin kernels stay separate in Rust, so there is no
+branch inside the hot loop).
+
 ## Function summary
 
 | Function | One-liner | Output shape |
@@ -212,7 +233,7 @@ rolling_multi_np(x, window, min_periods=None, alignment="trailing",
   - `window` — window size (int ≥ 1; `0` raises `ValueError`).
   - `min_periods` — minimum valid (non-NaN) observations required per window; `None` means `window`. Must satisfy `1 <= min_periods <= window` or `ValueError` is raised.
   - `alignment` — `"trailing"` (output length `n - window + 1`, window `[k, k + window)`) or `"centered"` (output length `n`, window `[k - window//2, k + window//2 + 1)` clipped to the array).
-  - `nan_policy` — `"propagate"` (any NaN in the window makes every requested statistic NaN, including `count`), `"ignore"` (skip NaNs; compute when valid count ≥ `min_periods`), or `"require_min_periods"` (identical to `"ignore"`; the name documents intent).
+  - `nan_policy` — `"propagate"` (any NaN in the window makes every requested statistic NaN, except `count`), `"ignore"` (skip NaNs; compute when valid count ≥ `min_periods`), or `"require_min_periods"` (identical to `"ignore"`; the name documents intent).
   - `stats` — list of statistic names from `"mean"`, `"std"`, `"var"`, `"count"`, `"min"`, `"max"`; defaults to `["mean"]`. Unknown names raise `ValueError`.
 - **Returns:** a **tuple of arrays in the same order as `stats`**, one array per requested statistic.
 
@@ -222,10 +243,11 @@ means, stds, counts = b.rolling_multi_np(x, 20, min_periods=10,
                                          stats=["mean", "std", "count"])
 ```
 
-- **NaN policy details:** under `"propagate"` each window is evaluated independently, so — unlike the legacy strict functions — output *recovers* after a NaN leaves the window: `[1, nan, 3, 4, 5]` with `window=3` gives `(nan, nan, 4.0)` for the mean. Under `"ignore"`, `count` reports the number of valid values per window.
-- **Centered alignment details:** output is full length `n` and aligned with the input; windows are truncated at both edges. With `min_periods=None`, truncated edge windows are still computed at their actual size; with an explicit `min_periods`, edges with fewer valid values than `min_periods` yield NaN. Because the window is expressed as `k ± window//2`, an **even** `window` spans `window + 1` points in the interior (e.g. `window=4` gives interior counts of 5); prefer odd windows for centered smoothing.
+- **NaN policy details:** under `"propagate"` each window is evaluated independently, so — unlike the legacy strict functions — output *recovers* after a NaN leaves the window: `[1, nan, 3, 4, 5]` with `window=3` gives `(nan, nan, 4.0)` for the mean. `count` is the number of valid (non-NaN) values in the window under every policy and alignment; it is never NaN and never gated by `min_periods`, because it is what explains a NaN in the other statistics.
+- **Centered alignment details:** output is full length `n` and aligned with the input; windows are truncated at both edges. With `min_periods=None`, truncated edge windows are still computed at their actual size; with an explicit `min_periods`, edges with fewer valid values than `min_periods` yield NaN. The window at position `k` covers `[k - window//2, k + (window-1)//2]`, i.e. exactly `window` points in the interior for odd and even `window` alike; an even window takes its extra point on the left, as pandas `rolling(window, center=True)` does.
 - **Why it matters:** computing mean, std and count in one pass halves (or better) the passes over large arrays, and it is the only 1-D entry point with explicit `min_periods` / alignment / NaN-policy control — e.g. pandas-like smoothing with `alignment="centered"`, or gap-tolerant volatility with `nan_policy="ignore", min_periods=10`.
-- **Edge cases:** `window == 0` → `ValueError`. Trailing with `window > n` → tuple of empty arrays. `window == 1` under `"propagate"` returns `0.0` for std/var (a known quirk of the fused fast path; the legacy functions and pandas return NaN), while under `"ignore"` it returns NaN. Numerically stable on large-offset data in both policies (per-window translation offset; verified at `1e8`).
+- **Full-length trailing output:** the `Rolling` class takes `full_length=True` to return one value per observation instead of one per full window. The first `window - 1` rows then cover the partial window `x[0..i]` and are NaN until it holds `min_periods` valid values, which is what pandas `rolling(window, min_periods=m)` returns. The kernel functions themselves always return the truncated form.
+- **Edge cases:** `window == 0` → `ValueError`. Trailing with `window > n` → tuple of empty arrays. `window == 1` returns NaN for std/var under every policy (a one-point window has no sample variance), as pandas does. Centered alignment with `window > n` still returns length-`n` output from truncated windows. Numerically stable on large-offset data in both policies (per-window translation offset; verified at `1e8`).
 
 ### `rolling_multi_axis0_np`
 
@@ -396,4 +418,4 @@ Additional notes:
 
 - Trailing output alignment: output index `k` ↔ input window `[k, k + window)`; the window *ends* at input index `k + window - 1`.
 - `rolling_zscore_np` standardizes the window's **first** element; `rolling_zscore_nan_np` standardizes the **current** (last) element. They are not interchangeable.
-- Centered alignment with an even `window` uses `window//2` points on each side and therefore spans `window + 1` points away from the edges; use odd windows for symmetric smoothing.
+- Centered alignment with an even `window` cannot be symmetric: it uses `window//2` points to the left and `window//2 - 1` to the right (the pandas `center=True` convention). Use odd windows for symmetric smoothing.

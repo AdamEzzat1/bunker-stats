@@ -20,6 +20,27 @@ both namespaces.
 
 ---
 
+
+## Using the Python facade
+
+New code should reach these kernels through the `bunker_stats` facade, which
+exposes clean names with keyword arguments. The raw `bunker_stats_rs` names
+documented below remain available and stable; the facade adds ergonomics on
+top of the same kernels:
+
+```python
+import bunker_stats as bs
+
+bs.median(x, skipna=True)          # -> median_skipna kernel
+bs.mad(x)                          # strict: NaN in -> NaN out
+bs.trimmed_mean(x, 0.1, skipna=True)
+```
+
+Where a statistic has strict and skip-NaN variants, the facade exposes ONE
+name with a `skipna=` keyword; `skipna=True` dispatches to the skip-NaN kernel
+documented below (the twin kernels stay separate in Rust, so there is no
+branch inside the hot loop).
+
 ## Module layout
 
 | File | Contents |
@@ -218,11 +239,13 @@ much more efficient than MAD² on Gaussian data.
 
 ### `qn_scale_np(a)`
 
-Rousseeuw–Croux Qn scale estimator: the first quartile of all `n(n-1)/2`
-pairwise absolute differences, scaled by the asymptotic normal-consistency
-constant **2.2219**. The quartile is picked with quickselect at index
-`num_pairs / 4`. For `n == 2` the single pairwise difference is scaled by
-0.8224 instead. No finite-sample correction factor is applied.
+Rousseeuw–Croux Qn scale estimator: the `k`-th smallest of all `n(n-1)/2`
+pairwise absolute differences, `k = C(h, 2)` with `h = floor(n/2) + 1`,
+scaled by the normal-consistency constant `1 / (sqrt(2) * Phi^-1(5/8))`
+= **2.219144…**. This is close to, but not, the first quartile of the
+differences. No finite-sample correction factor is applied, so the result
+equals `statsmodels.robust.scale.qn_scale` (R's `robustbase::Qn` applies a
+correction by default and is smaller for small n).
 
 ```python
 bs.qn_scale_np(np.array([1.0, 2.0, 3.0, 4.0, 5.0, 100.0]))
@@ -232,8 +255,8 @@ bs.qn_scale_np(np.array([1.0, 2.0, 3.0, 4.0, 5.0, 100.0]))
 about 82% Gaussian efficiency versus the MAD's 37%, and it needs no location
 estimate, which makes it markedly better behaved on *asymmetric*
 distributions (the MAD implicitly assumes symmetry around the median).
-The cost is O(n²) time and memory for the pairwise differences — prefer
-MAD-based scales for very large arrays.
+It runs in O(n log n) time and O(n) memory: the differences are never
+materialised.
 
 - Returns NaN when `n < 2` or when any element is NaN.
 - Constant input: 0.0.
@@ -409,7 +432,7 @@ Additional validation behavior:
 ## Reference values used by the test suite
 
 - MAD normal-consistency constant: `1.482602218505602`.
-- Qn asymptotic constant: `2.2219` (with `0.8224` for the n=2 case).
+- Qn normal-consistency constant: `2.219144465985076`.
 - Biweight midvariance of `[1, 2, 3, 4, 5]` at `c=9`:
   `2.297063991357617`; of `[1, 2, 3, 4, 5, 100]`: `2.85036601168922`
   (both pinned against the astropy implementation).

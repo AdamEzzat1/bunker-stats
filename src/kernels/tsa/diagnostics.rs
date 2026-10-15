@@ -1,8 +1,8 @@
-use numpy::PyReadonlyArray1;
+use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
-use statrs::distribution::{ChiSquared, ContinuousCDF};
+use crate::infer::common::{chi2_sf, norm_two_sided_pvalue};
 use std::cmp::min;
-use nalgebra::{DMatrix, DVector};
+use super::ols::ols_qr;
 
 // ======================
 // Serial-correlation diagnostics
@@ -13,56 +13,57 @@ use nalgebra::{DMatrix, DVector};
 /// Python signature:
 ///     ljung_box(x, lags=20) -> (statistic, pvalue)
 #[pyfunction(signature = (x, lags=20))]
-pub fn ljung_box(x: PyReadonlyArray1<f64>, lags: usize) -> PyResult<(f64, f64)> {
+pub fn ljung_box(py: Python<'_>, x: PyReadonlyArray1<f64>, lags: usize) -> PyResult<(f64, f64)> {
     let x = x.as_slice()?;
-    let n = x.len();
+    py.allow_threads(|| {
+        let n = x.len();
 
-    if n == 0 || lags == 0 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-
-    // OPTIMIZATION: Single-pass mean and variance
-    let mean = x.iter().copied().sum::<f64>() / (n as f64);
-    let mut denom = 0.0;
-    for &v in x {
-        let d = v - mean;
-        denom += d * d;
-    }
-    if denom <= 0.0 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-
-    let max_lag = min(lags, n.saturating_sub(1));
-    if max_lag == 0 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-
-    // CRITICAL: Use biased ACF for Ljung-Box (matches statsmodels)
-    // r_k = sum(x[t] * x[t+k]) / sum(x[t]^2)
-    // Sum over t=0..(n-k-1) for the numerator, divide by TOTAL variance
-    let n_f = n as f64;
-    let mut q = 0.0;
-    
-    for k in 1..=max_lag {
-        let mut num = 0.0;
-        // Biased ACF: sum from t=0 to t=(n-k-1), i.e., n-k terms
-        for t in 0..(n - k) {
-            num += (x[t] - mean) * (x[t + k] - mean);
+        if n == 0 || lags == 0 {
+            return Ok((f64::NAN, f64::NAN));
         }
-        
-        // Divide by TOTAL variance (all n terms), not (n-k)
-        let rk = num / denom;
-        
-        // Ljung-Box formula
-        q += rk * rk / (n_f - k as f64);
-    }
+
+        // OPTIMIZATION: Single-pass mean and variance
+        let mean = x.iter().copied().sum::<f64>() / (n as f64);
+        let mut denom = 0.0;
+        for &v in x {
+            let d = v - mean;
+            denom += d * d;
+        }
+        if denom <= 0.0 {
+            return Ok((f64::NAN, f64::NAN));
+        }
+
+        let max_lag = min(lags, n.saturating_sub(1));
+        if max_lag == 0 {
+            return Ok((f64::NAN, f64::NAN));
+        }
+
+        // CRITICAL: Use biased ACF for Ljung-Box (matches statsmodels)
+        // r_k = sum(x[t] * x[t+k]) / sum(x[t]^2)
+        // Sum over t=0..(n-k-1) for the numerator, divide by TOTAL variance
+        let n_f = n as f64;
+        let mut q = 0.0;
     
-    q *= n_f * (n_f + 2.0);
+        for k in 1..=max_lag {
+            let mut num = 0.0;
+            // Biased ACF: sum from t=0 to t=(n-k-1), i.e., n-k terms
+            for t in 0..(n - k) {
+                num += (x[t] - mean) * (x[t + k] - mean);
+            }
+        
+            // Divide by TOTAL variance (all n terms), not (n-k)
+            let rk = num / denom;
+        
+            // Ljung-Box formula
+            q += rk * rk / (n_f - k as f64);
+        }
+    
+        q *= n_f * (n_f + 2.0);
 
-    let chi = ChiSquared::new(max_lag as f64).unwrap();
-    let p_val = 1.0 - chi.cdf(q);
+        let p_val = chi2_sf(q, max_lag as f64);
 
-    Ok((q, p_val))
+        Ok((q, p_val))
+    })
 }
 
 /// Durbin–Watson statistic for first-order autocorrelation.
@@ -70,124 +71,151 @@ pub fn ljung_box(x: PyReadonlyArray1<f64>, lags: usize) -> PyResult<(f64, f64)> 
 /// Python signature:
 ///     durbin_watson(x) -> scalar in [0,4]
 #[pyfunction]
-pub fn durbin_watson(x: PyReadonlyArray1<f64>) -> PyResult<f64> {
+pub fn durbin_watson(py: Python<'_>, x: PyReadonlyArray1<f64>) -> PyResult<f64> {
     let x = x.as_slice()?;
-    let n = x.len();
-    if n < 2 {
-        return Ok(f64::NAN);
-    }
+    py.allow_threads(|| {
+        let n = x.len();
+        if n < 2 {
+            return Ok(f64::NAN);
+        }
 
-    let mut num = 0.0;
-    let mut denom = 0.0;
-    for t in 1..n {
-        let diff = x[t] - x[t - 1];
-        num += diff * diff;
-    }
-    for t in 0..n {
-        denom += x[t] * x[t];
-    }
-    if denom <= 0.0 {
-        return Ok(f64::NAN);
-    }
-    Ok(num / denom)
+        let mut num = 0.0;
+        let mut denom = 0.0;
+        for t in 1..n {
+            let diff = x[t] - x[t - 1];
+            num += diff * diff;
+        }
+        for t in 0..n {
+            denom += x[t] * x[t];
+        }
+        if denom <= 0.0 {
+            return Ok(f64::NAN);
+        }
+        Ok(num / denom)
+    })
 }
 
 /// Breusch–Godfrey test (LM test for serial correlation in residuals).
 ///
-/// DEBUGGING VERSION - prints intermediate values
+/// Auxiliary regression over the FULL sample, zero-padding the pre-sample
+/// lagged residuals (e[t-j] := 0 for t-j < 0), LM = n · R² — the same
+/// construction as statsmodels' `acorr_breusch_godfrey`.
+///
+/// `exog` (optional, n x k) supplies the ORIGINAL model's regressors so they
+/// participate in the auxiliary regression, as the BG test requires for
+/// models beyond intercept-only. Pass the design matrix INCLUDING its
+/// constant column (statsmodels `add_constant` style); no intercept is added
+/// when `exog` is given. Without `exog` the auxiliary regression uses
+/// [intercept, lags] — the intercept-only contract, unchanged.
+///
+/// NOTE: unlike statsmodels, the design here is full-rank by construction
+/// (statsmodels stacks a second constant next to the user's and its pinv on
+/// that rank-deficient matrix perturbs results by ~1e-2 relative).
+///
 /// Python signature:
-///     bg_test(resid, max_lag=5) -> (statistic, pvalue)
-#[pyfunction(signature = (resid, max_lag=5))]
-pub fn bg_test(resid: PyReadonlyArray1<f64>, max_lag: usize) -> PyResult<(f64, f64)> {
+///     bg_test(resid, max_lag=5, exog=None) -> (statistic, pvalue)
+#[pyfunction(signature = (resid, max_lag=5, exog=None))]
+pub fn bg_test(
+    py: Python<'_>,
+    resid: PyReadonlyArray1<f64>,
+    max_lag: usize,
+    exog: Option<PyReadonlyArray2<f64>>,
+) -> PyResult<(f64, f64)> {
     let e = resid.as_slice()?;
     let n = e.len();
-    if n <= max_lag + 1 || max_lag == 0 {
+    // `max_lag >= n` first: `max_lag + 1` wraps to 0 for usize::MAX, the
+    // check passes, and the regression below never finishes.
+    if max_lag == 0 || max_lag >= n || n <= max_lag + 1 {
         return Ok((f64::NAN, f64::NAN));
     }
 
-    // Auxiliary regression over the FULL sample, zero-padding the pre-sample
-    // lagged residuals (e[t-j] := 0 for t-j < 0). This matches statsmodels'
-    // `acorr_breusch_godfrey`, which keeps all n rows and reports LM = n * R².
-    let t_len = n;
-    let p = max_lag + 1;
-
-    // Dependent variable: current residuals e[t] for all t.
-    let mut y = Vec::with_capacity(t_len);
-    for t in 0..n {
-        y.push(e[t]);
-    }
-
-    // Independent variables: intercept + lagged residuals (0 before the sample).
-    let mut x_mat = Vec::with_capacity(t_len * p);
-    for t in 0..n {
-        x_mat.push(1.0); // intercept
-        for j in 1..=max_lag {
-            x_mat.push(if t >= j { e[t - j] } else { 0.0 });
+    // Original-model regressors (rows must align with resid). Copied into a
+    // contiguous row-major buffer so non-contiguous NumPy views work too.
+    let exog_data: Option<(Vec<f64>, usize)> = match &exog {
+        Some(arr) => {
+            let a = arr.as_array();
+            if a.shape()[0] != n {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "exog has {} rows but resid has {} observations",
+                    a.shape()[0],
+                    n
+                )));
+            }
+            let k = a.shape()[1];
+            let mut buf = Vec::with_capacity(n * k);
+            for t in 0..n {
+                for c in 0..k {
+                    buf.push(a[[t, c]]);
+                }
+            }
+            Some((buf, k))
         }
-    }
+        None => None,
+    };
 
-    let mut xtx = vec![0.0_f64; p * p];
-    let mut xty = vec![0.0_f64; p];
+    py.allow_threads(|| {
+        let t_len = n;
+        // Columns: [exog (k cols) | lags] with exog supplied, else [1 | lags].
+        let k_exog = exog_data.as_ref().map(|(_, k)| *k).unwrap_or(1);
+        let p = k_exog + max_lag;
 
-    for t in 0..t_len {
-        for i in 0..p {
-            let xi = x_mat[t * p + i];
-            xty[i] += xi * y[t];
-            for j in 0..p {
-                xtx[i * p + j] += xi * x_mat[t * p + j];
+        // Dependent variable: current residuals e[t] for all t.
+        let mut y = Vec::with_capacity(t_len);
+        for t in 0..n {
+            y.push(e[t]);
+        }
+
+        // Independent variables: original regressors (or intercept) + zero-padded
+        // lagged residuals.
+        let mut x_mat = Vec::with_capacity(t_len * p);
+        for t in 0..n {
+            match &exog_data {
+                Some((buf, k)) => {
+                    for c in 0..*k {
+                        x_mat.push(buf[t * k + c]);
+                    }
+                }
+                None => x_mat.push(1.0), // intercept
+            }
+            for j in 1..=max_lag {
+                x_mat.push(if t >= j { e[t - j] } else { 0.0 });
             }
         }
-    }
 
-    let xtx_mat = DMatrix::from_vec(p, p, xtx);
-    let xty_vec = DVector::from_vec(xty);
+        // Auxiliary regression by QR (see kernels::tsa::ols); user-supplied
+        // regressors can be arbitrarily badly scaled.
+        let rss = match ols_qr(&x_mat, t_len, p, &y) {
+            Some(fit) => fit.rss,
+            None => return Ok((f64::NAN, f64::NAN)),
+        };
 
-    let beta = if let Some(sol) = xtx_mat.lu().solve(&xty_vec) {
-        sol
-    } else {
-        return Ok((f64::NAN, f64::NAN));
-    };
-
-    // Calculate RSS (Residual Sum of Squares from auxiliary regression)
-    let mut rss = 0.0;
-    for t in 0..t_len {
-        let mut y_hat = 0.0;
-        for i in 0..p {
-            y_hat += beta[i] * x_mat[t * p + i];
+        // Calculate TSS
+        let mean_y: f64 = y.iter().sum::<f64>() / (t_len as f64);
+        let mut tss = 0.0;
+        for &yi in &y {
+            let dev = yi - mean_y;
+            tss += dev * dev;
         }
-        let residual = y[t] - y_hat;
-        rss += residual * residual;
-    }
-
-    // Calculate TSS
-    let mean_y: f64 = y.iter().sum::<f64>() / (t_len as f64);
-    let mut tss = 0.0;
-    for &yi in &y {
-        let dev = yi - mean_y;
-        tss += dev * dev;
-    }
     
-    // R² from auxiliary regression
-    let r2 = if tss > 0.0 {
-        1.0 - rss / tss
-    } else {
-        0.0
-    };
+        // R² from auxiliary regression
+        let r2 = if tss > 0.0 {
+            1.0 - rss / tss
+        } else {
+            0.0
+        };
 
-    // Breusch-Godfrey LM statistic = n · R² over the full (zero-padded) sample,
-    // asymptotically ~ χ²(max_lag) under the null of no serial correlation.
-    // (The previous code used n²/T · R², inflating the statistic by n/T.)
-    let stat = (n as f64) * r2;
+        // Breusch-Godfrey LM statistic = n · R² over the full (zero-padded) sample,
+        // asymptotically ~ χ²(max_lag) under the null of no serial correlation.
+        // (The previous code used n²/T · R², inflating the statistic by n/T.)
+        let stat = (n as f64) * r2;
 
-    // P-value from chi-squared distribution with max_lag degrees of freedom.
-    // max_lag >= 1 is guaranteed above, so ChiSquared::new cannot fail; fall
-    // back to NaN defensively rather than risk an abort under panic="abort".
-    let p_val = match ChiSquared::new(max_lag as f64) {
-        Ok(chi) => 1.0 - chi.cdf(stat),
-        Err(_) => f64::NAN,
-    };
+        // P-value from chi-squared distribution with max_lag degrees of freedom.
+        // max_lag >= 1 is guaranteed above, so ChiSquared::new cannot fail; fall
+        // back to NaN defensively rather than risk an abort under panic="abort".
+        let p_val = chi2_sf(stat, max_lag as f64);
 
-    Ok((stat, p_val))
+        Ok((stat, p_val))
+    })
 }
 
 
@@ -200,44 +228,45 @@ pub fn bg_test(resid: PyReadonlyArray1<f64>, max_lag: usize) -> PyResult<(f64, f
 /// Python signature:
 ///     box_pierce(x, lags=20) -> (statistic, pvalue)
 #[pyfunction(signature = (x, lags=20))]
-pub fn box_pierce(x: PyReadonlyArray1<f64>, lags: usize) -> PyResult<(f64, f64)> {
+pub fn box_pierce(py: Python<'_>, x: PyReadonlyArray1<f64>, lags: usize) -> PyResult<(f64, f64)> {
     let x = x.as_slice()?;
-    let n = x.len();
+    py.allow_threads(|| {
+        let n = x.len();
 
-    if n == 0 || lags == 0 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-
-    let mean = x.iter().copied().sum::<f64>() / (n as f64);
-    let mut denom = 0.0;
-    for &v in x {
-        let d = v - mean;
-        denom += d * d;
-    }
-    if denom <= 0.0 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-
-    let max_lag = min(lags, n.saturating_sub(1));
-    if max_lag == 0 {
-        return Ok((f64::NAN, f64::NAN));
-    }
-
-    let mut q = 0.0;
-    for k in 1..=max_lag {
-        let mut num = 0.0;
-        for t in k..n {
-            num += (x[t] - mean) * (x[t - k] - mean);
+        if n == 0 || lags == 0 {
+            return Ok((f64::NAN, f64::NAN));
         }
-        let rk = num / denom;
-        q += rk * rk;
-    }
-    q *= n as f64;
 
-    let chi = ChiSquared::new(max_lag as f64).unwrap();
-    let p_val = 1.0 - chi.cdf(q);
+        let mean = x.iter().copied().sum::<f64>() / (n as f64);
+        let mut denom = 0.0;
+        for &v in x {
+            let d = v - mean;
+            denom += d * d;
+        }
+        if denom <= 0.0 {
+            return Ok((f64::NAN, f64::NAN));
+        }
 
-    Ok((q, p_val))
+        let max_lag = min(lags, n.saturating_sub(1));
+        if max_lag == 0 {
+            return Ok((f64::NAN, f64::NAN));
+        }
+
+        let mut q = 0.0;
+        for k in 1..=max_lag {
+            let mut num = 0.0;
+            for t in k..n {
+                num += (x[t] - mean) * (x[t - k] - mean);
+            }
+            let rk = num / denom;
+            q += rk * rk;
+        }
+        q *= n as f64;
+
+        let p_val = chi2_sf(q, max_lag as f64);
+
+        Ok((q, p_val))
+    })
 }
 
 /// Runs test for randomness (Wald-Wolfowitz)
@@ -246,86 +275,86 @@ pub fn box_pierce(x: PyReadonlyArray1<f64>, lags: usize) -> PyResult<(f64, f64)>
 /// Python signature:
 ///     runs_test(x) -> (n_runs, z_score, pvalue)
 #[pyfunction]
-pub fn runs_test(x: PyReadonlyArray1<f64>) -> PyResult<(usize, f64, f64)> {
+pub fn runs_test(py: Python<'_>, x: PyReadonlyArray1<f64>) -> PyResult<(usize, f64, f64)> {
     let x = x.as_slice()?;
-    let n = x.len();
+    py.allow_threads(|| {
+        let n = x.len();
     
-    if n < 2 {
-        return Ok((0, f64::NAN, f64::NAN));
-    }
+        if n < 2 {
+            return Ok((0, f64::NAN, f64::NAN));
+        }
     
-    // Calculate median
-    let mut sorted = x.to_vec();
-    sorted.sort_by(|a, b| a.total_cmp(b));
-    let median = if n % 2 == 1 {
-        sorted[n / 2]
-    } else {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-    };
+        // Calculate median
+        let mut sorted = x.to_vec();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let median = if n % 2 == 1 {
+            sorted[n / 2]
+        } else {
+            (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        };
     
-    // Count runs and n+ / n-
-    let mut runs = 1;
-    let mut n_plus = 0;
-    let mut n_minus = 0;
-    let mut prev_sign = if x[0] > median { 
-        n_plus += 1; 
-        1 
-    } else if x[0] < median { 
-        n_minus += 1; 
-        -1 
-    } else { 
-        0 
-    };
-    
-    for &val in &x[1..] {
-        let sign = if val > median { 
+        // Count runs and n+ / n-
+        let mut runs = 1;
+        let mut n_plus = 0;
+        let mut n_minus = 0;
+        let mut prev_sign = if x[0] > median { 
             n_plus += 1; 
             1 
-        } else if val < median { 
+        } else if x[0] < median { 
             n_minus += 1; 
             -1 
         } else { 
             0 
         };
+    
+        for &val in &x[1..] {
+            let sign = if val > median { 
+                n_plus += 1; 
+                1 
+            } else if val < median { 
+                n_minus += 1; 
+                -1 
+            } else { 
+                0 
+            };
         
-        if sign != 0 && prev_sign != 0 && sign != prev_sign {
-            runs += 1;
+            if sign != 0 && prev_sign != 0 && sign != prev_sign {
+                runs += 1;
+            }
+            if sign != 0 {
+                prev_sign = sign;
+            }
         }
-        if sign != 0 {
-            prev_sign = sign;
+    
+        if n_plus == 0 || n_minus == 0 {
+            return Ok((runs, f64::NAN, f64::NAN));
         }
-    }
     
-    if n_plus == 0 || n_minus == 0 {
-        return Ok((runs, f64::NAN, f64::NAN));
-    }
+        // Expected runs and variance under null
+        let n1 = n_plus as f64;
+        let n2 = n_minus as f64;
+        let n_total = n1 + n2;
     
-    // Expected runs and variance under null
-    let n1 = n_plus as f64;
-    let n2 = n_minus as f64;
-    let n_total = n1 + n2;
+        let expected_runs = (2.0 * n1 * n2) / n_total + 1.0;
+        let var_runs = (2.0 * n1 * n2 * (2.0 * n1 * n2 - n_total)) / 
+                       (n_total * n_total * (n_total - 1.0));
     
-    let expected_runs = (2.0 * n1 * n2) / n_total + 1.0;
-    let var_runs = (2.0 * n1 * n2 * (2.0 * n1 * n2 - n_total)) / 
-                   (n_total * n_total * (n_total - 1.0));
+        if var_runs <= 0.0 {
+            return Ok((runs, f64::NAN, f64::NAN));
+        }
     
-    if var_runs <= 0.0 {
-        return Ok((runs, f64::NAN, f64::NAN));
-    }
+        // Z-score with continuity correction
+        let z = if runs as f64 > expected_runs {
+            (runs as f64 - expected_runs - 0.5) / var_runs.sqrt()
+        } else {
+            (runs as f64 - expected_runs + 0.5) / var_runs.sqrt()
+        };
     
-    // Z-score with continuity correction
-    let z = if runs as f64 > expected_runs {
-        (runs as f64 - expected_runs - 0.5) / var_runs.sqrt()
-    } else {
-        (runs as f64 - expected_runs + 0.5) / var_runs.sqrt()
-    };
+        // Two-tailed p-value (approximate with normal)
+        let p_val = norm_two_sided_pvalue(z);
     
-    // Two-tailed p-value (approximate with normal)
-    use statrs::distribution::Normal;
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    let p_val = 2.0 * (1.0 - normal.cdf(z.abs()));
-    
-    Ok((runs, z, p_val))
+        Ok((runs, z, p_val))
+    })
 }
 
 /// Calculate lag at which ACF first crosses zero
@@ -334,45 +363,47 @@ pub fn runs_test(x: PyReadonlyArray1<f64>) -> PyResult<(usize, f64, f64)> {
 /// Python signature:
 ///     acf_zero_crossing(x, max_lag=100) -> Optional[int]
 #[pyfunction(signature = (x, max_lag=100))]
-pub fn acf_zero_crossing(x: PyReadonlyArray1<f64>, max_lag: usize) -> PyResult<Option<usize>> {
+pub fn acf_zero_crossing(py: Python<'_>, x: PyReadonlyArray1<f64>, max_lag: usize) -> PyResult<Option<usize>> {
     let x = x.as_slice()?;
-    let n = x.len();
+    py.allow_threads(|| {
+        let n = x.len();
     
-    if n < 2 {
-        return Ok(None);
-    }
-    
-    let max_lag = max_lag.min(n - 1);
-    
-    // Calculate ACF values
-    let mean = x.iter().copied().sum::<f64>() / (n as f64);
-    let mut var = 0.0;
-    for &v in x {
-        let d = v - mean;
-        var += d * d;
-    }
-    var /= n as f64;
-    
-    if var <= 0.0 {
-        return Ok(None);
-    }
-    
-    let mut prev_acf = 1.0;  // ACF at lag 0
-    
-    for k in 1..=max_lag {
-        let mut num = 0.0;
-        for t in k..n {
-            num += (x[t] - mean) * (x[t - k] - mean);
+        if n < 2 {
+            return Ok(None);
         }
-        let acf = num / (var * (n as f64));
-        
-        // Check for sign change
-        if prev_acf > 0.0 && acf <= 0.0 {
-            return Ok(Some(k));
-        }
-        
-        prev_acf = acf;
-    }
     
-    Ok(None)
+        let max_lag = max_lag.min(n - 1);
+    
+        // Calculate ACF values
+        let mean = x.iter().copied().sum::<f64>() / (n as f64);
+        let mut var = 0.0;
+        for &v in x {
+            let d = v - mean;
+            var += d * d;
+        }
+        var /= n as f64;
+    
+        if var <= 0.0 {
+            return Ok(None);
+        }
+    
+        let mut prev_acf = 1.0;  // ACF at lag 0
+    
+        for k in 1..=max_lag {
+            let mut num = 0.0;
+            for t in k..n {
+                num += (x[t] - mean) * (x[t - k] - mean);
+            }
+            let acf = num / (var * (n as f64));
+        
+            // Check for sign change
+            if prev_acf > 0.0 && acf <= 0.0 {
+                return Ok(Some(k));
+            }
+        
+            prev_acf = acf;
+        }
+    
+        Ok(None)
+    })
 }

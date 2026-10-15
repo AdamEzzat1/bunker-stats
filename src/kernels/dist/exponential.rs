@@ -21,12 +21,15 @@ pub fn exp_pdf<'py>(
         return Err(PyValueError::new_err("lam must be positive"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        out[i] = if v < 0.0 { 0.0 } else { lam * (-lam * v).exp() };
-    }
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            out[i] = if v < 0.0 { 0.0 } else { lam * (-lam * v).exp() };
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -44,19 +47,22 @@ pub fn exp_logpdf<'py>(
         return Err(PyValueError::new_err("lam must be positive"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let log_lam = lam.ln();
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        if v.is_nan() {
-            out[i] = f64::NAN;
-        } else if v < 0.0 {
-            out[i] = f64::NEG_INFINITY;
-        } else {
-            out[i] = log_lam - lam * v;
+        let log_lam = lam.ln();
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            if v.is_nan() {
+                out[i] = f64::NAN;
+            } else if v < 0.0 {
+                out[i] = f64::NEG_INFINITY;
+            } else {
+                out[i] = log_lam - lam * v;
+            }
         }
-    }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -74,12 +80,17 @@ pub fn exp_cdf<'py>(
         return Err(PyValueError::new_err("lam must be positive"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        out[i] = if v < 0.0 { 0.0 } else { 1.0 - (-lam * v).exp() };
-    }
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            // -expm1(-lam*x) keeps full precision for tiny lam*x, where
+            // 1 - exp(-lam*x) would round to 0.
+            out[i] = if v < 0.0 { 0.0 } else { -(-lam * v).exp_m1() };
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -97,12 +108,15 @@ pub fn exp_sf<'py>(
         return Err(PyValueError::new_err("lam must be positive"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        out[i] = if v < 0.0 { 1.0 } else { (-lam * v).exp() };
-    }
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            out[i] = if v < 0.0 { 1.0 } else { (-lam * v).exp() };
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -120,18 +134,21 @@ pub fn exp_logsf<'py>(
         return Err(PyValueError::new_err("lam must be positive"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        if v.is_nan() {
-            out[i] = f64::NAN;
-        } else if v < 0.0 {
-            out[i] = 0.0;
-        } else {
-            out[i] = -lam * v;
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            if v.is_nan() {
+                out[i] = f64::NAN;
+            } else if v < 0.0 {
+                out[i] = 0.0;
+            } else {
+                out[i] = -lam * v;
+            }
         }
-    }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -149,18 +166,21 @@ pub fn exp_cumhazard<'py>(
         return Err(PyValueError::new_err("lam must be positive"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        if v.is_nan() {
-            out[i] = f64::NAN;
-        } else if v < 0.0 {
-            out[i] = 0.0;
-        } else {
-            out[i] = lam * v;
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            if v.is_nan() {
+                out[i] = f64::NAN;
+            } else if v < 0.0 {
+                out[i] = 0.0;
+            } else {
+                out[i] = lam * v;
+            }
         }
-    }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -180,26 +200,29 @@ pub fn exp_ppf<'py>(
     let q = q.as_slice()?;
 
     // strict range check like SciPy
-    for &p in q {
-        if p.is_nan() {
-            continue;
+    let out = py.allow_threads(|| -> PyResult<_> {
+        for &p in q {
+            if p.is_nan() {
+                continue;
+            }
+            if !(0.0..=1.0).contains(&p) {
+                return Err(PyValueError::new_err("q values must be in [0, 1]"));
+            }
         }
-        if !(0.0..=1.0).contains(&p) {
-            return Err(PyValueError::new_err("q values must be in [0, 1]"));
-        }
-    }
 
-    let n = q.len();
-    let mut out = vec![0.0_f64; n];
-    for (i, &p) in q.iter().enumerate() {
-        if p.is_nan() {
-            out[i] = f64::NAN;
-        } else if p == 1.0 {
-            out[i] = f64::INFINITY;
-        } else {
-            // stable: -ln(1-p)/lam using ln_1p
-            out[i] = -(-p).ln_1p() / lam;
+        let n = q.len();
+        let mut out = vec![0.0_f64; n];
+        for (i, &p) in q.iter().enumerate() {
+            if p.is_nan() {
+                out[i] = f64::NAN;
+            } else if p == 1.0 {
+                out[i] = f64::INFINITY;
+            } else {
+                // stable: -ln(1-p)/lam using ln_1p
+                out[i] = -(-p).ln_1p() / lam;
+            }
         }
-    }
+        Ok(out)
+    })?;
     Ok(PyArray1::from_vec_bound(py, out))
 }

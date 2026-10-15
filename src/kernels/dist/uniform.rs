@@ -34,15 +34,18 @@ pub fn unif_pdf<'py>(
         return Err(PyValueError::new_err("b must be greater than a"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let width = b - a;
-    let inv_w = 1.0 / width;
+        let width = b - a;
+        let inv_w = 1.0 / width;
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        out[i] = if v < a || v > b { 0.0 } else { inv_w };
-    }
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            out[i] = if v < a || v > b { 0.0 } else { inv_w };
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -61,21 +64,24 @@ pub fn unif_logpdf<'py>(
         return Err(PyValueError::new_err("b must be greater than a"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let width = b - a;
-    let log_inv_w = -width.ln();
+        let width = b - a;
+        let log_inv_w = -width.ln();
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        if v.is_nan() {
-            out[i] = f64::NAN;
-        } else if v < a || v > b {
-            out[i] = f64::NEG_INFINITY;
-        } else {
-            out[i] = log_inv_w;
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            if v.is_nan() {
+                out[i] = f64::NAN;
+            } else if v < a || v > b {
+                out[i] = f64::NEG_INFINITY;
+            } else {
+                out[i] = log_inv_w;
+            }
         }
-    }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -94,21 +100,24 @@ pub fn unif_cdf<'py>(
         return Err(PyValueError::new_err("b must be greater than a"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let width = b - a;
-    let inv_w = 1.0 / width;
+        let width = b - a;
+        let inv_w = 1.0 / width;
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        out[i] = if v <= a {
-            0.0
-        } else if v >= b {
-            1.0
-        } else {
-            (v - a) * inv_w
-        };
-    }
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            out[i] = if v <= a {
+                0.0
+            } else if v >= b {
+                1.0
+            } else {
+                (v - a) * inv_w
+            };
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -127,21 +136,24 @@ pub fn unif_sf<'py>(
         return Err(PyValueError::new_err("b must be greater than a"));
     }
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let width = b - a;
-    let inv_w = 1.0 / width;
+        let width = b - a;
+        let inv_w = 1.0 / width;
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        out[i] = if v <= a {
-            1.0
-        } else if v >= b {
-            0.0
-        } else {
-            (b - v) * inv_w
-        };
-    }
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            out[i] = if v <= a {
+                1.0
+            } else if v >= b {
+                0.0
+            } else {
+                (b - v) * inv_w
+            };
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -160,24 +172,27 @@ pub fn unif_logsf<'py>(
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let width = validate_uniform(a, b)?;
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        out[i] = if v.is_nan() {
-            f64::NAN
-        } else if v <= a {
-            // S(x) = 1 for x <= a, so log(1) = 0
-            0.0
-        } else if v >= b {
-            // S(x) = 0 for x >= b, so log(0) = -inf
-            f64::NEG_INFINITY
-        } else {
-            // a < v < b: S(x) = (b-v)/(b-a), guaranteed positive
-            let sf = (b - v) / width;
-            sf.ln()
-        };
-    }
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            out[i] = if v.is_nan() {
+                f64::NAN
+            } else if v <= a {
+                // S(x) = 1 for x <= a, so log(1) = 0
+                0.0
+            } else if v >= b {
+                // S(x) = 0 for x >= b, so log(0) = -inf
+                f64::NEG_INFINITY
+            } else {
+                // a < v < b: S(x) = (b-v)/(b-a), guaranteed positive
+                let sf = (b - v) / width;
+                sf.ln()
+            };
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 
@@ -201,29 +216,32 @@ pub fn unif_cumhazard<'py>(
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let width = validate_uniform(a, b)?;
     let x = x.as_slice()?;
-    let n = x.len();
+    let out = py.allow_threads(|| {
+        let n = x.len();
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &v) in x.iter().enumerate() {
-        // Direct piecewise computation - no intermediate logsf variable
-        out[i] = if v.is_nan() {
-            f64::NAN
-        } else if v <= a {
-            // H(x) = -log(S(x)) = -log(1) = 0
-            0.0
-        } else if v >= b {
-            // H(x) = -log(S(x)) = -log(0) = +inf
-            // CRITICAL: Direct assignment, not -(-inf)
-            f64::INFINITY
-        } else {
-            // a < v < b
-            // H(x) = -log((b-v)/(b-a)) = log((b-a)/(b-v))
-            // Compute directly to avoid any ln(negative) possibility
-            let sf = (b - v) / width;
-            // sf is guaranteed positive here: a < v < b means b > v, so b - v > 0
-            -sf.ln()
-        };
-    }
+        let mut out = vec![0.0_f64; n];
+        for (i, &v) in x.iter().enumerate() {
+            // Direct piecewise computation - no intermediate logsf variable
+            out[i] = if v.is_nan() {
+                f64::NAN
+            } else if v <= a {
+                // H(x) = -log(S(x)) = -log(1) = 0
+                0.0
+            } else if v >= b {
+                // H(x) = -log(S(x)) = -log(0) = +inf
+                // CRITICAL: Direct assignment, not -(-inf)
+                f64::INFINITY
+            } else {
+                // a < v < b
+                // H(x) = -log((b-v)/(b-a)) = log((b-a)/(b-v))
+                // Compute directly to avoid any ln(negative) possibility
+                let sf = (b - v) / width;
+                // sf is guaranteed positive here: a < v < b means b > v, so b - v > 0
+                -sf.ln()
+            };
+        }
+        out
+    });
     Ok(PyArray1::from_vec_bound(py, out))
 }
 /// Uniform PPF (inverse CDF): 1D q -> 1D x
@@ -243,25 +261,28 @@ pub fn unif_ppf<'py>(
     let q = q.as_slice()?;
 
     // strict range check like SciPy
-    for &p in q {
-        if p.is_nan() {
-            continue;
+    let out = py.allow_threads(|| -> PyResult<_> {
+        for &p in q {
+            if p.is_nan() {
+                continue;
+            }
+            if !(0.0..=1.0).contains(&p) {
+                return Err(PyValueError::new_err("q values must be in [0, 1]"));
+            }
         }
-        if !(0.0..=1.0).contains(&p) {
-            return Err(PyValueError::new_err("q values must be in [0, 1]"));
-        }
-    }
 
-    let n = q.len();
-    let width = b - a;
+        let n = q.len();
+        let width = b - a;
 
-    let mut out = vec![0.0_f64; n];
-    for (i, &p) in q.iter().enumerate() {
-        if p.is_nan() {
-            out[i] = f64::NAN;
-        } else {
-            out[i] = a + p * width;
+        let mut out = vec![0.0_f64; n];
+        for (i, &p) in q.iter().enumerate() {
+            if p.is_nan() {
+                out[i] = f64::NAN;
+            } else {
+                out[i] = a + p * width;
+            }
         }
-    }
+        Ok(out)
+    })?;
     Ok(PyArray1::from_vec_bound(py, out))
 }

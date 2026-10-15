@@ -7,45 +7,49 @@ use super::common::{mean, reject_nonfinite, var_sample};
 
 #[pyfunction]
 pub fn cohens_d_2samp_np(
+    py: Python<'_>,
     x: numpy::PyReadonlyArray1<f64>,
     y: numpy::PyReadonlyArray1<f64>,
     pooled: bool,
 ) -> PyResult<f64> {
     let xs = x.as_slice()?;
     let ys = y.as_slice()?;
-    reject_nonfinite(xs, "x")?;
-    reject_nonfinite(ys, "y")?;
+    py.allow_threads(|| {
+        reject_nonfinite(xs, "x")?;
+        reject_nonfinite(ys, "y")?;
 
-    let n1 = xs.len();
-    let n2 = ys.len();
-    if n1 < 2 || n2 < 2 {
-        return Err(PyValueError::new_err(
-            "cohens_d requires n>=2 for both samples",
-        ));
-    }
+        let n1 = xs.len();
+        let n2 = ys.len();
+        if n1 < 2 || n2 < 2 {
+            return Err(PyValueError::new_err(
+                "cohens_d requires n>=2 for both samples",
+            ));
+        }
 
-    let m1 = mean(xs);
-    let m2 = mean(ys);
-    let v1 = var_sample(xs, m1);
-    let v2 = var_sample(ys, m2);
+        let m1 = mean(xs);
+        let m2 = mean(ys);
+        let v1 = var_sample(xs, m1);
+        let v2 = var_sample(ys, m2);
 
-    let s = if pooled {
-        let df = (n1 + n2 - 2) as f64;
-        let sp2 = (((n1 - 1) as f64) * v1 + ((n2 - 1) as f64) * v2) / df;
-        sp2.sqrt()
-    } else {
-        ((v1 + v2) * 0.5).sqrt()
-    };
+        let s = if pooled {
+            let df = (n1 + n2 - 2) as f64;
+            let sp2 = (((n1 - 1) as f64) * v1 + ((n2 - 1) as f64) * v2) / df;
+            sp2.sqrt()
+        } else {
+            ((v1 + v2) * 0.5).sqrt()
+        };
 
-    if s == 0.0 {
-        Ok(0.0)
-    } else {
-        Ok((m1 - m2) / s)
-    }
+        if s == 0.0 {
+            Ok(0.0)
+        } else {
+            Ok((m1 - m2) / s)
+        }
+    })
 }
 
 #[pyfunction]
 pub fn hedges_g_2samp_np2(
+    py: Python<'_>,
     x: numpy::PyReadonlyArray1<f64>,
     y: numpy::PyReadonlyArray1<f64>,
     pooled: bool,
@@ -63,7 +67,7 @@ pub fn hedges_g_2samp_np2(
         ));
     }
 
-    let d = cohens_d_2samp_np(x, y, pooled)?;
+    let d = cohens_d_2samp_np(py, x, y, pooled)?;
     let df = (n1 + n2 - 2) as f64;
     let j = 1.0 - 3.0 / (4.0 * df - 1.0);
     Ok(d * j)
@@ -79,6 +83,7 @@ pub fn hedges_g_2samp_np2(
 #[pyfunction]
 #[pyo3(signature = (x, y=None, alpha=0.05, equal_var=true))]
 pub fn mean_diff_ci_np(
+    py: Python<'_>,
     x: numpy::PyReadonlyArray1<f64>,
     y: Option<numpy::PyReadonlyArray1<f64>>,
     alpha: f64,
@@ -88,6 +93,11 @@ pub fn mean_diff_ci_np(
     reject_nonfinite(xs, "x")?;
     if xs.len() < 2 {
         return Err(PyValueError::new_err("x must have n>=2"));
+    }
+    // Written so that NaN fails too. An out-of-range alpha reaches the
+    // quantile function's assertion, which aborts the process.
+    if !(alpha > 0.0 && alpha < 1.0) {
+        return Err(PyValueError::new_err("alpha must be in (0, 1)"));
     }
 
     let (diff, se, df) = if let Some(yarr) = y {
@@ -144,11 +154,13 @@ pub fn mean_diff_ci_np(
         (m, se, df)
     };
 
-    let dist = StudentsT::new(0.0, 1.0, df).unwrap();
-    let tcrit = dist.inverse_cdf(1.0 - alpha / 2.0);
+    py.allow_threads(|| {
+        let dist = StudentsT::new(0.0, 1.0, df).unwrap();
+        let tcrit = dist.inverse_cdf(1.0 - alpha / 2.0);
 
-    let lo = diff - tcrit * se;
-    let hi = diff + tcrit * se;
+        let lo = diff - tcrit * se;
+        let hi = diff + tcrit * se;
 
-    Ok((lo, hi))
+        Ok((lo, hi))
+    })
 }

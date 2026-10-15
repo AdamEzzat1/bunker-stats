@@ -1,0 +1,646 @@
+"""Regression tests for the 0.3.0 hardening pass.
+
+Tier 0 — numeric bug fixes:
+  * catastrophic-cancellation offset shifts in scalar/matrix/rolling cov & corr
+  * previously unregistered kernels (rolling_min/max/range/cv/count_above/
+    pct_above, kde_gaussian) are importable and correct
+  * welch_psd / bartlett_psd density scaling matches scipy.signal.welch
+  * ks_1samp one-sided p-values are exact (Birnbaum-Tingey), matching scipy
+  * exp_cdf keeps precision for tiny arguments (expm1 path)
+
+Tier 1 — API consistency (edge/window/unit/validation rules).
+Tier 2 — determinism (random_state=None == seed 0, bit-exact).
+"""
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+# The extension is `bunker_stats.bunker_stats_rs` (see pyproject.toml). This
+# used to be `pytest.importorskip("bunker_stats_rs")`, a top-level name that
+# has not existed since the package became a mixed Rust/Python layout, so
+# the whole file skipped on every run.
+import bunker_stats.bunker_stats_rs as b  # noqa: E402
+bs = pytest.importorskip("bunker_stats")
+scipy_stats = pytest.importorskip("scipy.stats")
+scipy_signal = pytest.importorskip("scipy.signal")
+pd = pytest.importorskip("pandas")
+
+RTOL = 1e-6
+OFFSETS = [1e8, 1e12]
+
+
+def _corr_data(offset: float, n: int = 200, seed: int = 7):
+    rng = np.random.default_rng(seed)
+    x = offset + rng.normal(scale=1.0, size=n)
+    y = offset + 0.5 * (x - offset) + rng.normal(scale=0.5, size=n)
+    return x, y
+
+
+# ======================================================================
+# Tier 0a: catastrophic cancellation
+# ======================================================================
+
+class TestScalarCovCorrLargeOffset:
+    @pytest.mark.parametrize("offset", OFFSETS)
+    def test_cov_matches_numpy(self, offset):
+        x, y = _corr_data(offset)
+        got = b.cov_np(x, y)
+        want = np.cov(x, y, ddof=1)[0, 1]
+        np.testing.assert_allclose(got, want, rtol=RTOL)
+
+    @pytest.mark.parametrize("offset", OFFSETS)
+    def test_corr_matches_numpy(self, offset):
+        x, y = _corr_data(offset)
+        got = b.corr_np(x, y)
+        want = np.corrcoef(x, y)[0, 1]
+        np.testing.assert_allclose(got, want, rtol=RTOL)
+        assert -1.0 <= got <= 1.0
+
+    @pytest.mark.parametrize("offset", OFFSETS)
+    def test_cov_corr_skipna_match_pairwise_numpy(self, offset):
+        x, y = _corr_data(offset)
+        x = x.copy()
+        y = y.copy()
+        x[::17] = np.nan
+        y[::23] = np.nan
+        mask = ~(np.isnan(x) | np.isnan(y))
+        want_cov = np.cov(x[mask], y[mask], ddof=1)[0, 1]
+        want_corr = np.corrcoef(x[mask], y[mask])[0, 1]
+        np.testing.assert_allclose(b.cov_skipna(x, y), want_cov, rtol=RTOL)
+        np.testing.assert_allclose(b.corr_skipna(x, y), want_corr, rtol=RTOL)
+
+    def test_perfect_correlation_is_clamped(self):
+        x = 1e8 + np.arange(50, dtype=np.float64)
+        r = b.corr_np(x, 2.0 * x)
+        assert r <= 1.0
+        np.testing.assert_allclose(r, 1.0, rtol=1e-12)
+
+
+def _pairwise_cov_ref(X: np.ndarray) -> np.ndarray:
+    """Two-pass pairwise-complete covariance (exact reference)."""
+    p = X.shape[1]
+    out = np.full((p, p), np.nan)
+    for i in range(p):
+        for j in range(p):
+            m = ~(np.isnan(X[:, i]) | np.isnan(X[:, j]))
+            if m.sum() >= 2:
+                out[i, j] = np.cov(X[m, i], X[m, j], ddof=1)[0, 1]
+    return out
+
+
+class TestMatrixSkipnaLargeOffset:
+    # NOTE: pandas' own rolling/pairwise one-pass kernels catastrophically
+    # cancel at these offsets, so the references below are exact two-pass
+    # numpy computations rather than pandas.
+    @pytest.mark.parametrize("offset", OFFSETS)
+    def test_cov_matrix_skipna_matches_two_pass(self, offset):
+        rng = np.random.default_rng(11)
+        X = offset + rng.normal(size=(120, 4))
+        X[::13, 0] = np.nan
+        X[::19, 2] = np.nan
+        got = np.asarray(b.cov_matrix_skipna_np(X))
+        want = _pairwise_cov_ref(X)
+        np.testing.assert_allclose(got, want, rtol=RTOL)
+
+    @pytest.mark.parametrize("offset", OFFSETS)
+    def test_corr_matrix_skipna_matches_two_pass(self, offset):
+        rng = np.random.default_rng(12)
+        base = rng.normal(size=(150, 3))
+        X = offset + base
+        X[::11, 1] = np.nan
+        got = np.asarray(b.corr_matrix_skipna_np(X))
+        # Pairwise-complete: entry (i, j) is the correlation of the rows where
+        # both columns are finite, variances included. (This test used to pin
+        # cov_ij / sqrt(cov_ii * cov_jj), which takes each variance over the
+        # column's own rows; the kernel changed after 0.3.1.) Exact two-pass
+        # reference on the stored values, shifted by an element of the column:
+        # at 1e12 the stored X is quantized to ~1e-4, so it is not base + offset,
+        # and subtracting a nearby double is exact.
+        k = X.shape[1]
+        want = np.eye(k)
+        for i in range(k):
+            for j in range(i + 1, k):
+                both = np.isfinite(X[:, i]) & np.isfinite(X[:, j])
+                a, c = X[both, i], X[both, j]
+                want[i, j] = want[j, i] = np.corrcoef(a - a[0], c - c[0])[0, 1]
+        # atol covers near-zero correlations at 1e12 where the comparison is
+        # limited by input quantization, not by the kernel
+        np.testing.assert_allclose(got, want, rtol=RTOL, atol=1e-8)
+        assert np.all(np.abs(got[np.isfinite(got)]) <= 1.0)
+
+
+class TestRollingNanLargeOffset:
+    # Exact two-pass references (pandas' own one-pass rolling kernels lose
+    # precision at these offsets).
+    @pytest.mark.parametrize("offset", OFFSETS)
+    def test_rolling_std_nan_matches_two_pass(self, offset):
+        rng = np.random.default_rng(3)
+        x = offset + rng.normal(size=300)
+        x[::29] = np.nan
+        got = np.asarray(b.rolling_std_nan_np(x, 20))
+        want = np.array([
+            np.nanstd(x[max(0, i - 19):i + 1], ddof=1)
+            if np.sum(~np.isnan(x[max(0, i - 19):i + 1])) >= 2 else np.nan
+            for i in range(len(x))
+        ])
+        np.testing.assert_allclose(got, want, rtol=RTOL, equal_nan=True)
+
+    @pytest.mark.parametrize("offset", OFFSETS)
+    def test_rolling_zscore_nan_matches_two_pass(self, offset):
+        rng = np.random.default_rng(4)
+        x = offset + rng.normal(size=300)
+        x[::31] = np.nan
+        got = np.asarray(b.rolling_zscore_nan_np(x, 25))
+        want = np.empty(len(x))
+        for i in range(len(x)):
+            win = x[max(0, i - 24):i + 1]
+            valid = win[~np.isnan(win)]
+            if np.isnan(x[i]) or len(valid) < 2 or np.std(valid, ddof=1) == 0.0:
+                want[i] = np.nan
+            else:
+                want[i] = (x[i] - np.mean(valid)) / np.std(valid, ddof=1)
+        # At 1e12 the reference's own `x - np.mean(...)` numerator carries
+        # ~ulp(1e12) of rounding, so the achievable agreement is ~1e-3 absolute
+        # in z-units; the kernel's shifted accumulation is the more accurate side.
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-3, equal_nan=True)
+
+
+class TestRollingStrictLargeOffset:
+    @pytest.mark.parametrize("offset", OFFSETS)
+    def test_rolling_cov_matches_two_pass(self, offset):
+        x, y = _corr_data(offset, n=250, seed=8)
+        w = 30
+        got = np.asarray(b.rolling_cov_np(x, y, w))
+        want = np.array([
+            np.cov(x[i:i + w], y[i:i + w], ddof=1)[0, 1]
+            for i in range(len(x) - w + 1)
+        ])
+        np.testing.assert_allclose(got, want, rtol=RTOL)
+
+    @pytest.mark.parametrize("offset", OFFSETS)
+    def test_rolling_corr_matches_two_pass(self, offset):
+        x, y = _corr_data(offset, n=250, seed=9)
+        w = 30
+        got = np.asarray(b.rolling_corr_np(x, y, w))
+        want = np.array([
+            np.corrcoef(x[i:i + w], y[i:i + w])[0, 1]
+            for i in range(len(x) - w + 1)
+        ])
+        np.testing.assert_allclose(got, want, rtol=RTOL)
+        assert np.all(np.abs(got) <= 1.0)
+
+    @pytest.mark.parametrize("offset", OFFSETS)
+    def test_rolling_cov_corr_skipna_match_two_pass(self, offset):
+        x, y = _corr_data(offset, n=250, seed=10)
+        w = 25
+        got_cov = np.asarray(b.rolling_cov_skipna(x, y, w))
+        got_corr = np.asarray(b.rolling_corr_skipna(x, y, w))
+        want_cov = np.array([
+            np.cov(x[i:i + w], y[i:i + w], ddof=1)[0, 1]
+            for i in range(len(x) - w + 1)
+        ])
+        want_corr = np.array([
+            np.corrcoef(x[i:i + w], y[i:i + w])[0, 1]
+            for i in range(len(x) - w + 1)
+        ])
+        np.testing.assert_allclose(got_cov, want_cov, rtol=RTOL)
+        np.testing.assert_allclose(got_corr, want_corr, rtol=RTOL)
+
+    @pytest.mark.parametrize("offset", OFFSETS)
+    def test_rolling_linreg_skipna_recovers_slope_and_fit(self, offset):
+        rng = np.random.default_rng(13)
+        x = offset + rng.normal(size=120)
+        y = 3.0 * x + 5.0 + rng.normal(scale=1e-3, size=120)
+        slope, intercept = b.rolling_linreg_skipna(x, y, 40)
+        slope = np.asarray(slope)
+        intercept = np.asarray(intercept)
+        # noise/spread gives per-window slope-estimation scatter of O(1e-4)
+        np.testing.assert_allclose(slope, 3.0, rtol=1e-3)
+        # The intercept itself is an O(offset)-scale cancellation of two huge
+        # terms, so check the fitted line instead: prediction at x = offset
+        # must reproduce y = 3*offset + 5 to full relative precision.
+        pred = slope * offset + intercept
+        np.testing.assert_allclose(pred, 3.0 * offset + 5.0, rtol=1e-9)
+
+
+# ======================================================================
+# Tier 0b: phantom API now registered
+# ======================================================================
+
+class TestPhantomApiRegistered:
+    def test_every_facade_all_name_resolves_and_is_callable(self):
+        missing = []
+        for name in bs.__all__:
+            obj = getattr(bs, name, None)
+            if obj is None or not callable(obj):
+                missing.append(name)
+        assert not missing, f"facade names not callable: {missing}"
+
+    def test_rolling_min_max_range_match_pandas(self):
+        rng = np.random.default_rng(21)
+        x = rng.normal(size=100)
+        w = 9
+        np.testing.assert_allclose(
+            np.asarray(b.rolling_min(x, window=w)),
+            pd.Series(x).rolling(w).min().to_numpy()[w - 1:],
+        )
+        np.testing.assert_allclose(
+            np.asarray(b.rolling_max(x, window=w)),
+            pd.Series(x).rolling(w).max().to_numpy()[w - 1:],
+        )
+        np.testing.assert_allclose(
+            np.asarray(b.rolling_range(x, window=w)),
+            (pd.Series(x).rolling(w).max() - pd.Series(x).rolling(w).min()).to_numpy()[w - 1:],
+        )
+
+    def test_rolling_count_and_pct_above(self):
+        x = np.array([1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0])
+        got_count = np.asarray(b.rolling_count_above(x, threshold=0.0, window=3))
+        want = np.array([2.0, 1.0, 2.0, 1.0, 2.0])
+        np.testing.assert_allclose(got_count, want)
+        got_pct = np.asarray(b.rolling_pct_above(x, threshold=0.0, window=3))
+        np.testing.assert_allclose(got_pct, want / 3.0)
+
+    def test_rolling_cv_matches_definition(self):
+        rng = np.random.default_rng(22)
+        x = 10.0 + rng.normal(size=60)
+        w = 12
+        got = np.asarray(b.rolling_cv(x, window=w))
+        s = pd.Series(x)
+        want = (s.rolling(w).std() / s.rolling(w).mean().abs()).to_numpy()[w - 1:]
+        np.testing.assert_allclose(got, want, rtol=1e-9)
+
+    def test_kde_gaussian_matches_scipy(self):
+        rng = np.random.default_rng(23)
+        x = rng.normal(size=400)
+        grid, dens = b.kde_gaussian_np(x, 101)
+        grid = np.asarray(grid)
+        dens = np.asarray(dens)
+        want = scipy_stats.gaussian_kde(x)(grid)
+        np.testing.assert_allclose(dens, want, rtol=1e-8)
+
+    def test_kde_gaussian_facade_alias(self):
+        x = np.random.default_rng(24).normal(size=50)
+        grid, dens = bs.kde_gaussian(x, 31)
+        assert len(np.asarray(grid)) == 31
+        assert np.all(np.asarray(dens) >= 0.0)
+
+
+# ======================================================================
+# Tier 0c: welch/bartlett PSD scaling
+# ======================================================================
+
+class TestWelchScaling:
+    @pytest.mark.parametrize("nperseg", [64, 128, 255])
+    def test_welch_matches_scipy(self, nperseg):
+        rng = np.random.default_rng(31)
+        x = rng.normal(size=1024)
+        freqs, psd = b.welch_psd(x, nperseg=nperseg)
+        f_ref, p_ref = scipy_signal.welch(x, nperseg=nperseg)
+        np.testing.assert_allclose(np.asarray(freqs), f_ref, atol=1e-15)
+        np.testing.assert_allclose(np.asarray(psd), p_ref, rtol=1e-10, atol=1e-15)
+
+    def test_bartlett_matches_scipy_zero_overlap(self):
+        rng = np.random.default_rng(32)
+        x = rng.normal(size=1024)
+        freqs, psd = b.bartlett_psd(x, nperseg=128)
+        f_ref, p_ref = scipy_signal.welch(x, nperseg=128, noverlap=0)
+        np.testing.assert_allclose(np.asarray(freqs), f_ref, atol=1e-15)
+        np.testing.assert_allclose(np.asarray(psd), p_ref, rtol=1e-10, atol=1e-15)
+
+
+# ======================================================================
+# Tier 0d: exact one-sided KS p-values
+# ======================================================================
+
+class TestKsOneSidedExact:
+    @pytest.mark.parametrize("n", [20, 50, 100])
+    @pytest.mark.parametrize("alt", ["greater", "less"])
+    def test_matches_scipy(self, n, alt):
+        rng = np.random.default_rng(41 + n)
+        x = rng.normal(loc=0.15, size=n)
+        got = b.ks_1samp_np(x, "norm", [0.0, 1.0], alt)
+        want = scipy_stats.ks_1samp(x, scipy_stats.norm(0.0, 1.0).cdf, alternative=alt)
+        # statistic tolerance is bounded by tiny normal-CDF implementation
+        # differences (statrs vs scipy erf), not by the KS logic itself
+        np.testing.assert_allclose(got["statistic"], want.statistic, rtol=1e-8, atol=1e-10)
+        np.testing.assert_allclose(got["pvalue"], want.pvalue, rtol=1e-8)
+
+
+# ======================================================================
+# Tier 0e: exp_cdf precision at tiny x
+# ======================================================================
+
+class TestExpCdfTinyArgument:
+    def test_tiny_x(self):
+        x = np.array([1e-18, 1e-15, 1e-12, 1e-9])
+        got = np.asarray(b.exp_cdf(x, lam=1.0))
+        want = scipy_stats.expon.cdf(x)
+        np.testing.assert_allclose(got, want, rtol=1e-12)
+        assert got[0] == pytest.approx(1e-18, rel=1e-12)
+        assert got[0] > 0.0
+
+    def test_regular_range_unchanged(self):
+        x = np.linspace(0.0, 20.0, 200)
+        got = np.asarray(b.exp_cdf(x, lam=0.7))
+        want = scipy_stats.expon.cdf(x, scale=1.0 / 0.7)
+        np.testing.assert_allclose(got, want, rtol=1e-13)
+
+
+# ======================================================================
+# Tier 1a: rolling edge rules — window < 1 raises, window > n is empty
+# ======================================================================
+
+class TestRollingEdgeRules:
+    X = np.arange(10.0)
+
+    @pytest.mark.parametrize("fn", [
+        lambda x: b.rolling_mean_np(x, 0),
+        lambda x: b.rolling_std_np(x, 0),
+        lambda x: b.rolling_var_np(x, 0),
+        lambda x: b.rolling_mean_std_np(x, 0),
+        lambda x: b.rolling_zscore_np(x, 0),
+        lambda x: b.rolling_cov_np(x, x, 0),
+        lambda x: b.rolling_corr_np(x, x, 0),
+        lambda x: b.rolling_mean_nan_np(x, 0),
+        lambda x: b.rolling_std_nan_np(x, 0),
+        lambda x: b.rolling_zscore_nan_np(x, 0),
+        lambda x: b.rolling_cov_nan_np(x, x, 0),
+        lambda x: b.rolling_corr_nan_np(x, x, 0),
+        lambda x: b.rolling_correlation(x, x, window=0),
+        lambda x: b.rolling_min(x, window=0),
+        lambda x: b.rolling_max(x, window=0),
+        lambda x: b.rolling_range(x, window=0),
+        lambda x: b.rolling_cv(x, window=0),
+        lambda x: b.rolling_count_above(x, threshold=0.0, window=0),
+        lambda x: b.rolling_pct_above(x, threshold=0.0, window=0),
+        lambda x: b.rolling_mean_axis0_np(x.reshape(5, 2), 0),
+    ])
+    def test_window_zero_raises(self, fn):
+        with pytest.raises(ValueError):
+            fn(self.X)
+
+    @pytest.mark.parametrize("fn", [
+        lambda x: b.rolling_mean_np(x, 11),
+        lambda x: b.rolling_std_np(x, 11),
+        lambda x: b.rolling_cov_np(x, x, 11),
+        lambda x: b.rolling_corr_np(x, x, 11),
+        lambda x: b.rolling_correlation(x, x, window=11),
+        lambda x: b.rolling_autocorr(x, lag=1, window=11),
+        lambda x: b.rolling_min(x, window=11),
+        lambda x: b.rolling_max(x, window=11),
+        lambda x: b.rolling_range(x, window=11),
+        lambda x: b.rolling_cv(x, window=11),
+        lambda x: b.rolling_count_above(x, threshold=0.0, window=11),
+        lambda x: b.rolling_pct_above(x, threshold=0.0, window=11),
+    ])
+    def test_window_larger_than_n_is_empty(self, fn):
+        out = np.asarray(fn(self.X))
+        assert out.size == 0
+
+    def test_rolling_autocorr_multi_window_larger_than_n(self):
+        out = np.asarray(b.rolling_autocorr_multi(self.X, lags=[1, 2], window=11))
+        assert out.shape == (0, 2)
+
+    def test_facade_negative_window_is_value_error(self):
+        for call in (
+            lambda: bs.rolling_mean(self.X, -3),
+            lambda: bs.rolling_std(self.X, -3),
+            lambda: bs.rolling_zscore(self.X, 0),
+            lambda: bs.rolling_cov(self.X, self.X, -1),
+            lambda: bs.rolling_corr(self.X, self.X, -1),
+        ):
+            with pytest.raises(ValueError):
+                call()
+
+    def test_rolling_median_keeps_length_n(self):
+        # Intentional exception to the truncated-shape rule: rolling_median is
+        # pandas-like and returns a full-length array.
+        out = np.asarray(b.rolling_median(self.X, 3))
+        assert out.shape == self.X.shape
+
+
+# ======================================================================
+# Tier 1b: unit and range validation
+# ======================================================================
+
+class TestUnitRangeValidation:
+    X = np.arange(20.0)
+
+    def test_winsorize_fraction_units(self):
+        out = np.asarray(b.winsorize_np(self.X, 0.1, 0.9))
+        lo = np.percentile(self.X, 10.0)
+        hi = np.percentile(self.X, 90.0)
+        assert out.min() == pytest.approx(lo)
+        assert out.max() == pytest.approx(hi)
+
+    @pytest.mark.parametrize("lo,hi", [(5.0, 95.0), (-0.1, 0.9), (0.9, 0.1), (0.4, 0.4)])
+    def test_winsorize_rejects_bad_bounds(self, lo, hi):
+        with pytest.raises(ValueError):
+            b.winsorize_np(self.X, lo, hi)
+
+    def test_winsorized_mean_facade_uses_fractions(self):
+        data = np.array([1.0, 2.0, 3.0, 4.0, 100.0])
+        got = bs.winsorized_mean(data, 0.1, 0.9)
+        want = b.winsorized_mean_np(data, 10.0, 90.0)  # raw kernel: percent units
+        assert got == pytest.approx(want)
+        with pytest.raises(ValueError):
+            bs.winsorized_mean(data, 10.0, 90.0)
+
+    @pytest.mark.parametrize("q", [-1.0, 100.5, np.nan])
+    def test_percentile_out_of_range_raises(self, q):
+        with pytest.raises(ValueError):
+            b.percentile_np(self.X, q)
+
+    @pytest.mark.parametrize("cut", [0.5, 0.7, -0.1, np.nan])
+    def test_trimmed_mean_bad_cut_raises(self, cut):
+        with pytest.raises(ValueError):
+            b.trimmed_mean_np(self.X, cut)
+        with pytest.raises(ValueError):
+            b.trimmed_mean_skipna_np(self.X, cut)
+
+    @pytest.mark.parametrize("alpha", [0.0, -0.5, 1.5, np.nan])
+    def test_ewma_bad_alpha_raises(self, alpha):
+        with pytest.raises(ValueError):
+            b.ewma_np(self.X, alpha)
+
+    def test_ewma_alpha_one_ok(self):
+        np.testing.assert_allclose(np.asarray(b.ewma_np(self.X, 1.0)), self.X)
+
+    def test_quantile_bins_zero_raises(self):
+        with pytest.raises(ValueError):
+            b.quantile_bins_np(self.X, 0)
+        with pytest.raises(ValueError):
+            bs.quantile_bins(self.X, 0)
+        with pytest.raises(ValueError):
+            bs.quantile_bins(self.X, -4)
+
+
+# ======================================================================
+# Tier 1c: outlier detector keyword defaults
+# ======================================================================
+
+class TestOutlierDefaults:
+    def test_iqr_outliers_default_k(self):
+        x = np.concatenate([np.random.default_rng(0).normal(size=50), [100.0]])
+        got = np.asarray(bs.iqr_outliers(x))
+        want = np.asarray(bs.iqr_outliers(x, 1.5))
+        np.testing.assert_array_equal(got, want)
+        assert got[-1]
+
+    def test_zscore_outliers_default_threshold(self):
+        x = np.concatenate([np.random.default_rng(1).normal(size=200), [50.0]])
+        got = np.asarray(bs.zscore_outliers(x))
+        want = np.asarray(bs.zscore_outliers(x, 3.0))
+        np.testing.assert_array_equal(got, want)
+        assert got[-1]
+
+
+# ======================================================================
+# Tier 1d: alternative validation
+# ======================================================================
+
+class TestAlternativeValidation:
+    def test_bad_alternative_raises_value_error(self):
+        x = np.random.default_rng(2).normal(size=30)
+        y = np.random.default_rng(3).normal(size=30)
+        with pytest.raises(ValueError):
+            b.t_test_1samp_np(x, 0.0, "bogus")
+        with pytest.raises(ValueError):
+            b.t_test_2samp_np(x, y, True, "bogus")
+        with pytest.raises(ValueError):
+            b.mann_whitney_u_np(x, y, "bogus")
+        with pytest.raises(ValueError):
+            bs.t_test_2samp(x, y, alternative="bogus")
+
+
+# ======================================================================
+# Tier 1e: cov/corr length mismatch
+# ======================================================================
+
+class TestLengthMismatch:
+    def test_cov_corr_length_mismatch_raises(self):
+        x = np.arange(10.0)
+        y = np.arange(8.0)
+        with pytest.raises(ValueError):
+            b.cov_np(x, y)
+        with pytest.raises(ValueError):
+            b.corr_np(x, y)
+        with pytest.raises(ValueError):
+            bs.cov(x, y)
+        with pytest.raises(ValueError):
+            bs.corr(x, y)
+
+
+# ======================================================================
+# Tier 1f: zero-variance and empty-input semantics
+# ======================================================================
+
+class TestZeroVarianceSemantics:
+    def test_acf_constant_is_nan_beyond_lag0(self):
+        x = np.full(50, 3.14)
+        out = np.asarray(b.acf(x, nlags=5))
+        assert out[0] == 1.0
+        assert np.all(np.isnan(out[1:]))
+
+    def test_pacf_constant_is_nan_beyond_lag0(self):
+        x = np.full(50, 3.14)
+        for fn in (b.pacf, b.pacf_yw, b.pacf_innovations, b.pacf_burg):
+            out = np.asarray(fn(x, nlags=5))
+            assert out[0] == 1.0, fn
+            assert np.all(np.isnan(out[1:])), fn
+
+    def test_pacf_innovations_never_exceeds_one(self):
+        rng = np.random.default_rng(5)
+        # near-unit-root series stress the innovations recursion
+        x = np.cumsum(rng.normal(size=200))
+        out = np.asarray(b.pacf_innovations(x, nlags=30))
+        finite = out[np.isfinite(out)]
+        assert np.all(np.abs(finite) <= 1.0 + 1e-12)
+
+    def test_welford_empty_returns_nan_mean(self):
+        mean, var, n = b.welford_np(np.array([], dtype=np.float64))
+        assert np.isnan(mean)
+        assert np.isnan(var)
+        assert n == 0
+
+    def test_welford_all_nan_returns_nan_mean(self):
+        mean, var, n = b.welford_np(np.array([np.nan, np.nan]))
+        assert np.isnan(mean)
+        assert np.isnan(var)
+        assert n == 0
+
+
+# ======================================================================
+# Tier 2: determinism — one seeding policy (None == seed 0, bit-exact)
+# ======================================================================
+
+def _flatten(v):
+    if isinstance(v, tuple):
+        out = []
+        for item in v:
+            out.extend(_flatten(item))
+        return out
+    return [float(v)]
+
+
+class TestResamplerDeterminism:
+    RNG = np.random.default_rng(99)
+    X = RNG.normal(size=60)
+    Y = RNG.normal(size=60)
+
+    # All 15 randomized resamplers, called once with random_state=None and
+    # once with random_state=0 — results must be bit-identical.
+    RESAMPLERS = [
+        ("bootstrap_mean", lambda x, y, rs: b.bootstrap_mean(x, 200, random_state=rs)),
+        ("bootstrap_mean_ci", lambda x, y, rs: b.bootstrap_mean_ci(x, 200, random_state=rs)),
+        ("bootstrap_ci", lambda x, y, rs: b.bootstrap_ci(x, n_resamples=200, random_state=rs)),
+        ("bootstrap_corr", lambda x, y, rs: b.bootstrap_corr(x, y, 200, random_state=rs)),
+        ("bootstrap_se", lambda x, y, rs: b.bootstrap_se(x, n_resamples=200, random_state=rs)),
+        ("bootstrap_var", lambda x, y, rs: b.bootstrap_var(x, n_resamples=200, random_state=rs)),
+        ("bootstrap_t_ci_mean", lambda x, y, rs: b.bootstrap_t_ci_mean(x, n_resamples=100, random_state=rs)),
+        ("bootstrap_bca_ci", lambda x, y, rs: b.bootstrap_bca_ci(x, n_resamples=200, random_state=rs)),
+        ("bayesian_bootstrap_ci", lambda x, y, rs: b.bayesian_bootstrap_ci(x, n_resamples=200, random_state=rs)),
+        ("moving_block_bootstrap_mean_ci", lambda x, y, rs: b.moving_block_bootstrap_mean_ci(x, 5, n_resamples=200, random_state=rs)),
+        ("circular_block_bootstrap_mean_ci", lambda x, y, rs: b.circular_block_bootstrap_mean_ci(x, 5, n_resamples=200, random_state=rs)),
+        ("stationary_bootstrap_mean_ci", lambda x, y, rs: b.stationary_bootstrap_mean_ci(x, 5, n_resamples=200, random_state=rs)),
+        ("permutation_corr_test", lambda x, y, rs: b.permutation_corr_test(x, y, n_permutations=200, random_state=rs)),
+        ("permutation_mean_diff_test", lambda x, y, rs: b.permutation_mean_diff_test(x, y, n_permutations=200, random_state=rs)),
+        ("jackknife_after_bootstrap_se_mean", lambda x, y, rs: b.jackknife_after_bootstrap_se_mean(x, n_resamples=50, random_state=rs)),
+    ]
+
+    @pytest.mark.parametrize("name,fn", RESAMPLERS, ids=[n for n, _ in RESAMPLERS])
+    def test_none_equals_seed_zero_bit_identical(self, name, fn):
+        got_none = _flatten(fn(self.X, self.Y, None))
+        got_zero = _flatten(fn(self.X, self.Y, 0))
+        assert got_none == got_zero, f"{name}: None != seed 0"
+
+    @pytest.mark.parametrize("name,fn", RESAMPLERS, ids=[n for n, _ in RESAMPLERS])
+    def test_repeated_unseeded_calls_bit_identical(self, name, fn):
+        first = _flatten(fn(self.X, self.Y, None))
+        second = _flatten(fn(self.X, self.Y, None))
+        assert first == second, f"{name}: unseeded calls differ"
+
+    def test_bootstrap_mean_invariant_to_thread_count(self):
+        """The serial final sum makes bootstrap_mean bit-identical across
+        rayon thread counts (RAYON_NUM_THREADS is read at pool creation, so
+        each configuration runs in its own subprocess)."""
+        import os
+        import subprocess
+        import sys
+
+        code = (
+            "import numpy as np, bunker_stats.bunker_stats_rs as b;"
+            "x = np.random.default_rng(99).normal(size=60);"
+            "print(repr(b.bootstrap_mean(x, 5000, random_state=None)))"
+        )
+        results = []
+        for threads in ("1", "4"):
+            env = dict(os.environ, RAYON_NUM_THREADS=threads)
+            out = subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True, text=True, env=env, check=True,
+            )
+            results.append(out.stdout.strip())
+        assert results[0] == results[1], f"thread-count dependent: {results}"

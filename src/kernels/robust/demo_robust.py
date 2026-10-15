@@ -113,9 +113,6 @@ def scipy_qn_scale(data):
     n = len(data)
     if n < 2:
         return np.nan
-    if n == 2:
-        return abs(data[0] - data[1]) * 0.8224
-    
     diffs = []
     for i in range(n):
         for j in range(i+1, n):
@@ -123,8 +120,9 @@ def scipy_qn_scale(data):
     
     diffs = np.array(diffs)
     diffs.sort()
-    k = len(diffs) // 4
-    return diffs[k] * 2.2219
+    # Rousseeuw & Croux: the C(h, 2)-th smallest difference, h = n // 2 + 1
+    h = n // 2 + 1
+    return diffs[h * (h - 1) // 2 - 1] * 2.219144465985076
 
 def scipy_rolling_median(data, window):
     """NumPy-based rolling median"""

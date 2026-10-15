@@ -11,10 +11,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-bs = pytest.importorskip(
-    "bunker_stats_rs",
-    reason="build the extension first: `python -m maturin develop --release`",
-)
+# The extension is `bunker_stats.bunker_stats_rs` (see pyproject.toml). This
+# used to be `pytest.importorskip("bunker_stats_rs")`, a top-level name that
+# has not existed since the package became a mixed Rust/Python layout, so
+# the whole file skipped on every run.
+import bunker_stats.bunker_stats_rs as bs  # noqa: E402
 
 
 def _bg_reference(e: np.ndarray, p: int) -> float:

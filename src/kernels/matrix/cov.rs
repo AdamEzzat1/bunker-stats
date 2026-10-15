@@ -6,6 +6,8 @@
 // - hot kernels write into a preallocated flat buffer (row-major) via &mut [f64]
 // - symmetric matrices compute upper triangle then mirror
 // - optional Rayon parallelism behind feature="parallel"
+// - the matrix kernels are cache-blocked and bit-reproducible: the same input
+//   gives the same bytes on every CPU and for every thread count
 
 use numpy::ndarray::ArrayView2;
 
@@ -15,6 +17,293 @@ use rayon::prelude::*;
 #[inline]
 fn idx(i: usize, j: usize, p: usize) -> usize {
     i * p + j
+}
+
+/// Independent accumulators per dot product. A compile-time constant, never
+/// chosen from the running CPU, so the order of additions is fixed everywhere.
+const LANES: usize = 8;
+
+/// Target size (in f64s) of the column-major scratch block: 512 KiB, small
+/// enough that every column pair of a block is computed on cached data.
+const BLOCK_ELEMS: usize = 1 << 16;
+
+/// Floor on rows per block, so very wide inputs still get useful lane work.
+const MIN_BLOCK_ROWS: usize = 64;
+
+/// Per-block work (rows * p * p) below which Rayon dispatch costs more than it
+/// saves; with full blocks this means matrices narrower than 64 columns stay
+/// serial.
+#[cfg(any(feature = "parallel", feature = "gemm"))]
+const PAR_MIN_WORK: usize = 1 << 22;
+
+/// Centering blocks handed to the thread pool per dispatch on the GEMM path.
+#[cfg(feature = "gemm")]
+const SUPER_BLOCKS: usize = 16;
+
+/// Whether `work` multiply-adds are worth spreading over the thread pool.
+#[cfg(feature = "gemm")]
+#[inline]
+fn worth_threads(work: usize) -> bool {
+    cfg!(feature = "parallel") && work >= PAR_MIN_WORK
+}
+
+/// Dot product with `LANES` fixed accumulators.
+///
+/// Rust never reorders floating-point reductions, so a single-accumulator loop
+/// cannot be vectorized. Splitting the sum across fixed lanes lets LLVM use
+/// SIMD while the addition order stays a pure function of the slice length.
+#[inline]
+fn dot_lanes(a: &[f64], b: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+
+    let mut acc = [0.0f64; LANES];
+    let ca = a.chunks_exact(LANES);
+    let cb = b.chunks_exact(LANES);
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (u, v) in ca.zip(cb) {
+        for k in 0..LANES {
+            acc[k] += u[k] * v[k];
+        }
+    }
+
+    let mut s = ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]));
+    for (u, v) in ra.iter().zip(rb) {
+        s += u * v;
+    }
+    s
+}
+
+/// Squared Euclidean distance with `LANES` fixed accumulators (see `dot_lanes`).
+#[inline]
+fn sq_dist_lanes(a: &[f64], b: &[f64]) -> f64 {
+    debug_assert_eq!(a.len(), b.len());
+
+    let mut acc = [0.0f64; LANES];
+    let ca = a.chunks_exact(LANES);
+    let cb = b.chunks_exact(LANES);
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (u, v) in ca.zip(cb) {
+        for k in 0..LANES {
+            let d = u[k] - v[k];
+            acc[k] += d * d;
+        }
+    }
+
+    let mut s = ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]));
+    for (u, v) in ra.iter().zip(rb) {
+        let d = u - v;
+        s += d * d;
+    }
+    s
+}
+
+/// Column means in one row-major pass.
+fn column_means(x: &[f64], n: usize, p: usize) -> Vec<f64> {
+    let mut means = vec![0.0f64; p];
+    for row in x.chunks_exact(p) {
+        for c in 0..p {
+            means[c] += row[c];
+        }
+    }
+    let inv_n = 1.0 / (n as f64);
+    for m in means.iter_mut() {
+        *m *= inv_n;
+    }
+    means
+}
+
+/// Fill the upper triangle of `out` (diagonal included) with
+/// `sum over rows of pair(column_i, column_j)`, columns optionally centered.
+///
+/// Rows are processed in blocks: each block is transposed (and centered) into
+/// a small column-major scratch, every column pair is reduced on that block
+/// with `pair`, and the per-block results are added to `out` in block order.
+/// Extra memory is one block (about `BLOCK_ELEMS` f64s), independent of `n`.
+///
+/// Threads split the work by output row and never share an accumulator, so the
+/// result does not depend on the thread count.
+///
+/// Requires `n >= 1` and `p >= 1`. The lower triangle is left zeroed; callers
+/// finish with `finish_symmetric`.
+fn blocked_pair_sums_out<F>(
+    x: &[f64],
+    n: usize,
+    p: usize,
+    means: Option<&[f64]>,
+    out: &mut [f64],
+    pair: F,
+) where
+    F: Fn(&[f64], &[f64]) -> f64 + Sync,
+{
+    debug_assert!(n >= 1 && p >= 1);
+
+    let block_rows = ((BLOCK_ELEMS / p).max(MIN_BLOCK_ROWS) / LANES * LANES).min(n);
+    let mut scratch = vec![0.0f64; block_rows * p];
+    out.fill(0.0);
+
+    for rows in x.chunks(block_rows * p) {
+        let m = rows.len() / p;
+        let w = &mut scratch[..m * p];
+        match means {
+            Some(mu) => {
+                for (r, row) in rows.chunks_exact(p).enumerate() {
+                    for c in 0..p {
+                        w[c * m + r] = row[c] - mu[c];
+                    }
+                }
+            }
+            None => {
+                for (r, row) in rows.chunks_exact(p).enumerate() {
+                    for c in 0..p {
+                        w[c * m + r] = row[c];
+                    }
+                }
+            }
+        }
+        let w = &*w;
+        let pair = &pair;
+
+        let add_block = |(i, out_row): (usize, &mut [f64])| {
+            let a = &w[i * m..(i + 1) * m];
+            for j in i..p {
+                out_row[j] += pair(a, &w[j * m..(j + 1) * m]);
+            }
+        };
+
+        #[cfg(feature = "parallel")]
+        if m * p * p >= PAR_MIN_WORK {
+            // Coarse tasks: one output row is only a few microseconds of work.
+            out.par_chunks_mut(p).enumerate().with_min_len((p / 32).max(1)).for_each(add_block);
+            continue;
+        }
+        out.chunks_mut(p).enumerate().for_each(add_block);
+    }
+}
+
+/// Columns at or above which the Gram kernels use the packed GEMM.
+#[cfg(feature = "gemm")]
+const GEMM_MIN_COLS: usize = 64;
+
+/// Rows-times-columns centered per task on the GEMM path.
+#[cfg(feature = "gemm")]
+const GEMM_BLOCK_ELEMS: usize = 1 << 16;
+
+/// Upper triangle of `sum over rows of (x_i - mean_i) * (x_j - mean_j)`.
+///
+/// Default build: `blocked_pair_sums_out` with `dot_lanes`, bit-identical on
+/// every CPU. With the `gemm` feature, wide inputs go through a packed GEMM
+/// instead (see `gemm_gram_out`).
+fn blocked_gram_out(x: &[f64], n: usize, p: usize, means: Option<&[f64]>, out: &mut [f64]) {
+    #[cfg(feature = "gemm")]
+    if p >= GEMM_MIN_COLS {
+        gemm_gram_out(x, n, p, means, out);
+        return;
+    }
+    blocked_pair_sums_out(x, n, p, means, out, dot_lanes);
+}
+
+/// `blocked_gram_out` on matrixmultiply's GEMM.
+///
+/// Rows are taken in batches `W` (centered into a row-major scratch, or the
+/// whole input borrowed as-is when there is nothing to subtract), and each
+/// batch contributes `W^T W` to `out`. The output is cut into bands of rows;
+/// band `I` is one call `out[I, I.start..] += W[:, I]^T * W[:, I.start..]`, so
+/// only (a little more than) the upper triangle is computed and bands can run
+/// on separate threads.
+///
+/// Every output cell is still one in-order sum over the rows, so the result
+/// does not depend on the thread count. It DOES depend on the CPU: the GEMM
+/// kernel is chosen at run time (FMA, AVX, SSE2, NEON), and FMA rounds
+/// differently. Cells below the diagonal inside a band hold partial garbage
+/// until `finish_symmetric` mirrors the upper triangle over them.
+#[cfg(feature = "gemm")]
+fn gemm_gram_out(x: &[f64], n: usize, p: usize, means: Option<&[f64]>, out: &mut [f64]) {
+    debug_assert!(n >= 1 && p >= 1);
+
+    let threaded = worth_threads(n.saturating_mul(p).saturating_mul(p));
+    let block_rows = (GEMM_BLOCK_ELEMS / p).max(MIN_BLOCK_ROWS).min(n);
+    let batch_rows = match means {
+        Some(_) => (block_rows * if threaded { SUPER_BLOCKS } else { 1 }).min(n),
+        None => n,
+    };
+    let band_rows = (p / 16).clamp(8, 64);
+    let mut scratch = match means {
+        Some(_) => vec![0.0f64; batch_rows * p],
+        None => Vec::new(),
+    };
+    out.fill(0.0);
+
+    for batch in x.chunks(batch_rows * p) {
+        let w: &[f64] = match means {
+            Some(mu) => {
+                let w = &mut scratch[..batch.len()];
+                let center_block = |(dst, src): (&mut [f64], &[f64])| {
+                    for (d, s) in dst.chunks_exact_mut(p).zip(src.chunks_exact(p)) {
+                        for c in 0..p {
+                            d[c] = s[c] - mu[c];
+                        }
+                    }
+                };
+                if threaded {
+                    #[cfg(feature = "parallel")]
+                    w.par_chunks_mut(block_rows * p).zip(batch.par_chunks(block_rows * p)).for_each(center_block);
+                } else {
+                    w.chunks_mut(block_rows * p).zip(batch.chunks(block_rows * p)).for_each(center_block);
+                }
+                w
+            }
+            None => batch,
+        };
+        let m = w.len() / p;
+
+        let add_band = |(band, out_band): (usize, &mut [f64])| {
+            let i0 = band * band_rows;
+            let rows_here = out_band.len() / p;
+            let cols = p - i0;
+            // SAFETY: `w` holds m*p elements. A = W[:, i0..i0+rows_here]^T is
+            // read at w[r*p + i0 + i] and B = W[:, i0..] at w[r*p + i0 + j],
+            // with r < m, i < rows_here <= cols and j < cols, so the largest
+            // index is m*p - 1. C starts at out_band[i0] with row stride p and
+            // spans rows_here x cols, ending at rows_here*p - 1, inside
+            // `out_band`, which this closure borrows exclusively.
+            unsafe {
+                matrixmultiply::dgemm(
+                    rows_here,
+                    m,
+                    cols,
+                    1.0,
+                    w.as_ptr().add(i0),
+                    1,
+                    p as isize,
+                    w.as_ptr().add(i0),
+                    p as isize,
+                    1,
+                    1.0,
+                    out_band.as_mut_ptr().add(i0),
+                    p as isize,
+                    1,
+                );
+            }
+        };
+
+        if threaded {
+            #[cfg(feature = "parallel")]
+            out.par_chunks_mut(band_rows * p).enumerate().for_each(add_band);
+        } else {
+            out.chunks_mut(band_rows * p).enumerate().for_each(add_band);
+        }
+    }
+}
+
+/// Map every upper-triangle entry through `finish` and mirror it below the diagonal.
+fn finish_symmetric(out: &mut [f64], p: usize, finish: impl Fn(f64) -> f64) {
+    for i in 0..p {
+        for j in i..p {
+            let v = finish(out[idx(i, j, p)]);
+            out[idx(i, j, p)] = v;
+            out[idx(j, i, p)] = v;
+        }
+    }
 }
 
 /// Fill a sample covariance matrix (ddof=1) into `out`.
@@ -35,63 +324,10 @@ pub fn cov_matrix_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
         return;
     }
 
-    // Column means (one pass)
-    let mut means = vec![0.0f64; p];
-    for r in 0..n {
-        let base = r * p;
-        for c in 0..p {
-            means[c] += x[base + c];
-        }
-    }
-    let inv_n = 1.0 / (n as f64);
-    for c in 0..p {
-        means[c] *= inv_n;
-    }
-
+    let means = column_means(x, n, p);
     let denom = (n - 1) as f64;
-
-    #[cfg(feature = "parallel")]
-    {
-        // Parallelize across output rows; each row writes only its own slice.
-        out.par_chunks_mut(p).enumerate().for_each(|(i, row)| {
-            for j in i..p {
-                let mut acc = 0.0f64;
-                for r in 0..n {
-                    let base = r * p;
-                    let xi = x[base + i] - means[i];
-                    let xj = x[base + j] - means[j];
-                    acc += xi * xj;
-                }
-                row[j] = acc / denom;
-            }
-        });
-
-        // Mirror upper -> lower.
-        for i in 0..p {
-            for j in (i + 1)..p {
-                out[idx(j, i, p)] = out[idx(i, j, p)];
-            }
-        }
-        return;
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    {
-        for i in 0..p {
-            for j in i..p {
-                let mut acc = 0.0f64;
-                for r in 0..n {
-                    let base = r * p;
-                    let xi = x[base + i] - means[i];
-                    let xj = x[base + j] - means[j];
-                    acc += xi * xj;
-                }
-                let v = acc / denom;
-                out[idx(i, j, p)] = v;
-                out[idx(j, i, p)] = v;
-            }
-        }
-    }
+    blocked_gram_out(x, n, p, Some(&means), out);
+    finish_symmetric(out, p, |v| v / denom);
 }
 
 /// Fill a population covariance matrix (ddof=0) into `out`.
@@ -109,61 +345,10 @@ pub fn cov_matrix_bias_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
         return;
     }
 
-    // Column means
-    let mut means = vec![0.0f64; p];
-    for r in 0..n {
-        let base = r * p;
-        for c in 0..p {
-            means[c] += x[base + c];
-        }
-    }
-    let inv_n = 1.0 / (n as f64);
-    for c in 0..p {
-        means[c] *= inv_n;
-    }
-
+    let means = column_means(x, n, p);
     let denom = n as f64;
-
-    #[cfg(feature = "parallel")]
-    {
-        out.par_chunks_mut(p).enumerate().for_each(|(i, row)| {
-            for j in i..p {
-                let mut acc = 0.0f64;
-                for r in 0..n {
-                    let base = r * p;
-                    let xi = x[base + i] - means[i];
-                    let xj = x[base + j] - means[j];
-                    acc += xi * xj;
-                }
-                row[j] = acc / denom;
-            }
-        });
-
-        for i in 0..p {
-            for j in (i + 1)..p {
-                out[idx(j, i, p)] = out[idx(i, j, p)];
-            }
-        }
-        return;
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    {
-        for i in 0..p {
-            for j in i..p {
-                let mut acc = 0.0f64;
-                for r in 0..n {
-                    let base = r * p;
-                    let xi = x[base + i] - means[i];
-                    let xj = x[base + j] - means[j];
-                    acc += xi * xj;
-                }
-                let v = acc / denom;
-                out[idx(i, j, p)] = v;
-                out[idx(j, i, p)] = v;
-            }
-        }
-    }
+    blocked_gram_out(x, n, p, Some(&means), out);
+    finish_symmetric(out, p, |v| v / denom);
 }
 
 /// Fill a sample covariance matrix (ddof=1) for *centered* data (means already removed).
@@ -182,43 +367,8 @@ pub fn cov_matrix_centered_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
     }
 
     let denom = (n - 1) as f64;
-
-    #[cfg(feature = "parallel")]
-    {
-        out.par_chunks_mut(p).enumerate().for_each(|(i, row)| {
-            for j in i..p {
-                let mut acc = 0.0f64;
-                for r in 0..n {
-                    let base = r * p;
-                    acc += x[base + i] * x[base + j];
-                }
-                row[j] = acc / denom;
-            }
-        });
-
-        for i in 0..p {
-            for j in (i + 1)..p {
-                out[idx(j, i, p)] = out[idx(i, j, p)];
-            }
-        }
-        return;
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    {
-        for i in 0..p {
-            for j in i..p {
-                let mut acc = 0.0f64;
-                for r in 0..n {
-                    let base = r * p;
-                    acc += x[base + i] * x[base + j];
-                }
-                let v = acc / denom;
-                out[idx(i, j, p)] = v;
-                out[idx(j, i, p)] = v;
-            }
-        }
-    }
+    blocked_gram_out(x, n, p, None, out);
+    finish_symmetric(out, p, |v| v / denom);
 }
 
 /// NaN-aware covariance matrix (pairwise complete).
@@ -227,6 +377,23 @@ pub fn cov_matrix_centered_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
 /// We compute covariance using a stable one-pass formula:\n
 /// cov(i,j) = (sum_xy - sum_x*sum_y / m) / (m-1)\n
 /// where m is the pairwise count. If m < 2, returns NaN.
+///
+/// Rows are processed in blocks like the dense kernels. Each block is stored
+/// column-major twice: shifted values with missing entries zeroed (`w`), and a
+/// 1.0/0.0 "present" mask (`f`). The four pairwise-complete sums then become
+/// branch-free dot products:
+///
+/// ```text
+/// m = f_i . f_j    sum_x = w_i . f_j    sum_y = f_i . w_j    sum_xy = w_i . w_j
+/// ```
+///
+/// When a column has no missing entries in a block its mask is all ones, so
+/// the dots against it collapse to per-column sums computed once per block.
+/// Those shortcuts add the same terms in the same order, so an entry's bytes
+/// never depend on whether *other* columns contain NaNs. Data without NaNs
+/// costs one dot product per pair, the same as `cov_matrix_out`.
+///
+/// Extra memory: one block of scratch plus three f64 per output cell.
 pub fn cov_matrix_skipna_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
     debug_assert_eq!(x.len(), n * p);
     debug_assert_eq!(out.len(), p * p);
@@ -239,74 +406,100 @@ pub fn cov_matrix_skipna_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
         return;
     }
 
-    #[cfg(feature = "parallel")]
-    {
-        out.par_chunks_mut(p).enumerate().for_each(|(i, row)| {
-            for j in i..p {
-                let mut m: usize = 0;
-                let mut sum_x = 0.0f64;
-                let mut sum_y = 0.0f64;
-                let mut sum_xy = 0.0f64;
-
-                for r in 0..n {
-                    let base = r * p;
-                    let xi = x[base + i];
-                    let yj = x[base + j];
-                    if xi.is_finite() && yj.is_finite() {
-                        m += 1;
-                        sum_x += xi;
-                        sum_y += yj;
-                        sum_xy += xi * yj;
-                    }
-                }
-
-                row[j] = if m < 2 {
-                    f64::NAN
-                } else {
-                    let mf = m as f64;
-                    (sum_xy - (sum_x * sum_y) / mf) / ((m - 1) as f64)
-                };
-            }
-        });
-
-        for i in 0..p {
-            for j in (i + 1)..p {
-                out[idx(j, i, p)] = out[idx(i, j, p)];
+    // Per-column translation offsets (first finite value in each column).
+    // Covariance is invariant under a constant shift of each column, and
+    // shifting keeps the one-pass `sum_xy - sum_x*sum_y/m` formula from
+    // catastrophically cancelling on large-offset data.
+    let mut offs = vec![0.0f64; p];
+    for c in 0..p {
+        for r in 0..n {
+            let v = x[r * p + c];
+            if v.is_finite() {
+                offs[c] = v;
+                break;
             }
         }
-        return;
     }
 
-    #[cfg(not(feature = "parallel"))]
-    {
-        for i in 0..p {
-            for j in i..p {
-                let mut m: usize = 0;
-                let mut sum_x = 0.0f64;
-                let mut sum_y = 0.0f64;
-                let mut sum_xy = 0.0f64;
+    let block_rows = ((BLOCK_ELEMS / p).max(MIN_BLOCK_ROWS) / LANES * LANES).min(n);
+    let mut w_scratch = vec![0.0f64; block_rows * p];
+    let mut f_scratch = vec![0.0f64; block_rows * p];
+    let mut col_sum = vec![0.0f64; p];
+    let mut col_cnt = vec![0.0f64; p];
+    let mut col_full = vec![false; p];
 
-                for r in 0..n {
-                    let base = r * p;
-                    let xi = x[base + i];
-                    let yj = x[base + j];
-                    if xi.is_finite() && yj.is_finite() {
-                        m += 1;
-                        sum_x += xi;
-                        sum_y += yj;
-                        sum_xy += xi * yj;
-                    }
-                }
+    // Per pair: [m, sum_x, sum_y]; sum_xy accumulates in `out`. Counts are
+    // sums of 0.0/1.0, exact in f64.
+    let mut aux = vec![[0.0f64; 3]; p * p];
+    out.fill(0.0);
 
-                let v = if m < 2 {
-                    f64::NAN
-                } else {
-                    let mf = m as f64;
-                    (sum_xy - (sum_x * sum_y) / mf) / ((m - 1) as f64)
-                };
-                out[idx(i, j, p)] = v;
-                out[idx(j, i, p)] = v;
+    for rows in x.chunks(block_rows * p) {
+        let m = rows.len() / p;
+        let w = &mut w_scratch[..m * p];
+        let f = &mut f_scratch[..m * p];
+        for (r, row) in rows.chunks_exact(p).enumerate() {
+            for c in 0..p {
+                let v = row[c];
+                let present = v.is_finite();
+                w[c * m + r] = if present { v - offs[c] } else { 0.0 };
+                f[c * m + r] = if present { 1.0 } else { 0.0 };
             }
+        }
+        let (w, f) = (&*w, &*f);
+
+        for c in 0..p {
+            let fc = &f[c * m..(c + 1) * m];
+            col_cnt[c] = dot_lanes(fc, fc);
+            col_sum[c] = dot_lanes(&w[c * m..(c + 1) * m], fc);
+            col_full[c] = col_cnt[c] == m as f64;
+        }
+        let (col_sum, col_cnt, col_full) = (&col_sum, &col_cnt, &col_full);
+
+        let add_block = |(i, (out_row, aux_row)): (usize, (&mut [f64], &mut [[f64; 3]]))| {
+            let wi = &w[i * m..(i + 1) * m];
+            let fi = &f[i * m..(i + 1) * m];
+            for j in i..p {
+                let wj = &w[j * m..(j + 1) * m];
+                let fj = &f[j * m..(j + 1) * m];
+
+                out_row[j] += dot_lanes(wi, wj);
+
+                let acc = &mut aux_row[j];
+                acc[0] += if col_full[j] {
+                    col_cnt[i]
+                } else if col_full[i] {
+                    col_cnt[j]
+                } else {
+                    dot_lanes(fi, fj)
+                };
+                acc[1] += if col_full[j] { col_sum[i] } else { dot_lanes(wi, fj) };
+                acc[2] += if col_full[i] { col_sum[j] } else { dot_lanes(fi, wj) };
+            }
+        };
+
+        // Up to four dot products per pair, so the serial cutoff is 4x lower.
+        #[cfg(feature = "parallel")]
+        if 4 * m * p * p >= PAR_MIN_WORK {
+            out.par_chunks_mut(p)
+                .zip(aux.par_chunks_mut(p))
+                .enumerate()
+                .with_min_len((p / 32).max(1))
+                .for_each(add_block);
+            continue;
+        }
+        out.chunks_mut(p).zip(aux.chunks_mut(p)).enumerate().for_each(add_block);
+    }
+
+    for i in 0..p {
+        for j in i..p {
+            let [m, sum_x, sum_y] = aux[idx(i, j, p)];
+            let v = if m < 2.0 {
+                f64::NAN
+            } else {
+                (out[idx(i, j, p)] - (sum_x * sum_y) / m) / (m - 1.0)
+            };
+            out[idx(i, j, p)] = v;
+            out[idx(j, i, p)] = v;
         }
     }
 }
@@ -321,46 +514,13 @@ pub fn xtx_matrix_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
     if p == 0 {
         return;
     }
-    out.fill(0.0);
     if n == 0 {
+        out.fill(0.0);
         return;
     }
 
-    #[cfg(feature = "parallel")]
-    {
-        out.par_chunks_mut(p).enumerate().for_each(|(i, row)| {
-            for j in i..p {
-                let mut acc = 0.0f64;
-                for r in 0..n {
-                    let base = r * p;
-                    acc += x[base + i] * x[base + j];
-                }
-                row[j] = acc;
-            }
-        });
-
-        for i in 0..p {
-            for j in (i + 1)..p {
-                out[idx(j, i, p)] = out[idx(i, j, p)];
-            }
-        }
-        return;
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    {
-        for i in 0..p {
-            for j in i..p {
-                let mut acc = 0.0f64;
-                for r in 0..n {
-                    let base = r * p;
-                    acc += x[base + i] * x[base + j];
-                }
-                out[idx(i, j, p)] = acc;
-                out[idx(j, i, p)] = acc;
-            }
-        }
-    }
+    blocked_gram_out(x, n, p, None, out);
+    finish_symmetric(out, p, |v| v);
 }
 
 /// Gram matrix X X^T (n×n).
@@ -378,43 +538,33 @@ pub fn xxt_matrix_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
         return;
     }
 
-    #[cfg(feature = "parallel")]
-    {
-        out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
-            for j in i..n {
-                let mut acc = 0.0f64;
-                let base_i = i * p;
-                let base_j = j * p;
-                for k in 0..p {
-                    acc += x[base_i + k] * x[base_j + k];
-                }
-                row[j] = acc;
-            }
-        });
+    // Rows are already contiguous in row-major data, so no scratch is needed:
+    // walk the columns in blocks narrow enough that all n row segments of a
+    // block stay cached, adding each block's dot products in block order.
+    // Segments shorter than a page make the row-to-row stride defeat the
+    // prefetcher, hence the larger floor than the column kernels use.
+    const MIN_BLOCK_COLS: usize = 512;
+    let block_cols = ((BLOCK_ELEMS / n).max(MIN_BLOCK_COLS) / LANES * LANES).min(p);
 
-        for i in 0..n {
-            for j in (i + 1)..n {
-                out[j * n + i] = out[i * n + j];
+    for c0 in (0..p).step_by(block_cols) {
+        let c1 = (c0 + block_cols).min(p);
+
+        let add_block = |(i, row): (usize, &mut [f64])| {
+            let xi = &x[i * p + c0..i * p + c1];
+            for j in i..n {
+                row[j] += dot_lanes(xi, &x[j * p + c0..j * p + c1]);
             }
+        };
+
+        #[cfg(feature = "parallel")]
+        if n * n * (c1 - c0) >= PAR_MIN_WORK {
+            out.par_chunks_mut(n).enumerate().with_min_len((n / 32).max(1)).for_each(add_block);
+            continue;
         }
-        return;
+        out.chunks_mut(n).enumerate().for_each(add_block);
     }
 
-    #[cfg(not(feature = "parallel"))]
-    {
-        for i in 0..n {
-            for j in i..n {
-                let mut acc = 0.0f64;
-                let base_i = i * p;
-                let base_j = j * p;
-                for k in 0..p {
-                    acc += x[base_i + k] * x[base_j + k];
-                }
-                out[i * n + j] = acc;
-                out[j * n + i] = acc;
-            }
-        }
-    }
+    finish_symmetric(out, n, |v| v);
 }
 
 /// Pairwise Euclidean distances between columns (p×p).
@@ -425,56 +575,23 @@ pub fn pairwise_euclidean_cols_out(x: &[f64], n: usize, p: usize, out: &mut [f64
     if p == 0 {
         return;
     }
-    out.fill(0.0);
     if n == 0 {
+        out.fill(0.0);
         return;
     }
 
-    #[cfg(feature = "parallel")]
-    {
-        out.par_chunks_mut(p).enumerate().for_each(|(i, row)| {
-            row[i] = 0.0;
-            for j in (i + 1)..p {
-                let mut acc = 0.0f64;
-                for r in 0..n {
-                    let base = r * p;
-                    let d = x[base + i] - x[base + j];
-                    acc += d * d;
-                }
-                row[j] = acc.sqrt();
-            }
-        });
-
-        for i in 0..p {
-            for j in (i + 1)..p {
-                out[idx(j, i, p)] = out[idx(i, j, p)];
-            }
-        }
-        return;
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    {
-        for i in 0..p {
-            out[idx(i, i, p)] = 0.0;
-            for j in (i + 1)..p {
-                let mut acc = 0.0f64;
-                for r in 0..n {
-                    let base = r * p;
-                    let d = x[base + i] - x[base + j];
-                    acc += d * d;
-                }
-                let v = acc.sqrt();
-                out[idx(i, j, p)] = v;
-                out[idx(j, i, p)] = v;
-            }
-        }
+    // Differences are squared directly (no Gram trick), so nearly identical
+    // columns keep full relative accuracy.
+    blocked_pair_sums_out(x, n, p, None, out, sq_dist_lanes);
+    finish_symmetric(out, p, f64::sqrt);
+    for i in 0..p {
+        out[idx(i, i, p)] = 0.0;
     }
 }
 
-/// Pairwise cosine similarity between columns (p×p).
+/// Pairwise cosine *distance* (1 - cosine similarity) between columns (p×p).
 ///
-/// If a column has zero norm, similarities involving it are NaN.
+/// If a column has zero norm, distances involving it are NaN.
 pub fn pairwise_cosine_cols_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) {
     debug_assert_eq!(x.len(), n * p);
     debug_assert_eq!(out.len(), p * p);
@@ -482,90 +599,28 @@ pub fn pairwise_cosine_cols_out(x: &[f64], n: usize, p: usize, out: &mut [f64]) 
     if p == 0 {
         return;
     }
-
-    // Precompute column norms
-    let mut norms = vec![0.0f64; p];
-    for r in 0..n {
-        let base = r * p;
-        for c in 0..p {
-            let v = x[base + c];
-            norms[c] += v * v;
-        }
-    }
-    for c in 0..p {
-        norms[c] = norms[c].sqrt();
+    if n == 0 {
+        out.fill(f64::NAN);
+        return;
     }
 
-    // Fill upper triangle (cosine *distance* = 1 - cosine_similarity)
-    #[cfg(feature = "parallel")]
-    {
-        use rayon::prelude::*;
-        out.par_chunks_mut(p)
-            .enumerate()
-            .for_each(|(i, row)| {
-                let ni = norms[i];
-                for j in i..p {
-                    let nj = norms[j];
+    // Upper triangle of X^T X; its diagonal holds the squared column norms.
+    blocked_gram_out(x, n, p, None, out);
+    let norms: Vec<f64> = (0..p).map(|i| out[idx(i, i, p)].sqrt()).collect();
 
-                    // Diagonal: distance to self is 0 when defined
-                    if i == j {
-                        row[j] = if ni == 0.0 { f64::NAN } else { 0.0 };
-                        continue;
-                    }
-
-                    let denom = ni * nj;
-                    if denom == 0.0 || denom.is_nan() {
-                        row[j] = f64::NAN;
-                        continue;
-                    }
-
-                    let mut dot = 0.0f64;
-                    for r in 0..n {
-                        let base = r * p;
-                        dot += x[base + i] * x[base + j];
-                    }
-
-                    let cos_sim = dot / denom;
-                    row[j] = 1.0 - cos_sim;
-                }
-            });
-
-        // Mirror upper -> lower
-        for i in 0..p {
-            for j in (i + 1)..p {
-                out[j * p + i] = out[i * p + j];
-            }
-        }
-    }
-
-    // Sequential path — only compiled when the parallel feature is off. With it
-    // on, the block above computes and returns everything; gating this with
-    // `not(parallel)` (instead of an early `return`) avoids an unreachable-code
-    // warning in the parallel build.
-    #[cfg(not(feature = "parallel"))]
     for i in 0..p {
         let ni = norms[i];
-
-        // diagonal
-        out[i * p + i] = if ni == 0.0 { f64::NAN } else { 0.0 };
+        out[idx(i, i, p)] = if ni == 0.0 { f64::NAN } else { 0.0 };
 
         for j in (i + 1)..p {
-            let nj = norms[j];
-            let denom = ni * nj;
-
+            let denom = ni * norms[j];
             let v = if denom == 0.0 || denom.is_nan() {
                 f64::NAN
             } else {
-                let mut dot = 0.0f64;
-                for r in 0..n {
-                    let base = r * p;
-                    dot += x[base + i] * x[base + j];
-                }
-                1.0 - (dot / denom)
+                1.0 - out[idx(i, j, p)] / denom
             };
-
-            out[i * p + j] = v;
-            out[j * p + i] = v;
+            out[idx(i, j, p)] = v;
+            out[idx(j, i, p)] = v;
         }
     }
 }
@@ -634,4 +689,541 @@ pub fn cov_matrix_view(arr: ArrayView2<f64>) -> Vec<Vec<f64>> {
         out[i].copy_from_slice(&flat[i * n_cols..(i + 1) * n_cols]);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// The textbook triple loop the blocked kernel replaced: one running sum
+    /// per column pair. Kept as the oracle for the blocked implementation.
+    fn naive_cross(x: &[f64], n: usize, p: usize, center: bool, denom: f64) -> Vec<f64> {
+        let means = if center { column_means(x, n, p) } else { vec![0.0; p] };
+        let mut out = vec![0.0f64; p * p];
+        for i in 0..p {
+            for j in i..p {
+                let mut acc = 0.0f64;
+                for r in 0..n {
+                    acc += (x[r * p + i] - means[i]) * (x[r * p + j] - means[j]);
+                }
+                out[idx(i, j, p)] = acc / denom;
+                out[idx(j, i, p)] = acc / denom;
+            }
+        }
+        out
+    }
+
+    /// Deterministic pseudo-random data in [-1, 1) + `offset`.
+    fn lcg_data(len: usize, offset: f64) -> Vec<f64> {
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        (0..len)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                ((s >> 11) as f64 / (1u64 << 52) as f64 - 1.0) + offset
+            })
+            .collect()
+    }
+
+    fn bits(v: &[f64]) -> Vec<u64> {
+        v.iter().map(|x| x.to_bits()).collect()
+    }
+
+    /// Entries agree to `tol` in correlation units (error / sqrt(var_i var_j)),
+    /// which keeps near-zero covariances from dominating a relative test.
+    fn assert_close(got: &[f64], want: &[f64], p: usize, tol: f64) {
+        for i in 0..p {
+            for j in 0..p {
+                let (g, w) = (got[idx(i, j, p)], want[idx(i, j, p)]);
+                if w.is_nan() {
+                    assert!(g.is_nan(), "({i},{j}): expected NaN, got {g}");
+                    continue;
+                }
+                let scale = (want[idx(i, i, p)] * want[idx(j, j, p)]).sqrt();
+                let bound = tol * scale.max(f64::MIN_POSITIVE);
+                assert!((g - w).abs() <= bound, "({i},{j}): {g} vs {w} (bound {bound:e})");
+            }
+        }
+    }
+
+    #[test]
+    fn dot_lanes_matches_plain_dot_on_every_tail_length() {
+        for len in 0..40 {
+            let a = lcg_data(len, 0.0);
+            let b = lcg_data(len, 0.5);
+            let plain: f64 = a.iter().zip(&b).map(|(u, v)| u * v).sum();
+            let norm: f64 = a.iter().zip(&b).map(|(u, v)| (u * v).abs()).sum();
+            assert!((dot_lanes(&a, &b) - plain).abs() <= 1e-15 * norm.max(1.0), "len {len}");
+        }
+    }
+
+    #[test]
+    fn degenerate_shapes_keep_their_documented_fill() {
+        let mut out = vec![7.0; 4];
+        cov_matrix_out(&[1.0, 2.0], 1, 2, &mut out);
+        assert!(out.iter().all(|v| v.is_nan()), "sample cov with n < 2 is NaN");
+
+        let mut out = vec![7.0; 4];
+        cov_matrix_centered_out(&[1.0, 2.0], 1, 2, &mut out);
+        assert!(out.iter().all(|v| v.is_nan()));
+
+        let mut out = vec![7.0; 4];
+        cov_matrix_bias_out(&[], 0, 2, &mut out);
+        assert!(out.iter().all(|v| v.is_nan()), "population cov with n == 0 is NaN");
+
+        let mut out = vec![7.0; 4];
+        cov_matrix_bias_out(&[1.0, 2.0], 1, 2, &mut out);
+        assert_eq!(out, vec![0.0; 4], "population cov of one row is exactly 0");
+
+        let mut out: Vec<f64> = vec![];
+        cov_matrix_out(&[], 5, 0, &mut out); // p == 0 must not panic
+    }
+
+    #[test]
+    fn constant_column_has_exactly_zero_covariance() {
+        let (n, p) = (1000, 3);
+        let mut x = lcg_data(n * p, 0.0);
+        for r in 0..n {
+            x[r * p + 1] = 7.5;
+        }
+        let mut out = vec![0.0; p * p];
+        cov_matrix_out(&x, n, p, &mut out);
+        for k in 0..p {
+            assert_eq!(out[idx(1, k, p)], 0.0);
+            assert_eq!(out[idx(k, 1, p)], 0.0);
+        }
+    }
+
+    #[test]
+    fn nan_poisons_exactly_the_rows_and_columns_it_touches() {
+        let (n, p) = (300, 4);
+        let mut x = lcg_data(n * p, 0.0);
+        x[17 * p + 2] = f64::NAN;
+        let mut out = vec![0.0; p * p];
+        cov_matrix_out(&x, n, p, &mut out);
+        for i in 0..p {
+            for j in 0..p {
+                assert_eq!(out[idx(i, j, p)].is_nan(), i == 2 || j == 2, "({i},{j})");
+            }
+        }
+    }
+
+    #[test]
+    fn multi_block_shapes_match_the_naive_oracle() {
+        // (n, p) chosen to cross block boundaries with ragged last blocks and
+        // lane tails: tall-narrow, mid, and wide (MIN_BLOCK_ROWS-sized blocks).
+        for &(n, p) in &[(20_003usize, 3usize), (9_001, 40), (333, 700)] {
+            let x = lcg_data(n * p, 0.0);
+            let mut out = vec![0.0; p * p];
+
+            cov_matrix_out(&x, n, p, &mut out);
+            assert_close(&out, &naive_cross(&x, n, p, true, (n - 1) as f64), p, 1e-12);
+
+            cov_matrix_bias_out(&x, n, p, &mut out);
+            assert_close(&out, &naive_cross(&x, n, p, true, n as f64), p, 1e-12);
+
+            cov_matrix_centered_out(&x, n, p, &mut out);
+            assert_close(&out, &naive_cross(&x, n, p, false, (n - 1) as f64), p, 1e-12);
+        }
+    }
+
+    #[test]
+    fn large_offset_data_stays_accurate() {
+        // Mean 1e8, spread 1: the column mean is only good to ~1e-8 relative,
+        // so the covariance must still agree with the unshifted data to 1e-7.
+        let (n, p) = (50_000, 4);
+        let mut got = vec![0.0; p * p];
+        let mut want = vec![0.0; p * p];
+        cov_matrix_out(&lcg_data(n * p, 1.0e8), n, p, &mut got);
+        cov_matrix_out(&lcg_data(n * p, 0.0), n, p, &mut want);
+        assert_close(&got, &want, p, 1e-7);
+    }
+
+    #[test]
+    fn repeated_calls_are_bit_identical() {
+        let (n, p) = (4_000, 120);
+        let x = lcg_data(n * p, 0.0);
+        let mut a = vec![0.0; p * p];
+        let mut b = vec![1.0; p * p];
+        cov_matrix_out(&x, n, p, &mut a);
+        cov_matrix_out(&x, n, p, &mut b);
+        assert_eq!(bits(&a), bits(&b));
+    }
+
+    /// Big enough per block to take the Rayon path, then compared bit-for-bit
+    /// against the same call confined to pools of other sizes.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn result_does_not_depend_on_thread_count() {
+        let (n, p) = (4_000, 120);
+        assert!(BLOCK_ELEMS / p * p * p >= PAR_MIN_WORK, "shape must exercise the parallel path");
+        let x = lcg_data(n * p, 0.0);
+
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            let mut out = vec![0.0; p * p];
+            pool.install(|| cov_matrix_out(&x, n, p, &mut out));
+            bits(&out)
+        };
+
+        let one = run(1);
+        assert_eq!(one, run(2));
+        assert_eq!(one, run(7));
+    }
+
+    /// One running sum per pair, for the Gram and distance kernels.
+    /// `kind`: 0 = X^T X, 1 = Euclidean distance, 2 = cosine distance.
+    fn naive_cols(x: &[f64], n: usize, p: usize, kind: u8) -> Vec<f64> {
+        let col = |c: usize| (0..n).map(move |r| x[r * p + c]);
+        let dot = |i: usize, j: usize| col(i).zip(col(j)).fold(0.0, |a, (u, v)| a + u * v);
+        let mut out = vec![0.0f64; p * p];
+        for i in 0..p {
+            for j in 0..p {
+                out[idx(i, j, p)] = match kind {
+                    0 => dot(i, j),
+                    1 => col(i).zip(col(j)).fold(0.0, |a, (u, v)| a + (u - v) * (u - v)).sqrt(),
+                    _ if dot(i, i) == 0.0 || dot(j, j) == 0.0 => f64::NAN,
+                    _ if i == j => 0.0,
+                    _ => 1.0 - dot(i, j) / (dot(i, i).sqrt() * dot(j, j).sqrt()),
+                };
+            }
+        }
+        out
+    }
+
+    /// |got - want| <= rel * |want| + abs, NaN matching NaN.
+    fn assert_near(got: &[f64], want: &[f64], rel: f64, abs: f64) {
+        assert_eq!(got.len(), want.len());
+        for (k, (g, w)) in got.iter().zip(want).enumerate() {
+            if w.is_nan() {
+                assert!(g.is_nan(), "[{k}]: expected NaN, got {g}");
+            } else {
+                assert!((g - w).abs() <= rel * w.abs() + abs, "[{k}]: {g} vs {w}");
+            }
+        }
+    }
+
+    #[test]
+    fn gram_and_distance_kernels_match_the_naive_oracle_across_blocks() {
+        for &(n, p) in &[(20_003usize, 3usize), (5_001, 24), (500, 300)] {
+            let x = lcg_data(n * p, 0.25);
+            let mut out = vec![0.0; p * p];
+
+            xtx_matrix_out(&x, n, p, &mut out);
+            assert_close(&out, &naive_cols(&x, n, p, 0), p, 1e-12);
+
+            pairwise_euclidean_cols_out(&x, n, p, &mut out);
+            assert_near(&out, &naive_cols(&x, n, p, 1), 1e-12, 0.0);
+
+            pairwise_cosine_cols_out(&x, n, p, &mut out);
+            assert_near(&out, &naive_cols(&x, n, p, 2), 0.0, 1e-12);
+        }
+    }
+
+    #[test]
+    fn xxt_matches_xtx_of_the_transpose() {
+        for &(n, p) in &[(7usize, 1usize), (60, 37), (25, 5_003)] {
+            let x = lcg_data(n * p, 0.25);
+            let mut xt = vec![0.0; n * p];
+            for r in 0..n {
+                for c in 0..p {
+                    xt[c * n + r] = x[r * p + c];
+                }
+            }
+            let mut got = vec![0.0; n * n];
+            xxt_matrix_out(&x, n, p, &mut got);
+            assert_close(&got, &naive_cols(&xt, p, n, 0), n, 1e-12);
+            for i in 0..n {
+                for j in 0..n {
+                    assert_eq!(got[i * n + j].to_bits(), got[j * n + i].to_bits());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gram_and_distance_degenerate_shapes() {
+        let mut out = vec![7.0; 4];
+        xtx_matrix_out(&[], 0, 2, &mut out);
+        assert_eq!(out, vec![0.0; 4], "X^T X of zero rows is zeros");
+
+        let mut out = vec![7.0; 4];
+        pairwise_euclidean_cols_out(&[], 0, 2, &mut out);
+        assert_eq!(out, vec![0.0; 4]);
+
+        let mut out = vec![7.0; 9];
+        xxt_matrix_out(&[], 3, 0, &mut out);
+        assert_eq!(out, vec![0.0; 9], "X X^T with zero columns is zeros");
+
+        let mut none: Vec<f64> = vec![];
+        xtx_matrix_out(&[], 4, 0, &mut none);
+        xxt_matrix_out(&[], 0, 4, &mut none);
+        pairwise_euclidean_cols_out(&[], 4, 0, &mut none);
+        pairwise_cosine_cols_out(&[], 4, 0, &mut none);
+    }
+
+    #[test]
+    fn identical_columns_are_at_distance_exactly_zero() {
+        let (n, p) = (10_000, 3);
+        let mut x = lcg_data(n * p, 1.0e6);
+        for r in 0..n {
+            x[r * p + 2] = x[r * p];
+        }
+        let mut out = vec![1.0; p * p];
+        pairwise_euclidean_cols_out(&x, n, p, &mut out);
+        assert_eq!(out[idx(0, 2, p)], 0.0);
+        assert_eq!(out[idx(2, 0, p)], 0.0);
+        assert!(out[idx(0, 1, p)] > 0.0);
+        for i in 0..p {
+            assert_eq!(out[idx(i, i, p)], 0.0);
+        }
+    }
+
+    #[test]
+    fn cosine_zero_norm_column_is_nan_everywhere_it_appears() {
+        let (n, p) = (500, 4);
+        let mut x = lcg_data(n * p, 0.25);
+        for r in 0..n {
+            x[r * p + 1] = 0.0;
+        }
+        let mut out = vec![0.0; p * p];
+        pairwise_cosine_cols_out(&x, n, p, &mut out);
+        for i in 0..p {
+            for j in 0..p {
+                let v = out[idx(i, j, p)];
+                assert_eq!(v.is_nan(), i == 1 || j == 1, "({i},{j})");
+                if i == j && i != 1 {
+                    assert_eq!(v, 0.0);
+                }
+            }
+        }
+    }
+
+    /// Every dense kernel, bit-for-bit across pool sizes.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn gram_and_distance_results_do_not_depend_on_thread_count() {
+        let (n, p) = (4_000, 120);
+        let x = lcg_data(n * p, 0.25);
+        let (rows, cols) = (300, 257);
+
+        let kernels: [(&str, usize, &(dyn Fn(&mut [f64]) + Sync)); 4] = [
+            ("xtx", p * p, &|out| xtx_matrix_out(&x, n, p, out)),
+            ("euclidean", p * p, &|out| pairwise_euclidean_cols_out(&x, n, p, out)),
+            ("cosine", p * p, &|out| pairwise_cosine_cols_out(&x, n, p, out)),
+            ("xxt", rows * rows, &|out| xxt_matrix_out(&x[..rows * cols], rows, cols, out)),
+        ];
+
+        for (name, len, kernel) in kernels {
+            let run = |threads: usize| {
+                let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+                let mut out = vec![0.0; len];
+                pool.install(|| kernel(&mut out));
+                bits(&out)
+            };
+            let one = run(1);
+            assert_eq!(one, run(2), "{name}");
+            assert_eq!(one, run(7), "{name}");
+        }
+    }
+
+    /// The per-pair loop the blocked skipna kernel replaced.
+    fn naive_skipna(x: &[f64], n: usize, p: usize) -> Vec<f64> {
+        let offs: Vec<f64> = (0..p)
+            .map(|c| (0..n).map(|r| x[r * p + c]).find(|v| v.is_finite()).unwrap_or(0.0))
+            .collect();
+        let mut out = vec![0.0f64; p * p];
+        for i in 0..p {
+            for j in i..p {
+                let (mut m, mut sx, mut sy, mut sxy) = (0usize, 0.0f64, 0.0f64, 0.0f64);
+                for r in 0..n {
+                    let (a, b) = (x[r * p + i], x[r * p + j]);
+                    if a.is_finite() && b.is_finite() {
+                        let (a, b) = (a - offs[i], b - offs[j]);
+                        m += 1;
+                        sx += a;
+                        sy += b;
+                        sxy += a * b;
+                    }
+                }
+                let v = if m < 2 { f64::NAN } else { (sxy - sx * sy / m as f64) / (m - 1) as f64 };
+                out[idx(i, j, p)] = v;
+                out[idx(j, i, p)] = v;
+            }
+        }
+        out
+    }
+
+    /// Knock out roughly `one_in`-th of the entries, cycling NaN / +inf / -inf.
+    fn poke_holes(x: &mut [f64], one_in: u64) {
+        let mut s = 0xD1B5_4A32_D192_ED03u64;
+        let mut k = 0usize;
+        for v in x.iter_mut() {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            if s % one_in == 0 {
+                *v = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY][k % 3];
+                k += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn skipna_matches_the_naive_oracle_across_blocks() {
+        for &(n, p) in &[(20_003usize, 3usize), (5_001, 24), (500, 300)] {
+            for &one_in in &[u64::MAX, 100, 3] {
+                let mut x = lcg_data(n * p, 0.25);
+                poke_holes(&mut x, one_in);
+                let mut out = vec![0.0; p * p];
+                cov_matrix_skipna_out(&x, n, p, &mut out);
+                // 1e-11: the one-pass formula subtracts two sums of this size.
+                assert_close(&out, &naive_skipna(&x, n, p), p, 1e-11);
+            }
+        }
+    }
+
+    #[test]
+    fn skipna_agrees_with_dense_covariance_on_complete_data() {
+        let (n, p) = (30_000, 6);
+        let x = lcg_data(n * p, 1.0e6);
+        let mut dense = vec![0.0; p * p];
+        let mut skip = vec![0.0; p * p];
+        cov_matrix_out(&x, n, p, &mut dense);
+        cov_matrix_skipna_out(&x, n, p, &mut skip);
+        assert_close(&skip, &dense, p, 1e-9);
+    }
+
+    #[test]
+    fn skipna_degenerate_shapes_and_sparse_pairs() {
+        let mut out = vec![7.0; 4];
+        cov_matrix_skipna_out(&[], 0, 2, &mut out);
+        assert!(out.iter().all(|v| v.is_nan()), "n == 0 is NaN");
+
+        let mut none: Vec<f64> = vec![];
+        cov_matrix_skipna_out(&[], 4, 0, &mut none);
+
+        // Columns 0 and 1 overlap on exactly one row -> NaN; each has >= 2 own rows.
+        let nan = f64::NAN;
+        let x = [1.0, nan, nan, 2.0, 3.0, nan, 4.0, 5.0];
+        let mut out = vec![0.0; 4];
+        cov_matrix_skipna_out(&x, 4, 2, &mut out);
+        assert!(out[idx(0, 1, 2)].is_nan() && out[idx(1, 0, 2)].is_nan());
+        assert!((out[idx(0, 0, 2)] - 7.0 / 3.0).abs() < 1e-15, "var of 1, 3, 4");
+        assert!((out[idx(1, 1, 2)] - 4.5).abs() < 1e-15, "var of 2, 5");
+
+        // An all-missing column is NaN against everything, itself included.
+        let x = [1.0, nan, 2.0, f64::INFINITY, 4.0, nan];
+        let mut out = vec![0.0; 4];
+        cov_matrix_skipna_out(&x, 3, 2, &mut out);
+        assert!(out[idx(0, 0, 2)].is_finite());
+        assert!(out[idx(0, 1, 2)].is_nan() && out[idx(1, 1, 2)].is_nan());
+    }
+
+    /// The complete-column shortcuts must add the same terms in the same
+    /// order as the general path: punching holes in column 2 may not change a
+    /// single bit of the (0, 1) block.
+    #[test]
+    fn skipna_entry_bytes_ignore_nans_in_other_columns() {
+        let (n, p) = (25_000, 3);
+        let x = lcg_data(n * p, 0.25);
+        let mut holed = x.clone();
+        for r in (0..n).step_by(7) {
+            holed[r * p + 2] = f64::NAN;
+        }
+        let mut a = vec![0.0; p * p];
+        let mut b = vec![0.0; p * p];
+        cov_matrix_skipna_out(&x, n, p, &mut a);
+        cov_matrix_skipna_out(&holed, n, p, &mut b);
+        for &(i, j) in &[(0, 0), (0, 1), (1, 1)] {
+            assert_eq!(a[idx(i, j, p)].to_bits(), b[idx(i, j, p)].to_bits(), "({i},{j})");
+        }
+        assert_ne!(a[idx(0, 2, p)].to_bits(), b[idx(0, 2, p)].to_bits());
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn skipna_result_does_not_depend_on_thread_count() {
+        let (n, p) = (4_000, 120);
+        let mut x = lcg_data(n * p, 0.25);
+        poke_holes(&mut x, 20);
+
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            let mut out = vec![0.0; p * p];
+            pool.install(|| cov_matrix_skipna_out(&x, n, p, &mut out));
+            bits(&out)
+        };
+
+        let one = run(1);
+        assert_eq!(one, run(2));
+        assert_eq!(one, run(7));
+    }
+
+    proptest! {
+        /// Small matrices with arbitrary holes: symmetric, and in agreement
+        /// with the per-pair oracle (NaN pattern included).
+        #[test]
+        fn prop_skipna_matches_naive(
+            n in 1usize..90,
+            p in 1usize..9,
+            vals in proptest::collection::vec(-1e6f64..1e6, 90 * 9),
+            holes in proptest::collection::vec(0u8..12, 90 * 9),
+        ) {
+            let mut x = vals[..n * p].to_vec();
+            for (v, h) in x.iter_mut().zip(&holes) {
+                match h {
+                    0 => *v = f64::NAN,
+                    1 => *v = f64::INFINITY,
+                    _ => {}
+                }
+            }
+            let mut out = vec![0.0f64; p * p];
+            cov_matrix_skipna_out(&x, n, p, &mut out);
+
+            let want = naive_skipna(&x, n, p);
+            for i in 0..p {
+                for j in 0..p {
+                    let (g, w) = (out[idx(i, j, p)], want[idx(i, j, p)]);
+                    prop_assert_eq!(g.to_bits(), out[idx(j, i, p)].to_bits());
+                    prop_assert_eq!(g.is_nan(), w.is_nan(), "({}, {}): {} vs {}", i, j, g, w);
+                    if !w.is_nan() {
+                        // Absolute scale 1e12 = (value range)^2.
+                        prop_assert!((g - w).abs() <= 1e-10 * w.abs() + 1e-3, "({}, {}): {} vs {}", i, j, g, w);
+                    }
+                }
+            }
+        }
+    }
+
+    proptest! {
+        /// Any small finite matrix: symmetric, non-negative diagonal, and in
+        /// agreement with the naive oracle for all three dense kernels.
+        #[test]
+        fn prop_blocked_matches_naive(
+            n in 2usize..90,
+            p in 1usize..9,
+            vals in proptest::collection::vec(-1e6f64..1e6, 90 * 9),
+        ) {
+            let x = &vals[..n * p];
+            let mut out = vec![0.0f64; p * p];
+
+            cov_matrix_out(x, n, p, &mut out);
+            for i in 0..p {
+                prop_assert!(out[idx(i, i, p)] >= 0.0);
+                for j in 0..p {
+                    prop_assert_eq!(out[idx(i, j, p)].to_bits(), out[idx(j, i, p)].to_bits());
+                }
+            }
+            assert_close(&out, &naive_cross(x, n, p, true, (n - 1) as f64), p, 1e-11);
+
+            cov_matrix_bias_out(x, n, p, &mut out);
+            assert_close(&out, &naive_cross(x, n, p, true, n as f64), p, 1e-11);
+
+            cov_matrix_centered_out(x, n, p, &mut out);
+            assert_close(&out, &naive_cross(x, n, p, false, (n - 1) as f64), p, 1e-11);
+        }
+    }
 }

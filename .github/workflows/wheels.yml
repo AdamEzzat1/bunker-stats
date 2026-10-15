@@ -1,0 +1,309 @@
+# Multi-platform wheel builds + PyPI publish for bunker-stats-rs.
+#
+# Scaffolded with `maturin generate-ci github`, then hardened:
+#   * RUSTFLAGS is pinned empty workflow-wide: .cargo/config.toml sets
+#     `target-cpu=native` for local dev, which must never leak
+#     machine-specific instructions into distributed wheels.
+#   * Every natively-runnable build smoke-tests the INSTALLED wheel
+#     (all __all__ names resolve + flagship features run). The 0.2.x wheels
+#     shipped without the Python layer entirely; this gate makes that class
+#     of packaging bug impossible to release again.
+#   * Matrix trimmed to targets people actually install on. The sdist covers
+#     everything else via source builds.
+#
+# Publishing: push a git tag (e.g. `v0.3.1`) and the release job uploads to
+# PyPI via OIDC Trusted Publishing — no stored token; PyPI trusts this repo's
+# wheels.yml workflow directly. Regular pushes/PRs only build and smoke-test.
+name: wheels
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Portable binaries: override .cargo/config.toml's target-cpu=native.
+  RUSTFLAGS: ""
+
+jobs:
+  test:
+    name: tests (linux)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust unit + property tests
+        run: cargo test --lib --quiet
+      - name: Build and install (venv + maturin develop)
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin numpy pandas jinja2 matplotlib plotly scipy statsmodels arch hypothesis pytest pytest-benchmark psutil
+          maturin develop
+      # --strict-skips (tests/conftest.py) turns any skipped test into a
+      # failure and lists it. Every optional dependency is installed above, so
+      # a skip here means a test has silently stopped running: four whole
+      # files once skipped on every run because they imported a module name
+      # that no longer existed, and the build stayed green.
+      - name: Python test suite (core, no skips allowed)
+        run: |
+          source .venv/bin/activate
+          pytest tests -q --ignore=tests/advance --strict-skips
+
+  # pyproject.toml promises numpy>=1.22 and, for the notebook extra,
+  # pandas>=1.3, jinja2>=3.0, matplotlib>=3.4, plotly>=5.0. The job above
+  # installs the newest of everything, so nothing exercised those floors (and
+  # pandas 1.3 did break: Series.to_numpy(na_value=...) raises on a duplicate
+  # index there). This job pins the declared minimums on the oldest Python we
+  # ship wheels for. scipy and statsmodels are test-only references, pinned to
+  # releases that still support these floors. Skips are allowed here: some
+  # reference libraries have no release this old.
+  test-min:
+    name: tests (linux, minimum supported versions)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.9"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and install against the declared floors
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin "numpy==1.22.4" "pandas==1.3.5" "jinja2==3.0.3" "matplotlib==3.4.3" "plotly==5.0.0" "scipy==1.11.4" "statsmodels==0.13.5" hypothesis pytest pytest-benchmark psutil
+          maturin develop
+          python -c "import numpy, pandas, jinja2, matplotlib, plotly; print(numpy.__version__, pandas.__version__, jinja2.__version__, matplotlib.__version__, plotly.__version__)"
+      - name: Python test suite (core)
+        run: |
+          source .venv/bin/activate
+          pytest tests -q --ignore=tests/advance -rs
+
+  # The opt-in `gemm` feature is not in any wheel, so nothing above compiles or
+  # runs it. Its kernel is picked from the running CPU, hence both
+  # architectures: x86_64 exercises the FMA/AVX kernels, aarch64 the NEON one.
+  test-gemm:
+    name: tests (gemm feature, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust unit + property tests (gemm)
+        run: cargo test --lib --quiet --features gemm
+      - name: Rust matrix tests (gemm, no rayon)
+        run: "cargo test --lib --quiet --no-default-features --features gemm matrix::"
+      - name: Build and install with gemm (venv + maturin develop)
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin numpy scipy pytest
+          maturin develop --features gemm
+      - name: Python matrix tests (gemm)
+        run: |
+          source .venv/bin/activate
+          pytest tests/test_matrix.py -q
+
+  linux:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        platform:
+          - target: x86_64
+          - target: aarch64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist -i 3.9 -i 3.10 -i 3.11 -i 3.12 -i 3.13
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          manylinux: auto
+      - name: Smoke test installed wheel (native only)
+        if: matrix.platform.target == 'x86_64'
+        run: |
+          pip install numpy
+          pip install bunker-stats-rs --no-index --no-deps --find-links dist
+          python .github/wheel_smoke.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-linux-${{ matrix.platform.target }}
+          path: dist
+
+  musllinux:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        platform:
+          - target: x86_64
+          - target: aarch64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist -i 3.9 -i 3.10 -i 3.11 -i 3.12 -i 3.13
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          manylinux: musllinux_1_2
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-musllinux-${{ matrix.platform.target }}
+          path: dist
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      # Install every CPython we ship wheels for; the pinned -i list below
+      # builds one wheel per interpreter. (pyo3 0.22 supports <= 3.13, so we
+      # never use --find-interpreter: runners now carry 3.14.)
+      - uses: actions/setup-python@v6
+        with:
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x64
+          args: --release --out dist -i 3.9 -i 3.10 -i 3.11 -i 3.12 -i 3.13
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Smoke test installed wheel
+        shell: bash
+        run: |
+          pip install numpy
+          pip install bunker-stats-rs --no-index --no-deps --find-links dist
+          python .github/wheel_smoke.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-windows-x64
+          path: dist
+
+  macos:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: macos-15-intel
+            target: x86_64
+            interpreters: "-i 3.9 -i 3.10 -i 3.11 -i 3.12 -i 3.13"
+            pythons: |
+              3.9
+              3.10
+              3.11
+              3.12
+              3.13
+          - runner: macos-latest
+            target: aarch64
+            interpreters: "-i 3.10 -i 3.11 -i 3.12 -i 3.13"
+            pythons: |
+              3.10
+              3.11
+              3.12
+              3.13
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.platform.pythons }}
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist ${{ matrix.platform.interpreters }}
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Smoke test installed wheel
+        run: |
+          pip install numpy
+          pip install bunker-stats-rs --no-index --no-deps --find-links dist
+          python .github/wheel_smoke.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-macos-${{ matrix.platform.target }}
+          path: dist
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      # The 0.2.9 sdist CONTAINED the Python facade but installs built from it
+      # omitted the package entirely — the wheel smoke alone can't catch that
+      # class of bug, so the sdist path gets its own install-and-import gate
+      # (this compiles the crate from source, like a real `pip install` from
+      # the sdist does).
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Smoke test sdist install
+        run: |
+          pip install numpy
+          pip install --no-deps dist/*.tar.gz
+          python .github/wheel_smoke.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-sdist
+          path: dist
+
+  release:
+    name: Release to PyPI
+    runs-on: ubuntu-latest
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    needs: [test, test-min, linux, musllinux, windows, macos, sdist]
+    permissions:
+      id-token: write      # sign artifacts
+      contents: write      # upload to the GitHub release
+      attestations: write  # artifact attestation
+    steps:
+      - uses: actions/download-artifact@v7
+      - name: Generate artifact attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: 'wheels-*/*'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Publish to PyPI (trusted publishing)
+        # No token anywhere: uv exchanges the job's OIDC identity (id-token:
+        # write above) for a short-lived PyPI credential. Requires the GitHub
+        # publisher to be registered on the PyPI project (owner AdamEzzat1,
+        # repo bunker-stats, workflow wheels.yml).
+        run: uv publish 'wheels-*/*'
+      - name: Upload wheels to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: wheels-*/*
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}

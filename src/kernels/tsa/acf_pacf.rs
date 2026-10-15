@@ -22,8 +22,17 @@ pub fn acf_raw(x: &[f64], max_lag: usize) -> Vec<f64> {
     }
     var /= n as f64;
     
-    if var <= 0.0 {
-        return vec![1.0; max_lag + 1];
+    // Constant input must be detected exactly (all elements equal): the mean
+    // of n identical values carries round-off, so `var` computed above can be
+    // a tiny positive number whose autocovariances then cancel into a fake
+    // near-unity ACF. Zero-variance (constant) input: the lag-0
+    // autocorrelation is 1 by convention, but every lag >= 1 is 0/0 and
+    // therefore undefined. Matches statsmodels.tsa.stattools.acf.
+    let is_constant = x.iter().all(|&v| v == x[0]);
+    if var <= 0.0 || is_constant {
+        let mut out = vec![f64::NAN; max_lag + 1];
+        out[0] = 1.0;
+        return out;
     }
 
     let mut acf = vec![0.0_f64; max_lag + 1];
@@ -55,8 +64,11 @@ pub fn acf<'py>(
     if n == 0 {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
-    let nlags = nlags.min(n - 1);
-    let vals = acf_raw(x, nlags);
+    let vals = py.allow_threads(|| {
+        let nlags = nlags.min(n - 1);
+        let vals = acf_raw(x, nlags);
+        vals
+    });
     Ok(PyArray1::from_vec_bound(py, vals))
 }
 
@@ -76,8 +88,11 @@ pub fn pacf<'py>(
     if n == 0 {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
-    let nlags = nlags.min(n - 1);
-    let vals = pacf_levinson_durbin(x, nlags);
+    let vals = py.allow_threads(|| {
+        let nlags = nlags.min(n - 1);
+        let vals = pacf_levinson_durbin(x, nlags);
+        vals
+    });
     Ok(PyArray1::from_vec_bound(py, vals))
 }
 
@@ -101,7 +116,14 @@ fn pacf_levinson_durbin(x: &[f64], max_lag: usize) -> Vec<f64> {
     let mut pacf = vec![0.0_f64; max_lag + 1];
     pacf[0] = 1.0;
     
-    if max_lag == 0 || r[1].is_nan() {
+    if max_lag == 0 {
+        return pacf;
+    }
+    if r[1].is_nan() {
+        // Constant input: partial autocorrelations at lags >= 1 are undefined.
+        for v in pacf.iter_mut().skip(1) {
+            *v = f64::NAN;
+        }
         return pacf;
     }
     
@@ -187,30 +209,33 @@ pub fn pacf_yw<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![1.0]));
     }
 
-    let r = acf_raw(x, max_lag);
-    let mut pacf = vec![0.0_f64; max_lag + 1];
-    pacf[0] = 1.0;
+    let pacf = py.allow_threads(|| {
+        let r = acf_raw(x, max_lag);
+        let mut pacf = vec![0.0_f64; max_lag + 1];
+        pacf[0] = 1.0;
 
-    for k in 1..=max_lag {
-        let mut r_vec = DVector::zeros(k);
-        for i in 0..k {
-            r_vec[i] = r[i + 1];
-        }
+        for k in 1..=max_lag {
+            let mut r_vec = DVector::zeros(k);
+            for i in 0..k {
+                r_vec[i] = r[i + 1];
+            }
 
-        let mut r_mat = DMatrix::zeros(k, k);
-        for i in 0..k {
-            for j in 0..k {
-                let idx = (i as isize - j as isize).unsigned_abs();
-                r_mat[(i, j)] = r[idx];
+            let mut r_mat = DMatrix::zeros(k, k);
+            for i in 0..k {
+                for j in 0..k {
+                    let idx = (i as isize - j as isize).unsigned_abs();
+                    r_mat[(i, j)] = r[idx];
+                }
+            }
+
+            if let Some(phi) = r_mat.lu().solve(&r_vec) {
+                pacf[k] = phi[k - 1];
+            } else {
+                pacf[k] = f64::NAN;
             }
         }
-
-        if let Some(phi) = r_mat.lu().solve(&r_vec) {
-            pacf[k] = phi[k - 1];
-        } else {
-            pacf[k] = f64::NAN;
-        }
-    }
+        pacf
+    });
 
     Ok(PyArray1::from_vec_bound(py, pacf))
 }
@@ -234,18 +259,21 @@ pub fn acovf<'py>(
     if n == 0 {
         return Ok(PyArray1::from_vec_bound(py, vec![]));
     }
-    let nlags = nlags.min(n - 1);
+    let acovf = py.allow_threads(|| {
+        let nlags = nlags.min(n - 1);
     
-    let mean = x.iter().sum::<f64>() / (n as f64);
+        let mean = x.iter().sum::<f64>() / (n as f64);
     
-    let mut acovf = vec![0.0_f64; nlags + 1];
-    for k in 0..=nlags {
-        let mut sum = 0.0;
-        for t in k..n {
-            sum += (x[t] - mean) * (x[t - k] - mean);
+        let mut acovf = vec![0.0_f64; nlags + 1];
+        for k in 0..=nlags {
+            let mut sum = 0.0;
+            for t in k..n {
+                sum += (x[t] - mean) * (x[t - k] - mean);
+            }
+            acovf[k] = sum / (n as f64);
         }
-        acovf[k] = sum / (n as f64);
-    }
+        acovf
+    });
     
     Ok(PyArray1::from_vec_bound(py, acovf))
 }
@@ -274,35 +302,38 @@ pub fn acf_with_ci<'py>(
             PyArray1::from_vec_bound(py, vec![]),
         ));
     }
-    let nlags = nlags.min(n - 1);
+    let (acf_vals, lower, upper) = py.allow_threads(|| {
+        let nlags = nlags.min(n - 1);
     
-    let acf_vals = acf_raw(x, nlags);
+        let acf_vals = acf_raw(x, nlags);
     
-    // Critical value for normal distribution
-    let z = if alpha <= 0.01 {
-        2.576
-    } else if alpha <= 0.05 {
-        1.96
-    } else {
-        1.645
-    };
+        // Critical value for normal distribution
+        let z = if alpha <= 0.01 {
+            2.576
+        } else if alpha <= 0.05 {
+            1.96
+        } else {
+            1.645
+        };
     
-    let n_f = n as f64;
-    let mut lower = Vec::with_capacity(nlags + 1);
-    let mut upper = Vec::with_capacity(nlags + 1);
+        let n_f = n as f64;
+        let mut lower = Vec::with_capacity(nlags + 1);
+        let mut upper = Vec::with_capacity(nlags + 1);
     
-    lower.push(1.0);
-    upper.push(1.0);
+        lower.push(1.0);
+        upper.push(1.0);
     
-    for k in 1..=nlags {
-        let mut var_sum = 1.0;
-        for j in 1..k {
-            var_sum += 2.0 * acf_vals[j] * acf_vals[j];
+        for k in 1..=nlags {
+            let mut var_sum = 1.0;
+            for j in 1..k {
+                var_sum += 2.0 * acf_vals[j] * acf_vals[j];
+            }
+            let se = (var_sum / n_f).sqrt();
+            lower.push(acf_vals[k] - z * se);
+            upper.push(acf_vals[k] + z * se);
         }
-        let se = (var_sum / n_f).sqrt();
-        lower.push(acf_vals[k] - z * se);
-        upper.push(acf_vals[k] + z * se);
-    }
+        (acf_vals, lower, upper)
+    });
     
     Ok((
         PyArray1::from_vec_bound(py, acf_vals),
@@ -350,32 +381,35 @@ pub fn ccf<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![f64::NAN; 2 * nlags + 1]));
     }
     
-    let mut ccf = Vec::with_capacity(2 * nlags + 1);
+    let ccf = py.allow_threads(|| {
+        let mut ccf = Vec::with_capacity(2 * nlags + 1);
     
-    // Negative lags
-    for k in (1..=nlags).rev() {
+        // Negative lags
+        for k in (1..=nlags).rev() {
+            let mut sum = 0.0;
+            for t in 0..(n - k) {
+                sum += (x[t] - mean_x) * (y[t + k] - mean_y);
+            }
+            ccf.push(sum / (n as f64 * std_x * std_y));
+        }
+    
+        // Zero lag
         let mut sum = 0.0;
-        for t in 0..(n - k) {
-            sum += (x[t] - mean_x) * (y[t + k] - mean_y);
+        for t in 0..n {
+            sum += (x[t] - mean_x) * (y[t] - mean_y);
         }
         ccf.push(sum / (n as f64 * std_x * std_y));
-    }
     
-    // Zero lag
-    let mut sum = 0.0;
-    for t in 0..n {
-        sum += (x[t] - mean_x) * (y[t] - mean_y);
-    }
-    ccf.push(sum / (n as f64 * std_x * std_y));
-    
-    // Positive lags
-    for k in 1..=nlags {
-        let mut sum = 0.0;
-        for t in k..n {
-            sum += (x[t] - mean_x) * (y[t - k] - mean_y);
+        // Positive lags
+        for k in 1..=nlags {
+            let mut sum = 0.0;
+            for t in k..n {
+                sum += (x[t] - mean_x) * (y[t - k] - mean_y);
+            }
+            ccf.push(sum / (n as f64 * std_x * std_y));
         }
-        ccf.push(sum / (n as f64 * std_x * std_y));
-    }
+        ccf
+    });
     
     Ok(PyArray1::from_vec_bound(py, ccf))
 }
@@ -405,41 +439,48 @@ pub fn pacf_innovations<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![1.0]));
     }
 
-    let r = acf_raw(x, max_lag);
+    let pacf = py.allow_threads(|| {
+        let r = acf_raw(x, max_lag);
     
-    let mut pacf = vec![0.0_f64; max_lag + 1];
-    pacf[0] = 1.0;
+        let mut pacf = vec![0.0_f64; max_lag + 1];
+        pacf[0] = 1.0;
     
-    let mut v = vec![1.0_f64; max_lag + 1];
-    let mut theta = vec![vec![0.0; max_lag]; max_lag];
+        let mut v = vec![1.0_f64; max_lag + 1];
+        let mut theta = vec![vec![0.0; max_lag]; max_lag];
     
-    for n_iter in 1..=max_lag {
-        // Compute theta coefficients
-        for k in 0..n_iter {
-            let mut sum = r[n_iter - k];
-            for j in 0..k {
-                sum -= theta[k][j] * theta[n_iter - 1][j] * v[j];
+        for n_iter in 1..=max_lag {
+            // Compute theta coefficients
+            for k in 0..n_iter {
+                let mut sum = r[n_iter - k];
+                for j in 0..k {
+                    sum -= theta[k][j] * theta[n_iter - 1][j] * v[j];
+                }
+                theta[n_iter - 1][k] = sum / v[k];
             }
-            theta[n_iter - 1][k] = sum / v[k];
-        }
         
-        // Update prediction error variance
-        let mut var_update = r[0];
-        for k in 0..n_iter {
-            var_update -= theta[n_iter - 1][k] * theta[n_iter - 1][k] * v[k];
-        }
-        v[n_iter] = var_update;
-        
-        // PACF is the last theta coefficient
-        pacf[n_iter] = theta[n_iter - 1][n_iter - 1];
-        
-        if v[n_iter] <= 0.0 || !v[n_iter].is_finite() {
-            for i in (n_iter + 1)..=max_lag {
-                pacf[i] = f64::NAN;
+            // Update prediction error variance
+            let mut var_update = r[0];
+            for k in 0..n_iter {
+                var_update -= theta[n_iter - 1][k] * theta[n_iter - 1][k] * v[k];
             }
-            break;
+            v[n_iter] = var_update;
+        
+            // PACF is the last theta coefficient. A partial autocorrelation is
+            // bounded by 1 in magnitude; values outside [-1, 1] signal numerical
+            // breakdown of the innovations recursion, so report NaN rather than
+            // an impossible coefficient.
+            let coef = theta[n_iter - 1][n_iter - 1];
+            pacf[n_iter] = if coef.abs() > 1.0 { f64::NAN } else { coef };
+
+            if v[n_iter] <= 0.0 || !v[n_iter].is_finite() {
+                for i in (n_iter + 1)..=max_lag {
+                    pacf[i] = f64::NAN;
+                }
+                break;
+            }
         }
-    }
+        pacf
+    });
     
     Ok(PyArray1::from_vec_bound(py, pacf))
 }
@@ -465,61 +506,73 @@ pub fn pacf_burg<'py>(
         return Ok(PyArray1::from_vec_bound(py, vec![1.0]));
     }
 
-    // Demean
-    let mean = x.iter().sum::<f64>() / (n as f64);
-    let x_centered: Vec<f64> = x.iter().map(|&v| v - mean).collect();
-    
-    let mut pacf = vec![0.0_f64; max_lag + 1];
-    pacf[0] = 1.0;
-    
-    // Initialize forward and backward prediction errors
-    let mut ef = x_centered.clone();
-    let mut eb = x_centered.clone();
-    let mut a = vec![1.0];
-    
-    for k in 1..=max_lag {
-        // Calculate reflection coefficient
-        let mut num = 0.0;
-        let mut denom = 0.0;
-        
-        for i in k..n {
-            num += ef[i] * eb[i - 1];
-            denom += ef[i] * ef[i] + eb[i - 1] * eb[i - 1];
-        }
-        
-        if denom == 0.0 || !denom.is_finite() {
-            for i in k..=max_lag {
-                pacf[i] = f64::NAN;
-            }
-            break;
-        }
-        
-        // Burg's reflection coefficient formula
-        // Note: Sign convention matches Levinson-Durbin and other PACF methods
-        let rc = 2.0 * num / denom;
-        pacf[k] = rc;
-        
-        // Update AR coefficients
-        let mut a_new = vec![0.0; k + 1];
-        a_new[0] = 1.0;
-        for i in 1..k {
-            a_new[i] = a[i] + rc * a[k - i];
-        }
-        a_new[k] = rc;
-        a = a_new;
-        
-        // Update prediction errors
-        let mut ef_new = vec![0.0; n];
-        let mut eb_new = vec![0.0; n];
-        
-        for i in k..n {
-            ef_new[i] = ef[i] + rc * eb[i - 1];
-            eb_new[i] = eb[i - 1] + rc * ef[i];
-        }
-        
-        ef = ef_new;
-        eb = eb_new;
+    // Constant input: partial autocorrelations at lags >= 1 are undefined
+    // (see acf_raw). Exact all-equal check, since demeaned residues of a
+    // constant series are round-off noise, not signal.
+    if x.iter().all(|&v| v == x[0]) {
+        let mut pacf = vec![f64::NAN; max_lag + 1];
+        pacf[0] = 1.0;
+        return Ok(PyArray1::from_vec_bound(py, pacf));
     }
+
+    // Demean
+    let pacf = py.allow_threads(|| {
+        let mean = x.iter().sum::<f64>() / (n as f64);
+        let x_centered: Vec<f64> = x.iter().map(|&v| v - mean).collect();
+
+        let mut pacf = vec![0.0_f64; max_lag + 1];
+        pacf[0] = 1.0;
+    
+        // Initialize forward and backward prediction errors
+        let mut ef = x_centered.clone();
+        let mut eb = x_centered.clone();
+        let mut a = vec![1.0];
+    
+        for k in 1..=max_lag {
+            // Calculate reflection coefficient
+            let mut num = 0.0;
+            let mut denom = 0.0;
+        
+            for i in k..n {
+                num += ef[i] * eb[i - 1];
+                denom += ef[i] * ef[i] + eb[i - 1] * eb[i - 1];
+            }
+        
+            if denom == 0.0 || !denom.is_finite() {
+                for i in k..=max_lag {
+                    pacf[i] = f64::NAN;
+                }
+                break;
+            }
+        
+            // Burg's reflection coefficient formula
+            // Note: Sign convention matches Levinson-Durbin and other PACF methods
+            let rc = 2.0 * num / denom;
+            pacf[k] = rc;
+        
+            // Update AR coefficients
+            let mut a_new = vec![0.0; k + 1];
+            a_new[0] = 1.0;
+            for i in 1..k {
+                a_new[i] = a[i] + rc * a[k - i];
+            }
+            a_new[k] = rc;
+            a = a_new;
+        
+            // Update prediction errors
+            let mut ef_new = vec![0.0; n];
+            let mut eb_new = vec![0.0; n];
+        
+            for i in k..n {
+                ef_new[i] = ef[i] + rc * eb[i - 1];
+                eb_new[i] = eb[i - 1] + rc * ef[i];
+            }
+        
+            ef = ef_new;
+            eb = eb_new;
+        }
+        pacf
+    });
     
     Ok(PyArray1::from_vec_bound(py, pacf))
 }

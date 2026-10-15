@@ -21,6 +21,29 @@ extension names.
 
 ---
 
+
+## Using the Python facade
+
+New code should reach these kernels through the `bunker_stats` facade, which
+exposes clean names with keyword arguments. The raw `bunker_stats_rs` names
+documented below remain available and stable; the facade adds ergonomics on
+top of the same kernels:
+
+```python
+import bunker_stats as bs
+
+bs.cov_matrix(X)                   # numpy.cov(rowvar=False, ddof=1)
+bs.corr_matrix(X, skipna=True)     # pairwise-complete variant
+
+import bunker_stats.pandas as bsp  # optional pandas layer
+C = bsp.corr_df(df)                # labeled DataFrame result
+```
+
+Where a statistic has strict and skip-NaN variants, the facade exposes ONE
+name with a `skipna=` keyword; `skipna=True` dispatches to the skip-NaN kernel
+documented below (the twin kernels stay separate in Rust, so there is no
+branch inside the hot loop).
+
 ## Function summary
 
 | Function | Input shape | Output shape | Missing-data policy |
@@ -254,24 +277,25 @@ assert np.allclose(R, np.corrcoef(X, rowvar=False))
 
 ### `corr_matrix_skipna_np(a)`
 
-NaN-aware correlation built from the pairwise-complete covariance.
+NaN-aware, pairwise-complete correlation.
 
 ```python
 R = rs.corr_matrix_skipna_np(Xn)
 ```
 
-- **Semantics (verified):** equals `cov_matrix_skipna_np(a)` normalized by
-  the square roots of its own diagonal:
-  `R[i, j] = S[i, j] / sqrt(S[i, i] * S[j, j])`, where `S` is the
-  pairwise-complete covariance. Each column's standard deviation is
-  estimated once, from all rows where that column is finite — **not** from
-  the pairwise subset.
-- **Difference from pandas:** `pandas.DataFrame.corr()` re-standardizes each
-  pair on its own complete subset, so results differ when NaNs are present
-  (small differences on lightly-missing data; the two agree exactly on clean
-  data, where both equal `np.corrcoef`). Because the normalizer is not the
-  per-pair standard deviation, individual entries can in principle fall
-  slightly outside `[-1, 1]` under heavy, uneven missingness.
+- **Semantics (verified):** `R[i, j]` is the Pearson correlation of the rows
+  where both column `i` and column `j` are finite; the covariance and both
+  standard deviations come from that same set of rows. This equals
+  `pandas.DataFrame.corr()` and the two-column `corr_skipna`, and every entry
+  is in `[-1, 1]`.
+- **Changed after 0.3.1.** It used to be `cov_matrix_skipna_np(a)` normalized
+  by the square roots of its own diagonal, i.e. each column's standard
+  deviation was taken once over that column's own rows. That is not the
+  correlation of any one set of rows when two columns are missing in
+  different places, and could leave `[-1, 1]`. Results change only for pairs
+  that involve a column with gaps; gap-free data is unaffected.
+- **Cost:** gap-free pairs use the blocked covariance kernel; each pair that
+  involves a column with gaps takes one extra O(n) pass.
 - **NaN handling:** entries with fewer than 2 complete pairs are NaN;
   all-NaN and constant columns produce NaN rows/columns. NaN and ±inf both
   count as missing.

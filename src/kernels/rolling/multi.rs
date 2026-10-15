@@ -38,8 +38,13 @@ struct RollingState {
     // Translation offset (the first finite value added). Variance is
     // shift-invariant, so accumulating sum/sumsq on `x - offset` avoids
     // catastrophic cancellation in `sumsq - n*mean^2` for large-offset data.
-    // mean/min/max add the offset back on read; variance/std need no adjustment.
+    // Only the variance uses it; min/max are tracked on the raw values.
     offset: f64,
+    // Raw (unshifted) Kahan sum, used only for the mean. Deriving the mean from
+    // the shifted sum as `sum/n + offset` loses precision when |offset| is huge
+    // relative to the true mean (e.g. [1e10, 1, -1e10, 1, 1] -> 0.6); the raw
+    // sum stays small under Kahan compensation and gives the exact mean.
+    sum_raw: KahanState,
 }
 
 impl RollingState {
@@ -52,6 +57,7 @@ impl RollingState {
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             offset: 0.0,
+            sum_raw: KahanState::default(),
         }
     }
     
@@ -75,11 +81,14 @@ impl RollingState {
         self.valid_count += 1;
         self.sum.add(xs);
         self.sumsq.add(xs * xs);
-        if xs < self.min {
-            self.min = xs;
+        self.sum_raw.add(x);
+        // min/max on the RAW value: `(x - offset) + offset` is not exact (with
+        // offset 1e16, a window minimum of 1.0 came back as 0.0).
+        if x < self.min {
+            self.min = x;
         }
-        if xs > self.max {
-            self.max = xs;
+        if x > self.max {
+            self.max = x;
         }
     }
     
@@ -89,7 +98,8 @@ impl RollingState {
         if !self.is_valid(min_periods, nan_policy) {
             return f64::NAN;
         }
-        self.sum.value() / self.valid_count as f64 + self.offset
+        // Raw sum keeps the mean exact regardless of the offset magnitude.
+        self.sum_raw.value() / self.valid_count as f64
     }
     
     /// Compute sample variance (ddof=1).
@@ -126,7 +136,7 @@ impl RollingState {
         if !self.is_valid(min_periods, nan_policy) {
             f64::NAN
         } else {
-            self.min + self.offset
+            self.min
         }
     }
     
@@ -136,7 +146,7 @@ impl RollingState {
         if !self.is_valid(min_periods, nan_policy) {
             f64::NAN
         } else {
-            self.max + self.offset
+            self.max
         }
     }
     
@@ -191,8 +201,10 @@ pub fn rolling_multi_into(
     let window = config.window;
     let min_periods = config.effective_min_periods();
     
-    // Validate
-    if window == 0 || window > n {
+    // Validate. A window longer than the data yields no trailing output, but
+    // centered output still has length n (every window is truncated);
+    // returning early there left the zero-initialised buffers as the result.
+    if window == 0 || (window > n && config.alignment == Alignment::Trailing) {
         return;
     }
     
@@ -288,10 +300,12 @@ fn rolling_multi_trailing_propagate(
     
     let mut sum = KahanState::default();
     let mut sumsq = KahanState::default();
+    let mut sum_raw = KahanState::default();
     let mut min_val = f64::INFINITY;
     let mut max_val = f64::NEG_INFINITY;
     let mut has_nan = false;
-    
+    let mut n_nan = 0usize;
+
     // Per-window translation offset for numerical stability of the variance
     // (see write_stats). NaN windows output all-NaN, so the offset is only
     // consulted for finite windows where xs[start] is finite.
@@ -301,21 +315,23 @@ fn rolling_multi_trailing_propagate(
     for &x in &xs[..window] {
         if x.is_nan() {
             has_nan = true;
+            n_nan += 1;
         }
         let xv = x - off0;
         sum.add(xv);
         sumsq.add(xv * xv);
-        if xv < min_val {
-            min_val = xv;
+        sum_raw.add(x);
+        if x < min_val {
+            min_val = x;
         }
-        if xv > max_val {
-            max_val = xv;
+        if x > max_val {
+            max_val = x;
         }
     }
 
     // First output
     write_stats(
-        0, &sum, &sumsq, window, min_val, max_val, has_nan, off0, mask,
+        0, &sum, &sumsq, &sum_raw, window, min_val, max_val, has_nan, n_nan, mask,
         out_mean, out_std, out_var, out_count, out_min, out_max,
     );
 
@@ -324,28 +340,32 @@ fn rolling_multi_trailing_propagate(
         // Recalculate sum, sumsq, min, max, and NaN check for current window
         sum = KahanState::default();
         sumsq = KahanState::default();
+        sum_raw = KahanState::default();
         min_val = f64::INFINITY;
         max_val = f64::NEG_INFINITY;
         has_nan = false;
+        n_nan = 0;
 
         let offk = if xs[k].is_finite() { xs[k] } else { 0.0 };
         for &x in &xs[k..k + window] {
             if x.is_nan() {
                 has_nan = true;
+                n_nan += 1;
             }
             let xv = x - offk;
             sum.add(xv);
             sumsq.add(xv * xv);
-            if xv < min_val {
-                min_val = xv;
+            sum_raw.add(x);
+            if x < min_val {
+                min_val = x;
             }
-            if xv > max_val {
-                max_val = xv;
+            if x > max_val {
+                max_val = x;
             }
         }
 
         write_stats(
-            k, &sum, &sumsq, window, min_val, max_val, has_nan, offk, mask,
+            k, &sum, &sumsq, &sum_raw, window, min_val, max_val, has_nan, n_nan, mask,
             out_mean, out_std, out_var, out_count, out_min, out_max,
         );
     }
@@ -412,13 +432,11 @@ fn rolling_multi_centered(
     out_max: &mut [f64],
 ) {
     let n = xs.len();
-    let half = window / 2;
     let min_periods = config.effective_min_periods();
     let nan_policy = config.nan_policy;
-    
+
     for k in 0..n {
-        let start = k.saturating_sub(half);
-        let end = (k + half + 1).min(n);
+        let (start, end) = super::bounds::centered_range(k, n, window);
         let window_slice = &xs[start..end];
         
         let mut state = RollingState::new();
@@ -466,11 +484,12 @@ fn write_stats(
     k: usize,
     sum: &KahanState,
     sumsq: &KahanState,
+    sum_raw: &KahanState,
     window: usize,
     min_val: f64,
     max_val: f64,
     has_nan: bool,
-    offset: f64,
+    n_nan: usize,
     mask: StatsMask,
     out_mean: &mut [f64],
     out_std: &mut [f64],
@@ -491,7 +510,10 @@ fn write_stats(
             out_var[k] = f64::NAN;
         }
         if mask.has_count() {
-            out_count[k] = f64::NAN;
+            // `count` is the number of valid values in the window under every
+            // policy and alignment. It is what explains a NaN in the other
+            // statistics, so it is never NaN itself.
+            out_count[k] = (window - n_nan) as f64;
         }
         if mask.has_min() {
             out_min[k] = f64::NAN;
@@ -501,17 +523,23 @@ fn write_stats(
         }
     } else {
         let n = window as f64;
-        // sum/sumsq/min_val/max_val were accumulated on values shifted by
-        // `offset` (variance is shift-invariant). The shifted mean feeds the
-        // variance formula; add the offset back for the reported mean/min/max.
+        // sum/sumsq were accumulated on values shifted by the window offset
+        // (variance is shift-invariant); min_val/max_val are raw values.
         let mean_shifted = sum.value() / n;
 
         if mask.has_mean() {
-            out_mean[k] = mean_shifted + offset;
+            // Mean from the raw sum (exact at any offset); the shifted mean is
+            // only used for the variance formula below.
+            out_mean[k] = sum_raw.value() / n;
         }
         if mask.has_var() || mask.has_std() {
-            let var = (sumsq.value() - n * mean_shifted * mean_shifted) / (n - 1.0);
-            let var = var.max(0.0);
+            // A one-point window has no sample variance. `0/0` is NaN, but the
+            // clamp below would turn it into 0.0, so decide explicitly.
+            let var = if window < 2 {
+                f64::NAN
+            } else {
+                ((sumsq.value() - n * mean_shifted * mean_shifted) / (n - 1.0)).max(0.0)
+            };
             if mask.has_var() {
                 out_var[k] = var;
             }
@@ -523,10 +551,10 @@ fn write_stats(
             out_count[k] = n;
         }
         if mask.has_min() {
-            out_min[k] = min_val + offset;
+            out_min[k] = min_val;
         }
         if mask.has_max() {
-            out_max[k] = max_val + offset;
+            out_max[k] = max_val;
         }
     }
 }

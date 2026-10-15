@@ -23,6 +23,7 @@ pub(super) fn variance(x: &[f64]) -> f64 {
     ss / ((n - 1) as f64)
 }
 
+pub(crate) mod ols;
 pub mod stationarity;
 pub mod diagnostics;
 pub mod acf_pacf;
