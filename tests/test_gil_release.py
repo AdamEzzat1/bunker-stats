@@ -45,6 +45,26 @@ LONG_CALLS = [
 ]
 
 
+def _sleep_resolution(tick=0.002, n=25):
+    """Longest observed gap between wake-ups of an idle ticking loop.
+
+    On Windows the default timer granularity makes ``time.sleep(0.002)`` wake
+    only every ~15 ms, so a stall shorter than this is indistinguishable from
+    ordinary scheduling.
+    """
+    gaps = []
+    last = time.perf_counter()
+    for _ in range(n):
+        time.sleep(tick)
+        now = time.perf_counter()
+        gaps.append(now - last)
+        last = now
+    return max(gaps)
+
+
+_SLEEP_RES = _sleep_resolution()
+
+
 def _main_thread_stall(call, tick=0.002, repeats=5):
     """Return (longest main-thread stall, call duration) while `call` runs in a worker.
 
@@ -84,11 +104,18 @@ def test_main_thread_keeps_running_during_a_long_call(label, call):
     if not hasattr(bsr, label):
         pytest.skip(f"{label} not exported")
     stall, duration = _main_thread_stall(call)
-    if duration < 0.02:
-        pytest.skip(f"{label} finished in {duration * 1e3:.1f} ms; too fast to observe")
+    # The call must be several timer ticks long, or a single granularity-sized
+    # gap already exceeds any fraction of the duration we could assert on.
+    floor = max(0.02, 4 * _SLEEP_RES)
+    if duration < floor:
+        pytest.skip(
+            f"{label} finished in {duration * 1e3:.1f} ms; too fast to observe "
+            f"(sleep resolution {_SLEEP_RES * 1e3:.1f} ms)"
+        )
     # With the GIL held the stall would be ~= duration. Allow generous
-    # scheduling slack: the kernels may be using every core.
-    assert stall < 0.5 * duration, (
+    # scheduling slack: the kernels may be using every core, and one stall of
+    # timer-resolution size is expected even when the GIL is free.
+    assert stall < max(0.5 * duration, 2 * _SLEEP_RES), (
         f"{label}: main thread stalled {stall * 1e3:.0f} ms of a {duration * 1e3:.0f} ms call"
     )
 
